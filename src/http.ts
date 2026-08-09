@@ -85,7 +85,7 @@ export function createBridgeMediaServer(config: AppConfig) {
         return sendJson(res, 200, { ok: true });
       }
 
-      if (req.method === 'GET' && url.pathname === '/twiml/translated-call') {
+      if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/twiml/translated-call') {
         const callId = url.searchParams.get('callId') ?? '';
         const session = registry.get(callId);
         if (!session) {

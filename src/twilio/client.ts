@@ -18,6 +18,7 @@ export async function originateTranslatedCall(config: AppConfig, session: CallSe
     to: session.data.to,
     from: config.TWILIO_PHONE_NUMBER,
     url: twimlUrl.toString(),
+    method: 'GET',
     statusCallback: new URL('/twilio/status', config.PUBLIC_BASE_URL).toString(),
     statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
     statusCallbackMethod: 'POST'
