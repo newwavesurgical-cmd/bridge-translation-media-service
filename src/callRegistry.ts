@@ -118,6 +118,7 @@ export class CallSession {
   bindApp(ws: WebSocket): void {
     this.appWs?.close();
     this.appWs = ws;
+    console.log(`[call:${this.callId}] app websocket connected`);
     this.touch();
     this.ensureTranslationSessions();
     this.sendStatus();
@@ -126,6 +127,7 @@ export class CallSession {
     ws.on('close', () => {
       if (this.appWs === ws) {
         this.appWs = undefined;
+        console.log(`[call:${this.callId}] app websocket closed`);
         this.sendStatus();
       }
     });
@@ -137,6 +139,7 @@ export class CallSession {
     this.record.twilioStreamSid = startMessage.start.streamSid;
     this.record.callSid = startMessage.start.callSid;
     this.record.state = this.appWs ? 'live' : 'twilio-connected';
+    console.log(`[call:${this.callId}] twilio media stream started ${this.record.twilioStreamSid}`);
     this.touch();
     this.ensureTranslationSessions();
     this.sendStatus();
@@ -146,6 +149,7 @@ export class CallSession {
       if (this.twilioWs === ws) {
         this.twilioWs = undefined;
         this.record.state = this.appWs ? 'created' : 'ended';
+        console.log(`[call:${this.callId}] twilio media stream closed`);
         this.sendStatus();
       }
     });
@@ -161,11 +165,11 @@ export class CallSession {
     }
 
     if (message.event === 'connected') {
-      return true;
+      return false;
     }
 
     if (message.event !== 'start') {
-      return true;
+      return false;
     }
 
     const params = message.start.customParameters ?? {};
@@ -216,6 +220,7 @@ export class CallSession {
       twilioStreamSid: this.record.twilioStreamSid ?? null,
       sessionA: this.ownerToRemote?.status ?? 'idle',
       sessionB: this.remoteToOwner?.status ?? 'idle',
+      error: this.record.error ?? null,
       transcriptDeltaCount: this.record.transcripts.length,
       lastActivityAt: this.record.lastActivityAt ?? null
     };
@@ -358,6 +363,7 @@ export class CallSession {
   private fail(error: Error): void {
     this.record.state = 'error';
     this.record.error = error.message;
+    console.error(`[call:${this.callId}] ${error.message}`);
     this.sendApp({ type: 'error', message: error.message });
     this.sendStatus();
   }
