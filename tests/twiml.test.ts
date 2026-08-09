@@ -34,6 +34,7 @@ describe('translated call TwiML', () => {
     expect(xml).toContain('name="streamToken"');
     expect(xml).toContain('name="userLanguage" value="English"');
     expect(xml).toContain('name="remoteLanguage" value="Spanish"');
-    expect(xml).toContain('This call is using live translation');
+    expect(xml).toContain('language="es-ES"');
+    expect(xml).toContain('Esta llamada usa traduccion en vivo');
   });
 });

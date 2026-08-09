@@ -21,7 +21,7 @@ export function buildTranslatedCallTwiMl(options: BuildTwiMlOptions): string {
   if (options.announceTranslationAtStart) {
     response.say(
       { language: twilioSayLanguage(options.remoteLanguage) as 'es-ES' },
-      'Hello. This call is using live translation. Please speak normally.'
+      translationIntroText(options.remoteLanguage)
     );
   }
 
@@ -60,4 +60,23 @@ function twilioSayLanguage(language: string): string {
     ko: 'ko-KR'
   };
   return map[normalized] ?? 'en-US';
+}
+
+function translationIntroText(language: string): string {
+  const normalized = language.toLowerCase();
+  const map: Record<string, string> = {
+    spanish: 'Hola. Esta llamada usa traduccion en vivo. Por favor, hable normalmente.',
+    es: 'Hola. Esta llamada usa traduccion en vivo. Por favor, hable normalmente.',
+    french: 'Bonjour. Cet appel utilise la traduction en direct. Veuillez parler normalement.',
+    fr: 'Bonjour. Cet appel utilise la traduction en direct. Veuillez parler normalement.',
+    german: 'Hallo. Dieser Anruf verwendet Live-Uebersetzung. Bitte sprechen Sie normal.',
+    de: 'Hallo. Dieser Anruf verwendet Live-Uebersetzung. Bitte sprechen Sie normal.',
+    italian: 'Ciao. Questa chiamata usa la traduzione in tempo reale. Per favore, parli normalmente.',
+    it: 'Ciao. Questa chiamata usa la traduzione in tempo reale. Per favore, parli normalmente.',
+    portuguese: 'Ola. Esta chamada usa traducao ao vivo. Por favor, fale normalmente.',
+    pt: 'Ola. Esta chamada usa traducao ao vivo. Por favor, fale normalmente.',
+    english: 'Hello. This call is using live translation. Please speak normally.',
+    en: 'Hello. This call is using live translation. Please speak normally.'
+  };
+  return map[normalized] ?? 'Hello. This call is using live translation. Please speak normally.';
 }
