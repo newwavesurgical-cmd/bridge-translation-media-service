@@ -6,11 +6,11 @@ export async function originateTranslatedCall(config: AppConfig, session: CallSe
   if (config.DRY_RUN_CALLS) {
     return null;
   }
-  if (!config.PUBLIC_BASE_URL || !config.TWILIO_ACCOUNT_SID || !config.TWILIO_AUTH_TOKEN || !config.TWILIO_PHONE_NUMBER) {
+  if (!config.PUBLIC_BASE_URL || !config.TWILIO_ACCOUNT_SID || !twilioAuthConfigured(config) || !config.TWILIO_PHONE_NUMBER) {
     throw new Error('Twilio call origination is not configured');
   }
 
-  const client = twilio(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN);
+  const client = makeTwilioClient(config);
   const twimlUrl = new URL('/twiml/translated-call', config.PUBLIC_BASE_URL);
   twimlUrl.searchParams.set('callId', session.callId);
 
@@ -30,10 +30,21 @@ export async function completeTwilioCall(config: AppConfig, callSid: string | nu
   if (config.DRY_RUN_CALLS || !callSid) {
     return;
   }
-  if (!config.TWILIO_ACCOUNT_SID || !config.TWILIO_AUTH_TOKEN) {
+  if (!config.TWILIO_ACCOUNT_SID || !twilioAuthConfigured(config)) {
     throw new Error('Twilio call completion is not configured');
   }
 
-  const client = twilio(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN);
+  const client = makeTwilioClient(config);
   await client.calls(callSid).update({ status: 'completed' });
+}
+
+function twilioAuthConfigured(config: AppConfig): boolean {
+  return Boolean(config.TWILIO_AUTH_TOKEN || (config.TWILIO_API_KEY_SID && config.TWILIO_API_KEY_SECRET));
+}
+
+function makeTwilioClient(config: AppConfig) {
+  if (config.TWILIO_API_KEY_SID && config.TWILIO_API_KEY_SECRET && config.TWILIO_ACCOUNT_SID) {
+    return twilio(config.TWILIO_API_KEY_SID, config.TWILIO_API_KEY_SECRET, { accountSid: config.TWILIO_ACCOUNT_SID });
+  }
+  return twilio(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN);
 }

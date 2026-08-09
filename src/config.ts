@@ -11,6 +11,8 @@ const envSchema = z.object({
   OPENAI_SAFETY_IDENTIFIER: z.string().default('bridge-phone-call-prototype'),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_API_KEY_SID: z.string().optional(),
+  TWILIO_API_KEY_SECRET: z.string().optional(),
   TWILIO_PHONE_NUMBER: z.string().optional(),
   BRIDGE_MEDIA_SHARED_SECRET: z.string().min(16).optional(),
   BRIDGE_MEDIA_API_KEY: z.string().min(16).optional(),
@@ -27,7 +29,11 @@ export function getConfig(): AppConfig {
 }
 
 export function twilioConfigured(config: AppConfig): boolean {
-  return Boolean(config.TWILIO_ACCOUNT_SID && config.TWILIO_AUTH_TOKEN && config.TWILIO_PHONE_NUMBER);
+  return Boolean(
+    config.TWILIO_ACCOUNT_SID &&
+      config.TWILIO_PHONE_NUMBER &&
+      (config.TWILIO_AUTH_TOKEN || (config.TWILIO_API_KEY_SID && config.TWILIO_API_KEY_SECRET))
+  );
 }
 
 export function openAiConfigured(config: AppConfig): boolean {

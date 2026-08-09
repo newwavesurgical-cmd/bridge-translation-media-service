@@ -12,7 +12,7 @@ Set these on the media service host:
 - `OPENAI_API_KEY`
 - `OPENAI_TRANSLATION_MODEL`: `gpt-realtime-translate`
 - `TWILIO_ACCOUNT_SID`
-- `TWILIO_AUTH_TOKEN`
+- `TWILIO_AUTH_TOKEN` or `TWILIO_API_KEY_SID` + `TWILIO_API_KEY_SECRET`
 - `TWILIO_PHONE_NUMBER`
 - `BRIDGE_MEDIA_SHARED_SECRET`: long random secret used for WebSocket tokens
 - `BRIDGE_MEDIA_API_KEY`: long random API key used by the Lovable backend proxy
