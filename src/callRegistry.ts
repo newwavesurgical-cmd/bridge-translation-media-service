@@ -253,7 +253,11 @@ export class CallSession {
       sessionA: this.ownerToRemote?.status ?? 'idle',
       sessionB: this.remoteToOwner?.status ?? 'idle',
       error: this.record.error ?? null,
-      counters: this.record.counters,
+      counters: { ...this.record.counters },
+      translationSessionConfig: {
+        inputTranscriptionModel: 'gpt-realtime-whisper',
+        inputNoiseReduction: 'near_field'
+      },
       transcriptDiagnosticNote:
         'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
       transcriptDeltaCount: this.record.counters.transcriptDeltas,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { openAiLanguageCode } from '../src/openai/translationSession.js';
+import { buildTranslationSessionUpdate, openAiLanguageCode } from '../src/openai/translationSession.js';
 
 describe('OpenAI translation session language codes', () => {
   it('normalizes common display labels to language codes', () => {
@@ -11,5 +11,19 @@ describe('OpenAI translation session language codes', () => {
   it('preserves already coded or unknown language values', () => {
     expect(openAiLanguageCode('es')).toBe('es');
     expect(openAiLanguageCode('ca')).toBe('ca');
+  });
+
+  it('configures input transcription and noise reduction for diagnostics and phone audio', () => {
+    expect(buildTranslationSessionUpdate('Spanish')).toEqual({
+      audio: {
+        input: {
+          transcription: { model: 'gpt-realtime-whisper' },
+          noise_reduction: { type: 'near_field' }
+        },
+        output: {
+          language: 'es'
+        }
+      }
+    });
   });
 });

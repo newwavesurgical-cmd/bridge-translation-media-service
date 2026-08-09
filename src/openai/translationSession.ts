@@ -58,13 +58,7 @@ export class OpenAiTranslationSession {
       this.setStatus('live');
       this.sendJson({
         type: 'session.update',
-        session: {
-          audio: {
-            output: {
-              language: openAiLanguageCode(this.options.targetLanguage)
-            }
-          }
-        }
+        session: buildTranslationSessionUpdate(this.options.targetLanguage)
       });
       for (const audio of this.queuedAudio.splice(0)) {
         this.appendPcm16Base64(audio);
@@ -158,6 +152,20 @@ export class OpenAiTranslationSession {
     this.statusValue = status;
     this.options.onStatus(status, detail);
   }
+}
+
+export function buildTranslationSessionUpdate(targetLanguage: string): Record<string, unknown> {
+  return {
+    audio: {
+      input: {
+        transcription: { model: 'gpt-realtime-whisper' },
+        noise_reduction: { type: 'near_field' }
+      },
+      output: {
+        language: openAiLanguageCode(targetLanguage)
+      }
+    }
+  };
 }
 
 export function openAiLanguageCode(language: string): string {
