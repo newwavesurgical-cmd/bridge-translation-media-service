@@ -61,7 +61,7 @@ export class OpenAiTranslationSession {
         session: {
           audio: {
             output: {
-              language: this.options.targetLanguage
+              language: openAiLanguageCode(this.options.targetLanguage)
             }
           }
         }
@@ -158,4 +158,36 @@ export class OpenAiTranslationSession {
     this.statusValue = status;
     this.options.onStatus(status, detail);
   }
+}
+
+export function openAiLanguageCode(language: string): string {
+  const normalized = language.trim().toLowerCase();
+  const map: Record<string, string> = {
+    english: 'en',
+    en: 'en',
+    spanish: 'es',
+    es: 'es',
+    french: 'fr',
+    fr: 'fr',
+    german: 'de',
+    de: 'de',
+    italian: 'it',
+    it: 'it',
+    portuguese: 'pt',
+    pt: 'pt',
+    chinese: 'zh',
+    mandarin: 'zh',
+    zh: 'zh',
+    japanese: 'ja',
+    ja: 'ja',
+    korean: 'ko',
+    ko: 'ko',
+    arabic: 'ar',
+    ar: 'ar',
+    hindi: 'hi',
+    hi: 'hi',
+    russian: 'ru',
+    ru: 'ru'
+  };
+  return map[normalized] ?? normalized;
 }

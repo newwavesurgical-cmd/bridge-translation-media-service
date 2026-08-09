@@ -29,10 +29,21 @@ export interface CallRecord {
     kind: 'source' | 'translation';
     delta: string;
   }>;
+  counters: {
+    appAudioChunks: number;
+    twilioMediaChunks: number;
+    ownerTranslatedAudioChunks: number;
+    remoteTranslatedAudioChunks: number;
+    transcriptDeltas: number;
+  };
+  lastAppAudioAt?: string;
+  lastTwilioMediaAt?: string;
+  endedAt?: string;
 }
 
 export class CallRegistry {
   private readonly calls = new Map<string, CallSession>();
+  private readonly recentDiagnostics: Array<Record<string, unknown>> = [];
 
   constructor(private readonly config: AppConfig) {}
 
@@ -52,9 +63,16 @@ export class CallRegistry {
       createdAt: new Date().toISOString(),
       state: 'created',
       appToken: makeAppToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, callId),
-      transcripts: []
+      transcripts: [],
+      counters: {
+        appAudioChunks: 0,
+        twilioMediaChunks: 0,
+        ownerTranslatedAudioChunks: 0,
+        remoteTranslatedAudioChunks: 0,
+        transcriptDeltas: 0
+      }
     };
-    const session = new CallSession(this.config, record, () => this.delete(callId));
+    const session = new CallSession(this.config, record, (diagnostics) => this.delete(callId, diagnostics));
     this.calls.set(callId, session);
     return session;
   }
@@ -63,12 +81,20 @@ export class CallRegistry {
     return this.calls.get(callId);
   }
 
-  delete(callId: string): void {
+  delete(callId: string, diagnostics?: Record<string, unknown>): void {
+    if (diagnostics) {
+      this.recentDiagnostics.unshift(diagnostics);
+      this.recentDiagnostics.splice(8);
+    }
     this.calls.delete(callId);
   }
 
   listDiagnostics(): Array<Record<string, unknown>> {
     return Array.from(this.calls.values()).map((session) => session.diagnostics());
+  }
+
+  listRecentDiagnostics(): Array<Record<string, unknown>> {
+    return this.recentDiagnostics;
   }
 }
 
@@ -81,7 +107,7 @@ export class CallSession {
   constructor(
     private readonly config: AppConfig,
     private readonly record: CallRecord,
-    private readonly onDispose: () => void
+    private readonly onDispose: (diagnostics: Record<string, unknown>) => void
   ) {}
 
   get callId(): string {
@@ -195,6 +221,7 @@ export class CallSession {
 
   async hangup(): Promise<void> {
     this.record.state = 'ended';
+    this.record.endedAt = new Date().toISOString();
     this.ownerToRemote?.close();
     this.remoteToOwner?.close();
     this.appWs?.close();
@@ -204,7 +231,7 @@ export class CallSession {
     } catch (error) {
       this.record.error = error instanceof Error ? error.message : 'Failed to complete Twilio call';
     }
-    this.onDispose();
+    this.onDispose(this.diagnostics());
   }
 
   diagnostics(): Record<string, unknown> {
@@ -221,8 +248,12 @@ export class CallSession {
       sessionA: this.ownerToRemote?.status ?? 'idle',
       sessionB: this.remoteToOwner?.status ?? 'idle',
       error: this.record.error ?? null,
+      counters: this.record.counters,
       transcriptDeltaCount: this.record.transcripts.length,
-      lastActivityAt: this.record.lastActivityAt ?? null
+      lastActivityAt: this.record.lastActivityAt ?? null,
+      lastAppAudioAt: this.record.lastAppAudioAt ?? null,
+      lastTwilioMediaAt: this.record.lastTwilioMediaAt ?? null,
+      endedAt: this.record.endedAt ?? null
     };
   }
 
@@ -237,6 +268,8 @@ export class CallSession {
 
     this.touch();
     if (message.type === 'audio') {
+      this.record.counters.appAudioChunks += 1;
+      this.record.lastAppAudioAt = new Date().toISOString();
       this.ensureTranslationSessions();
       this.ownerToRemote?.appendPcm16Base64(message.audio);
       return;
@@ -265,6 +298,8 @@ export class CallSession {
 
     this.touch();
     if (message.event === 'media') {
+      this.record.counters.twilioMediaChunks += 1;
+      this.record.lastTwilioMediaAt = new Date().toISOString();
       this.ensureTranslationSessions();
       const pcm24k = twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload);
       this.remoteToOwner?.appendPcm16Base64(pcm24k);
@@ -276,10 +311,11 @@ export class CallSession {
     }
     if (message.event === 'stop') {
       this.record.state = 'ended';
+      this.record.endedAt = new Date().toISOString();
       this.ownerToRemote?.close();
       this.remoteToOwner?.close();
       this.sendStatus();
-      this.onDispose();
+      this.onDispose(this.diagnostics());
     }
   }
 
@@ -290,6 +326,7 @@ export class CallSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.remoteLanguage,
         onAudioDelta: (pcm24k) => {
+          this.record.counters.ownerTranslatedAudioChunks += 1;
           const muLaw8k = openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k);
           this.sendTwilioMedia(muLaw8k, `owner-to-remote-${Date.now()}`);
         },
@@ -306,7 +343,10 @@ export class CallSession {
         config: this.config,
         direction: 'remote-to-owner',
         targetLanguage: this.record.userLanguage,
-        onAudioDelta: (pcm24k) => this.sendApp({ type: 'translated_audio', speaker: 'remote', audio: pcm24k, sampleRate: 24000, encoding: 'pcm16' }),
+        onAudioDelta: (pcm24k) => {
+          this.record.counters.remoteTranslatedAudioChunks += 1;
+          this.sendApp({ type: 'translated_audio', speaker: 'remote', audio: pcm24k, sampleRate: 24000, encoding: 'pcm16' });
+        },
         onInputTranscriptDelta: (delta) => this.emitTranscript('remote', 'source', delta),
         onOutputTranscriptDelta: (delta) => this.emitTranscript('remote', 'translation', delta),
         onStatus: () => this.sendStatus(),
@@ -317,6 +357,7 @@ export class CallSession {
   }
 
   private emitTranscript(speaker: 'owner' | 'remote', kind: 'source' | 'translation', delta: string): void {
+    this.record.counters.transcriptDeltas += 1;
     this.record.transcripts.push({ at: new Date().toISOString(), speaker, kind, delta });
     this.sendApp({ type: 'transcript_delta', speaker, transcriptKind: kind, delta });
   }

@@ -36,7 +36,8 @@ export function createBridgeMediaServer(config: AppConfig) {
           openAiConfigured: openAiConfigured(config),
           mediaRouterConfigured: mediaRouterConfigured(config),
           dryRunCalls: config.DRY_RUN_CALLS,
-          activeCalls: registry.listDiagnostics()
+          activeCalls: registry.listDiagnostics(),
+          recentCalls: registry.listRecentDiagnostics()
         });
       }
 
@@ -79,7 +80,7 @@ export function createBridgeMediaServer(config: AppConfig) {
         const callId = url.pathname.split('/')[2] ?? '';
         const session = registry.get(callId);
         if (!session) {
-          return sendJson(res, 404, { error: 'call not found' });
+          return sendJson(res, 200, { ok: true, alreadyEnded: true });
         }
         await session.hangup();
         return sendJson(res, 200, { ok: true });
