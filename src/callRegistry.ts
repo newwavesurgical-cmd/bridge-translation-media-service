@@ -10,6 +10,16 @@ import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { AppClientMessage, AppServerMessage, CreateCallRequest, TwilioMediaMessage } from './types/messages.js';
 
+const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
+const MAX_TRANSCRIPT_DIAGNOSTIC_TAIL = 200;
+
+type DiagnosticTranscriptEntry = {
+  at: string;
+  speaker: 'owner' | 'remote';
+  kind: 'source' | 'translation';
+  delta: string;
+};
+
 export interface CallRecord {
   callId: string;
   callSid: string | null;
@@ -23,12 +33,7 @@ export interface CallRecord {
   appToken: string;
   twilioStreamSid?: string;
   lastActivityAt?: string;
-  transcripts: Array<{
-    at: string;
-    speaker: 'owner' | 'remote';
-    kind: 'source' | 'translation';
-    delta: string;
-  }>;
+  transcripts: DiagnosticTranscriptEntry[];
   counters: {
     appAudioChunks: number;
     twilioMediaChunks: number;
@@ -249,7 +254,11 @@ export class CallSession {
       sessionB: this.remoteToOwner?.status ?? 'idle',
       error: this.record.error ?? null,
       counters: this.record.counters,
-      transcriptDeltaCount: this.record.transcripts.length,
+      transcriptDiagnosticNote:
+        'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
+      transcriptDeltaCount: this.record.counters.transcriptDeltas,
+      transcriptDeltaRetainedCount: this.record.transcripts.length,
+      transcriptTail: this.record.transcripts.slice(-MAX_TRANSCRIPT_DIAGNOSTIC_TAIL),
       lastActivityAt: this.record.lastActivityAt ?? null,
       lastAppAudioAt: this.record.lastAppAudioAt ?? null,
       lastTwilioMediaAt: this.record.lastTwilioMediaAt ?? null,
@@ -306,7 +315,7 @@ export class CallSession {
       return;
     }
     if (message.event === 'dtmf') {
-      this.sendApp({ type: 'transcript_delta', speaker: 'remote', transcriptKind: 'source', delta: `[DTMF ${message.dtmf.digit}]` });
+      this.emitTranscript('remote', 'source', `[DTMF ${message.dtmf.digit}]`);
       return;
     }
     if (message.event === 'stop') {
@@ -359,6 +368,9 @@ export class CallSession {
   private emitTranscript(speaker: 'owner' | 'remote', kind: 'source' | 'translation', delta: string): void {
     this.record.counters.transcriptDeltas += 1;
     this.record.transcripts.push({ at: new Date().toISOString(), speaker, kind, delta });
+    if (this.record.transcripts.length > MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS) {
+      this.record.transcripts.splice(0, this.record.transcripts.length - MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS);
+    }
     this.sendApp({ type: 'transcript_delta', speaker, transcriptKind: kind, delta });
   }
 

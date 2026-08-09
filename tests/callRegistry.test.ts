@@ -78,4 +78,50 @@ describe('CallSession Twilio pre-start binding', () => {
       twilioStreamSid: 'MZ123'
     });
   });
+
+  it('retains transcript diagnostics after a call ends without storing raw audio', async () => {
+    const registry = new CallRegistry(config);
+    const session = registry.create({
+      to: '+15551230000',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish'
+    });
+
+    session.data.transcripts.push(
+      {
+        at: '2026-08-09T19:00:00.000Z',
+        speaker: 'owner',
+        kind: 'source',
+        delta: 'Can I reserve a table?'
+      },
+      {
+        at: '2026-08-09T19:00:01.000Z',
+        speaker: 'owner',
+        kind: 'translation',
+        delta: 'Puedo reservar una mesa?'
+      }
+    );
+    session.data.counters.transcriptDeltas = 2;
+
+    await session.hangup();
+
+    expect(registry.listRecentDiagnostics()[0]).toMatchObject({
+      transcriptDiagnosticNote:
+        'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
+      transcriptDeltaCount: 2,
+      transcriptDeltaRetainedCount: 2,
+      transcriptTail: [
+        {
+          speaker: 'owner',
+          kind: 'source',
+          delta: 'Can I reserve a table?'
+        },
+        {
+          speaker: 'owner',
+          kind: 'translation',
+          delta: 'Puedo reservar una mesa?'
+        }
+      ]
+    });
+  });
 });
