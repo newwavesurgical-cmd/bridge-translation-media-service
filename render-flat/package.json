@@ -1,0 +1,13 @@
+{
+  "name": "bridge-translation-media-service",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "twilio": "^5.3.4",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  }
+}
