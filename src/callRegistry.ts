@@ -2,6 +2,7 @@ import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
 import {
+  base64ToPcm16,
   makeDtmfMuLaw8kBase64,
   openAiPcm24kBase64ToTwilioMuLaw8kBase64,
   twilioMuLaw8kBase64ToOpenAiPcm24kBase64
@@ -12,6 +13,9 @@ import type { AppClientMessage, AppServerMessage, CreateCallRequest, TwilioMedia
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const MAX_TRANSCRIPT_DIAGNOSTIC_TAIL = 200;
+const SPEECH_RMS_THRESHOLD = 0.003;
+const INPUT_SPEECH_HANGOVER_MS = 900;
+const OUTPUT_SPEECH_HANGOVER_MS = 9000;
 
 type DiagnosticTranscriptEntry = {
   at: string;
@@ -37,12 +41,19 @@ export interface CallRecord {
   counters: {
     appAudioChunks: number;
     twilioMediaChunks: number;
+    appSilentChunksDropped: number;
+    twilioSilentChunksDropped: number;
     ownerTranslatedAudioChunks: number;
     remoteTranslatedAudioChunks: number;
+    ownerTranslatedAudioDroppedByGate: number;
+    remoteTranslatedAudioDroppedByGate: number;
     transcriptDeltas: number;
+    transcriptDeltasDroppedByGate: number;
   };
   lastAppAudioAt?: string;
   lastTwilioMediaAt?: string;
+  lastAppSpeechAt?: string;
+  lastTwilioSpeechAt?: string;
   endedAt?: string;
 }
 
@@ -72,9 +83,14 @@ export class CallRegistry {
       counters: {
         appAudioChunks: 0,
         twilioMediaChunks: 0,
+        appSilentChunksDropped: 0,
+        twilioSilentChunksDropped: 0,
         ownerTranslatedAudioChunks: 0,
         remoteTranslatedAudioChunks: 0,
-        transcriptDeltas: 0
+        ownerTranslatedAudioDroppedByGate: 0,
+        remoteTranslatedAudioDroppedByGate: 0,
+        transcriptDeltas: 0,
+        transcriptDeltasDroppedByGate: 0
       }
     };
     const session = new CallSession(this.config, record, (diagnostics) => this.delete(callId, diagnostics));
@@ -266,6 +282,8 @@ export class CallSession {
       lastActivityAt: this.record.lastActivityAt ?? null,
       lastAppAudioAt: this.record.lastAppAudioAt ?? null,
       lastTwilioMediaAt: this.record.lastTwilioMediaAt ?? null,
+      lastAppSpeechAt: this.record.lastAppSpeechAt ?? null,
+      lastTwilioSpeechAt: this.record.lastTwilioSpeechAt ?? null,
       endedAt: this.record.endedAt ?? null
     };
   }
@@ -283,6 +301,10 @@ export class CallSession {
     if (message.type === 'audio') {
       this.record.counters.appAudioChunks += 1;
       this.record.lastAppAudioAt = new Date().toISOString();
+      if (!this.shouldForwardAppAudio(message.audio)) {
+        this.record.counters.appSilentChunksDropped += 1;
+        return;
+      }
       this.ensureTranslationSessions();
       this.ownerToRemote?.appendPcm16Base64(message.audio);
       return;
@@ -313,8 +335,12 @@ export class CallSession {
     if (message.event === 'media') {
       this.record.counters.twilioMediaChunks += 1;
       this.record.lastTwilioMediaAt = new Date().toISOString();
-      this.ensureTranslationSessions();
       const pcm24k = twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload);
+      if (!this.shouldForwardTwilioAudio(pcm24k)) {
+        this.record.counters.twilioSilentChunksDropped += 1;
+        return;
+      }
+      this.ensureTranslationSessions();
       this.remoteToOwner?.appendPcm16Base64(pcm24k);
       return;
     }
@@ -339,6 +365,10 @@ export class CallSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.remoteLanguage,
         onAudioDelta: (pcm24k) => {
+          if (!this.isRecentSpeech('owner')) {
+            this.record.counters.ownerTranslatedAudioDroppedByGate += 1;
+            return;
+          }
           this.record.counters.ownerTranslatedAudioChunks += 1;
           const muLaw8k = openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k);
           this.sendTwilioMedia(muLaw8k, `owner-to-remote-${Date.now()}`);
@@ -357,6 +387,10 @@ export class CallSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.userLanguage,
         onAudioDelta: (pcm24k) => {
+          if (!this.isRecentSpeech('remote')) {
+            this.record.counters.remoteTranslatedAudioDroppedByGate += 1;
+            return;
+          }
           this.record.counters.remoteTranslatedAudioChunks += 1;
           this.sendApp({ type: 'translated_audio', speaker: 'remote', audio: pcm24k, sampleRate: 24000, encoding: 'pcm16' });
         },
@@ -370,6 +404,10 @@ export class CallSession {
   }
 
   private emitTranscript(speaker: 'owner' | 'remote', kind: 'source' | 'translation', delta: string): void {
+    if (!this.isRecentSpeech(speaker)) {
+      this.record.counters.transcriptDeltasDroppedByGate += 1;
+      return;
+    }
     this.record.counters.transcriptDeltas += 1;
     this.record.transcripts.push({ at: new Date().toISOString(), speaker, kind, delta });
     if (this.record.transcripts.length > MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS) {
@@ -428,6 +466,36 @@ export class CallSession {
   private touch(): void {
     this.record.lastActivityAt = new Date().toISOString();
   }
+
+  private shouldForwardAppAudio(base64Pcm16: string): boolean {
+    return this.shouldForwardInputAudio(base64Pcm16, 'owner');
+  }
+
+  private shouldForwardTwilioAudio(base64Pcm16: string): boolean {
+    return this.shouldForwardInputAudio(base64Pcm16, 'remote');
+  }
+
+  private shouldForwardInputAudio(base64Pcm16: string, speaker: 'owner' | 'remote'): boolean {
+    const rms = pcm16Rms(base64ToPcm16(base64Pcm16));
+    if (rms >= SPEECH_RMS_THRESHOLD) {
+      const now = new Date().toISOString();
+      if (speaker === 'owner') {
+        this.record.lastAppSpeechAt = now;
+      } else {
+        this.record.lastTwilioSpeechAt = now;
+      }
+      return true;
+    }
+    return this.isRecentSpeech(speaker, INPUT_SPEECH_HANGOVER_MS);
+  }
+
+  private isRecentSpeech(speaker: 'owner' | 'remote', windowMs = OUTPUT_SPEECH_HANGOVER_MS): boolean {
+    const timestamp = speaker === 'owner' ? this.record.lastAppSpeechAt : this.record.lastTwilioSpeechAt;
+    if (!timestamp) {
+      return false;
+    }
+    return Date.now() - Date.parse(timestamp) <= windowMs;
+  }
 }
 
 function redactPhone(phone: string): string {
@@ -435,4 +503,16 @@ function redactPhone(phone: string): string {
     return '****';
   }
   return `${'*'.repeat(Math.max(0, phone.length - 4))}${phone.slice(-4)}`;
+}
+
+function pcm16Rms(samples: Int16Array): number {
+  if (samples.length === 0) {
+    return 0;
+  }
+  let sumSquares = 0;
+  for (const sample of samples) {
+    const normalized = sample / 32768;
+    sumSquares += normalized * normalized;
+  }
+  return Math.sqrt(sumSquares / samples.length);
 }

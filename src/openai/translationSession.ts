@@ -169,7 +169,8 @@ export function buildTranslationSessionUpdate(targetLanguage: string): Record<st
 }
 
 export function openAiLanguageCode(language: string): string {
-  const normalized = language.trim().toLowerCase();
+  const normalized = language.trim().toLowerCase().replace('_', '-');
+  const primarySubtag = normalized.split('-')[0] ?? normalized;
   const map: Record<string, string> = {
     english: 'en',
     en: 'en',
@@ -197,5 +198,5 @@ export function openAiLanguageCode(language: string): string {
     russian: 'ru',
     ru: 'ru'
   };
-  return map[normalized] ?? normalized;
+  return map[normalized] ?? map[primarySubtag] ?? normalized;
 }

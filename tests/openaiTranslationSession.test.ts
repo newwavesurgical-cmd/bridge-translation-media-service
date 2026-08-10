@@ -13,6 +13,12 @@ describe('OpenAI translation session language codes', () => {
     expect(openAiLanguageCode('ca')).toBe('ca');
   });
 
+  it('normalizes browser locale tags to OpenAI language codes', () => {
+    expect(openAiLanguageCode('en-US')).toBe('en');
+    expect(openAiLanguageCode('es-ES')).toBe('es');
+    expect(openAiLanguageCode('pt-BR')).toBe('pt');
+  });
+
   it('configures input transcription and noise reduction for diagnostics and phone audio', () => {
     expect(buildTranslationSessionUpdate('Spanish')).toEqual({
       audio: {
