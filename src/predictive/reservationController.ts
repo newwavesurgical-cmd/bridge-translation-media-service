@@ -50,16 +50,13 @@ interface PredictiveReservationControllerOptions {
 }
 
 interface ActiveTurn {
-  slot: ReservationSlot;
   intent: string;
-  prefix: string;
+  text: string;
   startedAt: number;
-  ownerBuffer: string;
-  completionSpoken: boolean;
 }
 
-const TURN_TIMEOUT_MS = 12_000;
-const MIN_OWNER_BUFFER_CHARS = 2;
+const FILLER_AFTER_REMOTE_SILENCE_MS = 900;
+const FILLER_COOLDOWN_MS = 11_000;
 
 export class PredictiveReservationController {
   private readonly options: PredictiveReservationControllerOptions;
@@ -75,13 +72,16 @@ export class PredictiveReservationController {
   private safePrefixFirstAudioAt: string | null = null;
   private userSlotDetectedAt: string | null = null;
   private completionFirstAudioAt: string | null = null;
+  private lastRemoteSpeechAt = 0;
+  private lastFillerStartedAt = 0;
+  private fillerTimer?: ReturnType<typeof setTimeout>;
 
   constructor(options: PredictiveReservationControllerOptions) {
     this.options = options;
-    this.supported = isEnglish(options.userLanguage) && isSpanish(options.remoteLanguage);
+    this.supported = isEnglish(options.userLanguage);
     if (!this.supported) {
       this.emit('unsupported_language', {
-        detail: 'Predictive restaurant reservation mode currently supports English user language and Spanish remote language only.'
+        detail: 'Bridge filler mode currently requires English as the app user language.'
       });
     }
   }
@@ -99,61 +99,23 @@ export class PredictiveReservationController {
       return;
     }
     this.remoteTranslationBuffer = trimContext(this.remoteTranslationBuffer + delta, 1200);
-    if (this.activeTurn && !this.turnExpired()) {
+  }
+
+  handleRemoteAudioActivity(isSpeech: boolean): void {
+    if (!this.supported || !isSpeech) {
       return;
     }
-    if (this.turnExpired()) {
-      this.timeoutTurn();
-    }
-
-    const question = detectReservationQuestion(this.remoteTranslationBuffer);
-    if (!question) {
-      return;
-    }
-
-    this.startTurn(question.slot, question.intent, question.prefix);
+    this.lastRemoteSpeechAt = Date.now();
+    this.remoteQuestionUnderstoodAt ??= new Date().toISOString();
+    this.scheduleFillerAfterRemoteSilence();
   }
 
   handleOwnerSourceDelta(delta: string): void {
-    if (!this.supported || !this.activeTurn || this.activeTurn.completionSpoken) {
-      return;
-    }
-    if (this.turnExpired()) {
-      this.timeoutTurn();
-      return;
-    }
-
-    this.activeTurn.ownerBuffer = trimContext(this.activeTurn.ownerBuffer + delta, 500);
-    if (this.activeTurn.ownerBuffer.trim().length < MIN_OWNER_BUFFER_CHARS) {
-      return;
-    }
-
-    const resolved = resolveSlotValue(this.activeTurn.slot, this.activeTurn.ownerBuffer);
-    if (!resolved) {
-      return;
-    }
-
-    this.activeTurn.completionSpoken = true;
-    this.resolvedSlots[this.activeTurn.slot] = resolved.value;
-    this.userSlotDetectedAt = new Date().toISOString();
-    this.emit('slot_resolved', {
-      slot: this.activeTurn.slot,
-      intent: this.activeTurn.intent,
-      text: resolved.value
-    });
-
-    void this.speakCompletion(this.activeTurn.slot, resolved.spokenCompletion);
+    void delta;
   }
 
   shouldSuppressOwnerTranslation(): boolean {
-    if (!this.supported || !this.activeTurn) {
-      return false;
-    }
-    if (this.turnExpired()) {
-      this.timeoutTurn();
-      return false;
-    }
-    return true;
+    return false;
   }
 
   recordSuppressedOwnerAudioChunk(): void {
@@ -163,9 +125,9 @@ export class PredictiveReservationController {
   diagnostics(): PredictiveDiagnostics {
     return {
       predictiveMode: this.mode,
-      predictiveActiveTurn: Boolean(this.activeTurn && !this.turnExpired()),
+      predictiveActiveTurn: Boolean(this.activeTurn),
       predictiveRecognizedIntent: this.recognizedIntent,
-      predictivePendingSlot: this.activeTurn?.slot ?? null,
+      predictivePendingSlot: null,
       predictiveResolvedSlots: { ...this.resolvedSlots },
       predictiveSuppressedOwnerAudioChunks: this.suppressedOwnerAudioChunks,
       predictivePrefixAudioChunks: this.prefixAudioChunks,
@@ -177,63 +139,57 @@ export class PredictiveReservationController {
     };
   }
 
-  private startTurn(slot: ReservationSlot, intent: string, prefix: string): void {
-    this.activeTurn = {
-      slot,
-      intent,
-      prefix,
-      startedAt: Date.now(),
-      ownerBuffer: '',
-      completionSpoken: false
-    };
-    this.recognizedIntent = intent;
-    this.remoteQuestionUnderstoodAt = new Date().toISOString();
-    this.remoteTranslationBuffer = '';
-    this.emit('turn_started', { slot, intent, text: prefix });
-    void this.speakPrefix(prefix, slot, intent);
+  private scheduleFillerAfterRemoteSilence(): void {
+    if (this.fillerTimer) {
+      clearTimeout(this.fillerTimer);
+    }
+    this.fillerTimer = setTimeout(() => this.maybeStartFiller(), FILLER_AFTER_REMOTE_SILENCE_MS);
+    this.fillerTimer.unref?.();
   }
 
-  private async speakPrefix(prefix: string, slot: ReservationSlot, intent: string): Promise<void> {
+  private maybeStartFiller(): void {
+    const now = Date.now();
+    if (!this.supported || this.activeTurn) {
+      return;
+    }
+    if (!this.lastRemoteSpeechAt || now - this.lastRemoteSpeechAt < FILLER_AFTER_REMOTE_SILENCE_MS) {
+      return;
+    }
+    if (this.lastFillerStartedAt && now - this.lastFillerStartedAt < FILLER_COOLDOWN_MS) {
+      return;
+    }
+
+    const filler = fillerTextForLanguage(this.options.remoteLanguage, this.remoteTranslationBuffer);
+    this.startTurn('bridge_filler', filler);
+  }
+
+  private startTurn(intent: string, text: string): void {
+    this.activeTurn = {
+      intent,
+      text,
+      startedAt: Date.now(),
+    };
+    this.lastFillerStartedAt = Date.now();
+    this.recognizedIntent = intent;
+    this.remoteTranslationBuffer = '';
+    this.emit('turn_started', { intent, text });
+    void this.speakPrefix(text, intent);
+  }
+
+  private async speakPrefix(prefix: string, intent: string): Promise<void> {
+    const turn = this.activeTurn;
     try {
       const chunks = await this.options.speakToRemote(prefix, 'prefix');
       this.prefixAudioChunks += chunks;
       this.safePrefixFirstAudioAt ??= new Date().toISOString();
-      this.emit('prefix_audio_started', { slot, intent, text: prefix });
+      this.emit('prefix_audio_started', { intent, text: prefix });
     } catch (error) {
-      this.emit('speech_error', { slot, intent, detail: errorMessage(error) });
-    }
-  }
-
-  private async speakCompletion(slot: ReservationSlot, completion: string): Promise<void> {
-    const turn = this.activeTurn;
-    try {
-      const chunks = await this.options.speakToRemote(completion, 'completion');
-      this.completionAudioChunks += chunks;
-      this.completionFirstAudioAt ??= new Date().toISOString();
-      this.emit('completion_audio_started', { slot, intent: turn?.intent, text: completion });
-    } catch (error) {
-      this.emit('speech_error', { slot, intent: turn?.intent, detail: errorMessage(error) });
+      this.emit('speech_error', { intent, detail: errorMessage(error) });
     } finally {
       if (this.activeTurn === turn) {
         this.activeTurn = undefined;
       }
     }
-  }
-
-  private timeoutTurn(): void {
-    if (!this.activeTurn) {
-      return;
-    }
-    this.emit('turn_timeout', {
-      slot: this.activeTurn.slot,
-      intent: this.activeTurn.intent,
-      detail: 'No user slot value was detected before the predictive turn timeout.'
-    });
-    this.activeTurn = undefined;
-  }
-
-  private turnExpired(): boolean {
-    return Boolean(this.activeTurn && Date.now() - this.activeTurn.startedAt > TURN_TIMEOUT_MS);
   }
 
   private emit(event: PredictiveEvent['event'], partial: Omit<PredictiveEvent, 'event' | 'mode' | 'at'> = {}): void {
@@ -245,6 +201,30 @@ interface DetectedQuestion {
   slot: ReservationSlot;
   intent: string;
   prefix: string;
+}
+
+export function fillerTextForLanguage(language: string, recentRemoteTranslation = ''): string {
+  const normalized = language.trim().toLowerCase();
+  const context = normalize(recentRemoteTranslation);
+  if (isSpanish(normalized)) {
+    if (context.includes('thank')) {
+      return 'Sí, claro, un momento.';
+    }
+    return 'Sí, claro...';
+  }
+  if (normalized === 'french' || normalized === 'fr' || normalized.startsWith('fr-')) {
+    return "Oui, bien sûr...";
+  }
+  if (normalized === 'italian' || normalized === 'it' || normalized.startsWith('it-')) {
+    return 'Sì, certo...';
+  }
+  if (normalized === 'portuguese' || normalized === 'pt' || normalized.startsWith('pt-')) {
+    return 'Sim, claro...';
+  }
+  if (normalized === 'german' || normalized === 'de' || normalized.startsWith('de-')) {
+    return 'Ja, natürlich...';
+  }
+  return 'Yes, one moment...';
 }
 
 export function detectReservationQuestion(text: string): DetectedQuestion | null {

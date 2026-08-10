@@ -117,7 +117,7 @@ Body:
 
 `introMessageText` and `introDisclaimerText` are optional text-to-speech blocks played before the Twilio media stream connects. They should already be translated into the remote party's language. If neither custom field is sent and `announceTranslationAtStart` is true, the service plays its default translation announcement.
 
-`predictiveMode` is optional and defaults to `off`. The first experimental value is `restaurant_reservation_v1`, which only supports English user language to Spanish remote language. In that mode, recognized reservation slot questions can trigger safe Spanish prefix audio while the service listens for the user's slot answer. During those predictive slot turns, direct owner-to-remote translated audio is suppressed to avoid duplicate speech.
+`predictiveMode` is optional and defaults to `off`. The experimental value `restaurant_reservation_v1` is now a non-substantive bridge-filler mode: after remote speech goes quiet, the service may play a short filler phrase in the remote party's language, such as "Si, claro...", while waiting for the user's real translated answer. It does not predict slot values, does not complete sentences for the user, and does not suppress the normal owner-to-remote translation path.
 
 Response:
 

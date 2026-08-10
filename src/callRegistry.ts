@@ -362,7 +362,8 @@ export class CallSession {
         return;
       }
       const pcm24k = twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload);
-      this.trackTwilioAudioActivity(pcm24k);
+      const remoteSpeechDetected = this.trackTwilioAudioActivity(pcm24k);
+      this.predictive?.handleRemoteAudioActivity(remoteSpeechDetected);
       this.ensureTranslationSessions();
       this.remoteToOwner?.appendPcm16Base64(pcm24k);
       return;
@@ -523,24 +524,26 @@ export class CallSession {
     this.record.lastActivityAt = new Date().toISOString();
   }
 
-  private trackAppAudioActivity(base64Pcm16: string): void {
-    this.trackInputAudioActivity(base64Pcm16, 'owner');
+  private trackAppAudioActivity(base64Pcm16: string): boolean {
+    return this.trackInputAudioActivity(base64Pcm16, 'owner');
   }
 
-  private trackTwilioAudioActivity(base64Pcm16: string): void {
-    this.trackInputAudioActivity(base64Pcm16, 'remote');
+  private trackTwilioAudioActivity(base64Pcm16: string): boolean {
+    return this.trackInputAudioActivity(base64Pcm16, 'remote');
   }
 
-  private trackInputAudioActivity(base64Pcm16: string, speaker: 'owner' | 'remote'): void {
+  private trackInputAudioActivity(base64Pcm16: string, speaker: 'owner' | 'remote'): boolean {
     const rms = pcm16Rms(base64ToPcm16(base64Pcm16));
-    if (rms >= SPEECH_RMS_THRESHOLD) {
-      const now = new Date().toISOString();
-      if (speaker === 'owner') {
-        this.record.lastAppSpeechAt = now;
-      } else {
-        this.record.lastTwilioSpeechAt = now;
-      }
+    if (rms < SPEECH_RMS_THRESHOLD) {
+      return false;
     }
+    const now = new Date().toISOString();
+    if (speaker === 'owner') {
+      this.record.lastAppSpeechAt = now;
+    } else {
+      this.record.lastTwilioSpeechAt = now;
+    }
+    return true;
   }
 
   private isRecentSpeech(speaker: 'owner' | 'remote', windowMs = OUTPUT_SPEECH_HANGOVER_MS): boolean {

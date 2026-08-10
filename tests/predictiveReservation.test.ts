@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   detectReservationQuestion,
+  fillerTextForLanguage,
   PredictiveReservationController,
   resolveSlotValue
 } from '../src/predictive/reservationController.js';
@@ -35,51 +36,61 @@ describe('predictive reservation controller', () => {
     expect(resolveSlotValue('party_size', 'I am not sure yet')).toBeNull();
   });
 
-  it('starts a predictive turn and suppresses direct owner translation until the slot resolves', async () => {
+  it('uses non-substantive filler after remote speech stops without suppressing owner translation', async () => {
+    vi.useFakeTimers();
     const spoken: Array<{ text: string; phase: string }> = [];
     const events: string[] = [];
-    const controller = new PredictiveReservationController({
-      userLanguage: 'English',
-      remoteLanguage: 'Spanish',
-      speakToRemote: async (text, phase) => {
-        spoken.push({ text, phase });
-        return phase === 'prefix' ? 3 : 2;
-      },
-      emitEvent: (event) => events.push(event.event)
-    });
+    try {
+      const controller = new PredictiveReservationController({
+        userLanguage: 'English',
+        remoteLanguage: 'Spanish',
+        speakToRemote: async (text, phase) => {
+          spoken.push({ text, phase });
+          return 3;
+        },
+        emitEvent: (event) => events.push(event.event)
+      });
 
-    controller.handleRemoteTranslationDelta('For how many people is the reservation?');
-    expect(controller.shouldSuppressOwnerTranslation()).toBe(true);
+      controller.handleRemoteTranslationDelta('For how many people is the reservation?');
+      controller.handleRemoteAudioActivity(true);
+      expect(controller.shouldSuppressOwnerTranslation()).toBe(false);
+      expect(spoken).toEqual([]);
 
-    controller.handleOwnerSourceDelta('seven people');
-    await new Promise((resolve) => setTimeout(resolve, 0));
+      await vi.advanceTimersByTimeAsync(900);
 
-    expect(spoken).toEqual([
-      { text: 'Claro, puedo hacer la reservación para...', phase: 'prefix' },
-      { text: '7 personas.', phase: 'completion' }
-    ]);
-    expect(events).toContain('turn_started');
-    expect(events).toContain('slot_resolved');
-    expect(events).toContain('completion_audio_started');
-    expect(controller.shouldSuppressOwnerTranslation()).toBe(false);
-    expect(controller.diagnostics()).toMatchObject({
-      predictiveMode: 'restaurant_reservation_v1',
-      predictiveResolvedSlots: { party_size: '7' },
-      predictivePrefixAudioChunks: 3,
-      predictiveCompletionAudioChunks: 2
-    });
+      expect(spoken).toEqual([{ text: 'Sí, claro...', phase: 'prefix' }]);
+      expect(events).toContain('turn_started');
+      expect(events).toContain('prefix_audio_started');
+      expect(events).not.toContain('slot_resolved');
+      expect(events).not.toContain('completion_audio_started');
+      expect(controller.diagnostics()).toMatchObject({
+        predictiveMode: 'restaurant_reservation_v1',
+        predictiveResolvedSlots: {},
+        predictiveSuppressedOwnerAudioChunks: 0,
+        predictivePrefixAudioChunks: 3,
+        predictiveCompletionAudioChunks: 0
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it('reports unsupported language pairs without activating turns', () => {
+  it('keeps filler generic for supported remote languages', () => {
+    expect(fillerTextForLanguage('Spanish')).toBe('Sí, claro...');
+    expect(fillerTextForLanguage('French')).toBe('Oui, bien sûr...');
+  });
+
+  it('reports unsupported user languages without activating turns', () => {
     const events: string[] = [];
     const controller = new PredictiveReservationController({
-      userLanguage: 'English',
-      remoteLanguage: 'French',
+      userLanguage: 'French',
+      remoteLanguage: 'Spanish',
       speakToRemote: async () => 0,
       emitEvent: (event) => events.push(event.event)
     });
 
     controller.handleRemoteTranslationDelta('For how many people is the reservation?');
+    controller.handleRemoteAudioActivity(true);
 
     expect(events).toEqual(['unsupported_language']);
     expect(controller.shouldSuppressOwnerTranslation()).toBe(false);
