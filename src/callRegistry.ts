@@ -14,7 +14,6 @@ import type { AppClientMessage, AppServerMessage, CreateCallRequest, TwilioMedia
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const MAX_TRANSCRIPT_DIAGNOSTIC_TAIL = 200;
 const SPEECH_RMS_THRESHOLD = 0.003;
-const INPUT_SPEECH_HANGOVER_MS = 900;
 const OUTPUT_SPEECH_HANGOVER_MS = 9000;
 
 type DiagnosticTranscriptEntry = {
@@ -303,10 +302,7 @@ export class CallSession {
     if (message.type === 'audio') {
       this.record.counters.appAudioChunks += 1;
       this.record.lastAppAudioAt = new Date().toISOString();
-      if (!this.shouldForwardAppAudio(message.audio)) {
-        this.record.counters.appSilentChunksDropped += 1;
-        return;
-      }
+      this.trackAppAudioActivity(message.audio);
       this.ensureTranslationSessions();
       this.ownerToRemote?.appendPcm16Base64(message.audio);
       return;
@@ -342,10 +338,7 @@ export class CallSession {
         return;
       }
       const pcm24k = twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload);
-      if (!this.shouldForwardTwilioAudio(pcm24k)) {
-        this.record.counters.twilioSilentChunksDropped += 1;
-        return;
-      }
+      this.trackTwilioAudioActivity(pcm24k);
       this.ensureTranslationSessions();
       this.remoteToOwner?.appendPcm16Base64(pcm24k);
       return;
@@ -473,15 +466,15 @@ export class CallSession {
     this.record.lastActivityAt = new Date().toISOString();
   }
 
-  private shouldForwardAppAudio(base64Pcm16: string): boolean {
-    return this.shouldForwardInputAudio(base64Pcm16, 'owner');
+  private trackAppAudioActivity(base64Pcm16: string): void {
+    this.trackInputAudioActivity(base64Pcm16, 'owner');
   }
 
-  private shouldForwardTwilioAudio(base64Pcm16: string): boolean {
-    return this.shouldForwardInputAudio(base64Pcm16, 'remote');
+  private trackTwilioAudioActivity(base64Pcm16: string): void {
+    this.trackInputAudioActivity(base64Pcm16, 'remote');
   }
 
-  private shouldForwardInputAudio(base64Pcm16: string, speaker: 'owner' | 'remote'): boolean {
+  private trackInputAudioActivity(base64Pcm16: string, speaker: 'owner' | 'remote'): void {
     const rms = pcm16Rms(base64ToPcm16(base64Pcm16));
     if (rms >= SPEECH_RMS_THRESHOLD) {
       const now = new Date().toISOString();
@@ -490,9 +483,7 @@ export class CallSession {
       } else {
         this.record.lastTwilioSpeechAt = now;
       }
-      return true;
     }
-    return this.isRecentSpeech(speaker, INPUT_SPEECH_HANGOVER_MS);
   }
 
   private isRecentSpeech(speaker: 'owner' | 'remote', windowMs = OUTPUT_SPEECH_HANGOVER_MS): boolean {
