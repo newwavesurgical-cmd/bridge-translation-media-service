@@ -58,7 +58,17 @@ describe('predictive reservation controller', () => {
 
       await vi.advanceTimersByTimeAsync(900);
 
-      expect(spoken).toEqual([{ text: 'Sí, claro...', phase: 'prefix' }]);
+      expect(spoken).toHaveLength(1);
+      expect(spoken[0]?.phase).toBe('prefix');
+      expect([
+        'Sí...',
+        'Ah, ok...',
+        'Un momento...',
+        'A ver...',
+        'Mmm, déjeme ver...',
+        'Sí, deme un segundo...',
+        'Ok, un segundo...'
+      ]).toContain(spoken[0]?.text);
       expect(events).toContain('turn_started');
       expect(events).toContain('prefix_audio_started');
       expect(events).not.toContain('slot_resolved');
@@ -76,8 +86,12 @@ describe('predictive reservation controller', () => {
   });
 
   it('keeps filler generic for supported remote languages', () => {
-    expect(fillerTextForLanguage('Spanish')).toBe('Sí, claro...');
-    expect(fillerTextForLanguage('French')).toBe('Oui, bien sûr...');
+    expect(['Sí...', 'Ah, ok...', 'Un momento...', 'A ver...', 'Mmm, déjeme ver...', 'Sí, deme un segundo...', 'Ok, un segundo...']).toContain(
+      fillerTextForLanguage('Spanish')
+    );
+    expect(["Oui...", "D'accord...", "Un instant...", "Je regarde...", "Oui, une seconde..."]).toContain(fillerTextForLanguage('French'));
+    expect(fillerTextForLanguage('Spanish', 'Can you hear me?')).toMatch(/escucho|aquí estoy|segundo/);
+    expect(fillerTextForLanguage('Spanish', '', 'Sí...')).not.toBe('Sí...');
   });
 
   it('reports unsupported user languages without activating turns', () => {

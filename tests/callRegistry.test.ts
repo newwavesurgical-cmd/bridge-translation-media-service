@@ -11,6 +11,9 @@ const config: AppConfig = {
   APP_STREAM_PUBLIC_WSS_URL: 'wss://bridge-media.example.com/app/stream',
   OPENAI_API_KEY: '',
   OPENAI_TRANSLATION_MODEL: 'gpt-realtime-translate',
+  OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
+  OPENAI_TTS_VOICE: 'cedar',
+  OPENAI_FILLER_TTS_VOICE: 'cedar',
   OPENAI_SAFETY_IDENTIFIER: 'test-user',
   TWILIO_ACCOUNT_SID: 'AC123',
   TWILIO_AUTH_TOKEN: 'auth',
@@ -162,7 +165,12 @@ describe('CallSession Twilio pre-start binding', () => {
     expect(predictive.diagnostics()).toMatchObject({
       predictiveMode: 'restaurant_reservation_v1',
       predictiveActiveTurn: false,
-      predictiveResolvedSlots: {}
+      predictiveResolvedSlots: {},
+      translationSessionConfig: {
+        realtimeTranslationVoiceMode: 'dynamic_voice_adaptation',
+        realtimeTranslationVoiceSelectable: false,
+        fillerTtsVoice: 'cedar'
+      }
     });
   });
 

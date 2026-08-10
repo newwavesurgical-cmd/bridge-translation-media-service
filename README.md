@@ -29,6 +29,7 @@ Copy `.env.example` to `.env` and fill in values.
 Required for real calls:
 
 - `OPENAI_API_KEY`
+- `OPENAI_FILLER_TTS_VOICE` is optional and defaults to `cedar`. Filler audio is generated with the Speech API; realtime translation audio uses OpenAI's dynamic translation voice and currently cannot be forced to an identical fixed voice.
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_PHONE_NUMBER`
@@ -117,7 +118,9 @@ Body:
 
 `introMessageText` and `introDisclaimerText` are optional text-to-speech blocks played before the Twilio media stream connects. They should already be translated into the remote party's language. If neither custom field is sent and `announceTranslationAtStart` is true, the service plays its default translation announcement.
 
-`predictiveMode` is optional and defaults to `off`. The experimental value `restaurant_reservation_v1` is now a non-substantive bridge-filler mode: after remote speech goes quiet, the service may play a short filler phrase in the remote party's language, such as "Si, claro...", while waiting for the user's real translated answer. It does not predict slot values, does not complete sentences for the user, and does not suppress the normal owner-to-remote translation path.
+`predictiveMode` is optional and defaults to `off`. The experimental value `restaurant_reservation_v1` is now a non-substantive bridge-filler mode: after remote speech goes quiet, the service may play a short filler phrase in the remote party's language, such as "Un momento..." or "Si, deme un segundo...", while waiting for the user's real translated answer. It rotates through safe fillers, uses context-aware presence fillers for phrases like "Can you hear me?", does not predict slot values, does not complete sentences for the user, and does not suppress the normal owner-to-remote translation path.
+
+Filler voice note: the filler path uses the Speech API voice configured by `OPENAI_FILLER_TTS_VOICE`. The realtime translation model currently uses dynamic voice adaptation and does not support a fixed voice selection parameter, so the service cannot guarantee that filler and translated speech are perfectly identical.
 
 Response:
 

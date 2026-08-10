@@ -3,6 +3,9 @@ import type { AppConfig } from '../config.js';
 interface SpeechOptions {
   text: string;
   language: string;
+  voice?: string;
+  instructions?: string;
+  speed?: number;
 }
 
 export async function createSpeechPcm24kBase64(config: AppConfig, options: SpeechOptions): Promise<string> {
@@ -19,11 +22,11 @@ export async function createSpeechPcm24kBase64(config: AppConfig, options: Speec
     },
     body: JSON.stringify({
       model: config.OPENAI_TTS_MODEL,
-      voice: config.OPENAI_TTS_VOICE,
+      voice: options.voice ?? config.OPENAI_TTS_VOICE,
       input: options.text,
-      instructions: `Speak naturally in ${options.language}. Keep the pacing conversational for a phone call.`,
+      instructions: options.instructions ?? `Speak naturally in ${options.language}. Keep the pacing conversational for a phone call.`,
       response_format: 'pcm',
-      speed: 1.05
+      speed: options.speed ?? 1.05
     })
   });
 

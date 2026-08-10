@@ -74,6 +74,7 @@ export class PredictiveReservationController {
   private completionFirstAudioAt: string | null = null;
   private lastRemoteSpeechAt = 0;
   private lastFillerStartedAt = 0;
+  private lastFillerText = '';
   private fillerTimer?: ReturnType<typeof setTimeout>;
 
   constructor(options: PredictiveReservationControllerOptions) {
@@ -159,7 +160,8 @@ export class PredictiveReservationController {
       return;
     }
 
-    const filler = fillerTextForLanguage(this.options.remoteLanguage, this.remoteTranslationBuffer);
+    const filler = fillerTextForLanguage(this.options.remoteLanguage, this.remoteTranslationBuffer, this.lastFillerText);
+    this.lastFillerText = filler;
     this.startTurn('bridge_filler', filler);
   }
 
@@ -203,28 +205,71 @@ interface DetectedQuestion {
   prefix: string;
 }
 
-export function fillerTextForLanguage(language: string, recentRemoteTranslation = ''): string {
+export function fillerTextForLanguage(language: string, recentRemoteTranslation = '', avoidText = ''): string {
   const normalized = language.trim().toLowerCase();
   const context = normalize(recentRemoteTranslation);
+
   if (isSpanish(normalized)) {
-    if (context.includes('thank')) {
-      return 'Sí, claro, un momento.';
+    if (isPresenceCheck(context)) {
+      return chooseFiller(['Sí, sí le escucho. Un segundo.', 'Sí, aquí estoy. Un momento.', 'Sí, deme un segundo.'], avoidText, context);
     }
-    return 'Sí, claro...';
+    if (isThanksOrPoliteClose(context)) {
+      return chooseFiller(['Sí, claro, un momento.', 'Claro, con gusto...', 'Sí, cómo no...'], avoidText, context);
+    }
+    return chooseFiller(['Sí...', 'Ah, ok...', 'Un momento...', 'A ver...', 'Mmm, déjeme ver...', 'Sí, deme un segundo...', 'Ok, un segundo...'], avoidText, context);
   }
   if (normalized === 'french' || normalized === 'fr' || normalized.startsWith('fr-')) {
-    return "Oui, bien sûr...";
+    if (isPresenceCheck(context)) {
+      return chooseFiller(["Oui, je vous entends. Un instant.", "Oui, je suis là. Un instant."], avoidText, context);
+    }
+    return chooseFiller(["Oui...", "D'accord...", "Un instant...", "Je regarde...", "Oui, une seconde..."], avoidText, context);
   }
   if (normalized === 'italian' || normalized === 'it' || normalized.startsWith('it-')) {
-    return 'Sì, certo...';
+    if (isPresenceCheck(context)) {
+      return chooseFiller(['Sì, la sento. Un attimo.', 'Sì, sono qui. Un attimo.'], avoidText, context);
+    }
+    return chooseFiller(['Sì...', 'Ok...', 'Un attimo...', 'Vediamo...', 'Sì, un secondo...'], avoidText, context);
   }
   if (normalized === 'portuguese' || normalized === 'pt' || normalized.startsWith('pt-')) {
-    return 'Sim, claro...';
+    if (isPresenceCheck(context)) {
+      return chooseFiller(['Sim, estou ouvindo. Um segundo.', 'Sim, estou aqui. Um momento.'], avoidText, context);
+    }
+    return chooseFiller(['Sim...', 'Ok...', 'Um momento...', 'Deixe-me ver...', 'Sim, um segundo...'], avoidText, context);
   }
   if (normalized === 'german' || normalized === 'de' || normalized.startsWith('de-')) {
-    return 'Ja, natürlich...';
+    if (isPresenceCheck(context)) {
+      return chooseFiller(['Ja, ich höre Sie. Einen Moment.', 'Ja, ich bin da. Einen Moment.'], avoidText, context);
+    }
+    return chooseFiller(['Ja...', 'Okay...', 'Einen Moment...', 'Ich schaue kurz...', 'Ja, eine Sekunde...'], avoidText, context);
   }
-  return 'Yes, one moment...';
+  if (isPresenceCheck(context)) {
+    return chooseFiller(['Yes, I can hear you. One second.', 'Yes, I am here. One moment.'], avoidText, context);
+  }
+  return chooseFiller(['Yes...', 'Okay...', 'One moment...', 'Let me think...', 'Hmm, let me see...', 'Just a second...'], avoidText, context);
+}
+
+function chooseFiller(phrases: string[], avoidText: string, context: string): string {
+  const candidates = phrases.length > 1 ? phrases.filter((phrase) => phrase !== avoidText) : phrases;
+  const pool = candidates.length > 0 ? candidates : phrases;
+  const seed = `${context}|${Date.now()}|${Math.random()}`;
+  return pool[hash(seed) % pool.length];
+}
+
+function hash(text: string): number {
+  let value = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    value ^= text.charCodeAt(index);
+    value = Math.imul(value, 16777619);
+  }
+  return Math.abs(value);
+}
+
+function isPresenceCheck(context: string): boolean {
+  return /\b(can you hear me|do you hear me|are you there|are you still there|hello|can you hear|hear me|still there)\b/.test(context);
+}
+
+function isThanksOrPoliteClose(context: string): boolean {
+  return /\b(thank|thanks|thank you|gracias|appreciate)\b/.test(context);
 }
 
 export function detectReservationQuestion(text: string): DetectedQuestion | null {

@@ -297,7 +297,13 @@ export class CallSession {
       counters: { ...this.record.counters },
       translationSessionConfig: {
         inputTranscriptionModel: 'gpt-realtime-whisper',
-        inputNoiseReduction: 'near_field'
+        inputNoiseReduction: 'near_field',
+        realtimeTranslationVoiceMode: 'dynamic_voice_adaptation',
+        realtimeTranslationVoiceSelectable: false,
+        fillerTtsModel: this.config.OPENAI_TTS_MODEL,
+        fillerTtsVoice: this.config.OPENAI_FILLER_TTS_VOICE,
+        fillerVoiceNote:
+          'Realtime translation does not expose fixed voice selection; filler uses a configured TTS voice and cannot be guaranteed identical.'
       },
       transcriptDiagnosticNote:
         'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
@@ -475,7 +481,10 @@ export class CallSession {
   private async speakPredictiveTextToRemote(text: string, phase: 'prefix' | 'completion'): Promise<number> {
     const pcm24k = await createSpeechPcm24kBase64(this.config, {
       text,
-      language: this.record.remoteLanguage
+      language: this.record.remoteLanguage,
+      voice: this.config.OPENAI_FILLER_TTS_VOICE,
+      instructions: `Speak naturally in ${this.record.remoteLanguage}. This is a very short phone-call thinking filler before the translated answer. Use a low, neutral, conversational voice. Do not sound like a separate assistant and do not add any words beyond the input text.`,
+      speed: 0.98
     });
     return this.sendPcm24kToTwilioInChunks(pcm24k, `predictive-${phase}-${Date.now()}`);
   }
