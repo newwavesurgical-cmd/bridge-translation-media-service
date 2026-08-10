@@ -13,7 +13,7 @@ const config: AppConfig = {
   OPENAI_TRANSLATION_MODEL: 'gpt-realtime-translate',
   OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
   OPENAI_TTS_VOICE: 'cedar',
-  OPENAI_FILLER_TTS_VOICE: 'cedar',
+  OPENAI_FILLER_TTS_VOICE: 'onyx',
   OPENAI_SAFETY_IDENTIFIER: 'test-user',
   TWILIO_ACCOUNT_SID: 'AC123',
   TWILIO_AUTH_TOKEN: 'auth',
@@ -169,7 +169,7 @@ describe('CallSession Twilio pre-start binding', () => {
       translationSessionConfig: {
         realtimeTranslationVoiceMode: 'dynamic_voice_adaptation',
         realtimeTranslationVoiceSelectable: false,
-        fillerTtsVoice: 'cedar'
+        fillerTtsVoice: 'onyx'
       }
     });
   });

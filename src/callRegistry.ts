@@ -483,7 +483,7 @@ export class CallSession {
       text,
       language: this.record.remoteLanguage,
       voice: this.config.OPENAI_FILLER_TTS_VOICE,
-      instructions: `Speak naturally in ${this.record.remoteLanguage}. This is a very short phone-call thinking filler before the translated answer. Use a low, neutral, conversational voice. Do not sound like a separate assistant and do not add any words beyond the input text.`,
+      instructions: `Speak naturally in ${this.record.remoteLanguage}. This is a very short phone-call thinking filler before the translated answer. Use a clearly masculine adult male voice with a low, calm phone-call delivery. Do not sound like a separate assistant and do not add any words beyond the input text.`,
       speed: 0.98
     });
     return this.sendPcm24kToTwilioInChunks(pcm24k, `predictive-${phase}-${Date.now()}`);

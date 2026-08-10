@@ -29,7 +29,7 @@ Copy `.env.example` to `.env` and fill in values.
 Required for real calls:
 
 - `OPENAI_API_KEY`
-- `OPENAI_FILLER_TTS_VOICE` is optional and defaults to `cedar`. Filler audio is generated with the Speech API; realtime translation audio uses OpenAI's dynamic translation voice and currently cannot be forced to an identical fixed voice.
+- `OPENAI_FILLER_TTS_VOICE` is optional and defaults to `onyx` for a more consistently masculine filler voice. Filler audio is generated with the Speech API; realtime translation audio uses OpenAI's dynamic translation voice and currently cannot be forced to an identical fixed voice.
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_PHONE_NUMBER`
