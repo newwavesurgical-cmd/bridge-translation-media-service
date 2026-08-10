@@ -19,6 +19,7 @@ const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const MAX_TRANSCRIPT_DIAGNOSTIC_TAIL = 200;
 const SPEECH_RMS_THRESHOLD = 0.003;
 const OUTPUT_SPEECH_HANGOVER_MS = 9000;
+const REMOTE_MEDIA_OUTPUT_HANGOVER_MS = 45000;
 
 type DiagnosticTranscriptEntry = {
   at: string;
@@ -416,7 +417,7 @@ export class CallSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.userLanguage,
         onAudioDelta: (pcm24k) => {
-          if (!this.isRecentSpeech('remote')) {
+          if (!this.isRecentRemoteMedia()) {
             this.record.counters.remoteTranslatedAudioDroppedByGate += 1;
             return;
           }
@@ -425,7 +426,7 @@ export class CallSession {
         },
         onInputTranscriptDelta: (delta) => this.emitTranscript('remote', 'source', delta),
         onOutputTranscriptDelta: (delta) => {
-          if (this.isRecentSpeech('remote')) {
+          if (this.isRecentRemoteMedia()) {
             this.predictive?.handleRemoteTranslationDelta(delta);
           }
           this.emitTranscript('remote', 'translation', delta);
@@ -438,7 +439,7 @@ export class CallSession {
   }
 
   private emitTranscript(speaker: 'owner' | 'remote', kind: 'source' | 'translation', delta: string): void {
-    if (!this.isRecentSpeech(speaker)) {
+    if (!this.isTranscriptAllowed(speaker)) {
       this.record.counters.transcriptDeltasDroppedByGate += 1;
       return;
     }
@@ -548,6 +549,21 @@ export class CallSession {
       return false;
     }
     return Date.now() - Date.parse(timestamp) <= windowMs;
+  }
+
+  private isRecentRemoteMedia(windowMs = REMOTE_MEDIA_OUTPUT_HANGOVER_MS): boolean {
+    const timestamp = this.record.lastTwilioMediaAt ?? this.record.lastTwilioSpeechAt;
+    if (!timestamp) {
+      return false;
+    }
+    return Date.now() - Date.parse(timestamp) <= windowMs;
+  }
+
+  private isTranscriptAllowed(speaker: 'owner' | 'remote'): boolean {
+    if (speaker === 'remote') {
+      return this.isRecentRemoteMedia();
+    }
+    return this.isRecentSpeech('owner');
   }
 }
 

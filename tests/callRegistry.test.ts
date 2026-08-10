@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { makeStreamToken } from '../src/auth.js';
 import { CallRegistry } from '../src/callRegistry.js';
 import type { AppConfig } from '../src/config.js';
@@ -164,5 +164,39 @@ describe('CallSession Twilio pre-start binding', () => {
       predictiveActiveTurn: false,
       predictiveResolvedSlots: {}
     });
+  });
+
+  it('keeps remote transcripts when Twilio media is active even without RMS speech proof', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-10T04:39:20.000Z'));
+    try {
+      const registry = new CallRegistry(config);
+      const session = registry.create({
+        to: '+15551230000',
+        userLanguage: 'English',
+        remoteLanguage: 'Spanish'
+      });
+
+      session.data.lastTwilioMediaAt = '2026-08-10T04:39:19.000Z';
+
+      (session as unknown as { emitTranscript: (speaker: 'remote', kind: 'translation', delta: string) => void }).emitTranscript(
+        'remote',
+        'translation',
+        'We have a table available.'
+      );
+
+      expect(session.diagnostics()).toMatchObject({
+        transcriptDeltaCount: 1,
+        transcriptTail: [
+          {
+            speaker: 'remote',
+            kind: 'translation',
+            delta: 'We have a table available.'
+          }
+        ]
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
