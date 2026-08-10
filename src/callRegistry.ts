@@ -41,6 +41,7 @@ export interface CallRecord {
   counters: {
     appAudioChunks: number;
     twilioMediaChunks: number;
+    twilioOutboundEchoChunksDropped: number;
     appSilentChunksDropped: number;
     twilioSilentChunksDropped: number;
     ownerTranslatedAudioChunks: number;
@@ -83,6 +84,7 @@ export class CallRegistry {
       counters: {
         appAudioChunks: 0,
         twilioMediaChunks: 0,
+        twilioOutboundEchoChunksDropped: 0,
         appSilentChunksDropped: 0,
         twilioSilentChunksDropped: 0,
         ownerTranslatedAudioChunks: 0,
@@ -335,6 +337,10 @@ export class CallSession {
     if (message.event === 'media') {
       this.record.counters.twilioMediaChunks += 1;
       this.record.lastTwilioMediaAt = new Date().toISOString();
+      if (message.media.track === 'outbound') {
+        this.record.counters.twilioOutboundEchoChunksDropped += 1;
+        return;
+      }
       const pcm24k = twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload);
       if (!this.shouldForwardTwilioAudio(pcm24k)) {
         this.record.counters.twilioSilentChunksDropped += 1;
