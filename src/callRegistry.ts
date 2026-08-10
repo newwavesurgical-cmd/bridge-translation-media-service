@@ -13,7 +13,7 @@ import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { PredictiveReservationController } from './predictive/reservationController.js';
 import { completeTwilioCall } from './twilio/client.js';
-import type { AppClientMessage, AppServerMessage, CreateCallRequest, PredictiveMode, TwilioMediaMessage } from './types/messages.js';
+import type { AppClientMessage, AppServerMessage, CreateCallRequest, FillerVoiceGender, PredictiveMode, TwilioMediaMessage } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const MAX_TRANSCRIPT_DIAGNOSTIC_TAIL = 200;
@@ -38,6 +38,7 @@ export interface CallRecord {
   introMessageText?: string;
   introDisclaimerText?: string;
   predictiveMode: PredictiveMode;
+  fillerVoiceGender: FillerVoiceGender;
   createdAt: string;
   state: 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
   error?: string;
@@ -87,6 +88,7 @@ export class CallRegistry {
       introMessageText: normalizeIntroText(request.introMessageText),
       introDisclaimerText: normalizeIntroText(request.introDisclaimerText),
       predictiveMode: request.predictiveMode ?? 'off',
+      fillerVoiceGender: request.fillerVoiceGender ?? 'auto',
       createdAt: new Date().toISOString(),
       state: 'created',
       appToken: makeAppToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, callId),
@@ -287,6 +289,7 @@ export class CallSession {
       remoteLanguage: this.record.remoteLanguage,
       introMessageText: redactIntroText(this.record.introMessageText),
       introDisclaimerText: redactIntroText(this.record.introDisclaimerText),
+      fillerVoiceGender: this.record.fillerVoiceGender,
       ...(this.predictive?.diagnostics() ?? defaultPredictiveDiagnostics(this.record.predictiveMode)),
       appConnected: Boolean(this.appWs),
       twilioConnected: Boolean(this.twilioWs),
@@ -301,7 +304,7 @@ export class CallSession {
         realtimeTranslationVoiceMode: 'dynamic_voice_adaptation',
         realtimeTranslationVoiceSelectable: false,
         fillerTtsModel: this.config.OPENAI_TTS_MODEL,
-        fillerTtsVoice: this.config.OPENAI_FILLER_TTS_VOICE,
+        fillerTtsVoice: this.fillerVoiceSettings().voice,
         fillerVoiceNote:
           'Realtime translation does not expose fixed voice selection; filler uses a configured TTS voice and cannot be guaranteed identical.'
       },
@@ -479,14 +482,37 @@ export class CallSession {
   }
 
   private async speakPredictiveTextToRemote(text: string, phase: 'prefix' | 'completion'): Promise<number> {
+    const fillerVoice = this.fillerVoiceSettings();
     const pcm24k = await createSpeechPcm24kBase64(this.config, {
       text,
       language: this.record.remoteLanguage,
-      voice: this.config.OPENAI_FILLER_TTS_VOICE,
-      instructions: `Speak naturally in ${this.record.remoteLanguage}. This is a very short phone-call thinking filler before the translated answer. Use a clearly masculine adult male voice with a low, calm phone-call delivery. Do not sound like a separate assistant and do not add any words beyond the input text.`,
+      voice: fillerVoice.voice,
+      instructions: `Speak naturally in ${this.record.remoteLanguage}. This is a very short phone-call thinking filler before the translated answer. ${fillerVoice.instructions} Do not sound like a separate assistant and do not add any words beyond the input text.`,
       speed: 0.98
     });
     return this.sendPcm24kToTwilioInChunks(pcm24k, `predictive-${phase}-${Date.now()}`);
+  }
+
+  private fillerVoiceSettings(): { voice: string; instructions: string } {
+    switch (this.record.fillerVoiceGender) {
+      case 'male':
+        return {
+          voice: this.config.OPENAI_FILLER_TTS_VOICE_MALE,
+          instructions: 'Use a clearly masculine adult male voice with a low, calm phone-call delivery.'
+        };
+      case 'female':
+        return {
+          voice: this.config.OPENAI_FILLER_TTS_VOICE_FEMALE,
+          instructions: 'Use a clearly feminine adult female voice with a warm, calm phone-call delivery.'
+        };
+      case 'auto':
+      default:
+        return {
+          voice: this.config.OPENAI_FILLER_TTS_VOICE,
+          instructions:
+            'Use the configured default filler voice with a natural, calm phone-call delivery. This automatic mode does not infer speaker gender yet.'
+        };
+    }
   }
 
   private sendPcm24kToTwilioInChunks(pcm24k: string, markPrefix: string): number {

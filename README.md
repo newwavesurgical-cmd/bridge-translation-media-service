@@ -29,7 +29,7 @@ Copy `.env.example` to `.env` and fill in values.
 Required for real calls:
 
 - `OPENAI_API_KEY`
-- `OPENAI_FILLER_TTS_VOICE` is optional and defaults to `onyx` for a more consistently masculine filler voice. Filler audio is generated with the Speech API; realtime translation audio uses OpenAI's dynamic translation voice and currently cannot be forced to an identical fixed voice.
+- `OPENAI_FILLER_TTS_VOICE` is optional and defaults to `onyx` for automatic/default filler voice. `OPENAI_FILLER_TTS_VOICE_MALE` defaults to `onyx`; `OPENAI_FILLER_TTS_VOICE_FEMALE` defaults to `nova`. Filler audio is generated with the Speech API; realtime translation audio uses OpenAI's dynamic translation voice and currently cannot be forced to an identical fixed voice.
 - `TWILIO_ACCOUNT_SID`
 - `TWILIO_AUTH_TOKEN`
 - `TWILIO_PHONE_NUMBER`
@@ -69,7 +69,8 @@ curl -sS http://localhost:8787/calls \
     "announceTranslationAtStart":true,
     "introMessageText":"Hola, llamo para hacer una reservacion para cinco personas.",
     "introDisclaimerText":"Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia.",
-    "predictiveMode":"off"
+    "predictiveMode":"off",
+    "fillerVoiceGender":"auto"
   }'
 ```
 
@@ -112,7 +113,8 @@ Body:
   "announceTranslationAtStart": true,
   "introMessageText": "Hola, llamo para hacer una reservacion para cinco personas.",
   "introDisclaimerText": "Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia.",
-  "predictiveMode": "off"
+  "predictiveMode": "off",
+  "fillerVoiceGender": "auto"
 }
 ```
 
@@ -121,6 +123,8 @@ Body:
 `predictiveMode` is optional and defaults to `off`. The experimental value `restaurant_reservation_v1` is now a non-substantive bridge-filler mode: after remote speech goes quiet, the service may play a short filler phrase in the remote party's language, such as "Un momento..." or "Si, deme un segundo...", while waiting for the user's real translated answer. It rotates through safe fillers, uses context-aware presence fillers for phrases like "Can you hear me?", does not predict slot values, does not complete sentences for the user, and does not suppress the normal owner-to-remote translation path.
 
 Filler voice note: the filler path uses the Speech API voice configured by `OPENAI_FILLER_TTS_VOICE`. The realtime translation model currently uses dynamic voice adaptation and does not support a fixed voice selection parameter, so the service cannot guarantee that filler and translated speech are perfectly identical.
+
+`fillerVoiceGender` is optional and defaults to `auto`. Supported values are `auto`, `male`, and `female`. `male` uses `OPENAI_FILLER_TTS_VOICE_MALE`; `female` uses `OPENAI_FILLER_TTS_VOICE_FEMALE`; `auto` uses `OPENAI_FILLER_TTS_VOICE`. Current automatic mode does not infer gender from microphone audio yet; it is a default voice mode that can later be upgraded to real voice analysis.
 
 Response:
 

@@ -14,6 +14,8 @@ const config: AppConfig = {
   OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
   OPENAI_TTS_VOICE: 'cedar',
   OPENAI_FILLER_TTS_VOICE: 'onyx',
+  OPENAI_FILLER_TTS_VOICE_MALE: 'onyx',
+  OPENAI_FILLER_TTS_VOICE_FEMALE: 'nova',
   OPENAI_SAFETY_IDENTIFIER: 'test-user',
   TWILIO_ACCOUNT_SID: 'AC123',
   TWILIO_AUTH_TOKEN: 'auth',
@@ -155,21 +157,43 @@ describe('CallSession Twilio pre-start binding', () => {
       to: '+15551230001',
       userLanguage: 'English',
       remoteLanguage: 'Spanish',
-      predictiveMode: 'restaurant_reservation_v1'
+      predictiveMode: 'restaurant_reservation_v1',
+      fillerVoiceGender: 'male'
     });
 
     expect(normal.diagnostics()).toMatchObject({
       predictiveMode: 'off',
-      predictiveActiveTurn: false
+      predictiveActiveTurn: false,
+      fillerVoiceGender: 'auto'
     });
     expect(predictive.diagnostics()).toMatchObject({
       predictiveMode: 'restaurant_reservation_v1',
+      fillerVoiceGender: 'male',
       predictiveActiveTurn: false,
       predictiveResolvedSlots: {},
       translationSessionConfig: {
         realtimeTranslationVoiceMode: 'dynamic_voice_adaptation',
         realtimeTranslationVoiceSelectable: false,
         fillerTtsVoice: 'onyx'
+      }
+    });
+  });
+
+  it('allows female filler voice selection without changing translation mode', () => {
+    const registry = new CallRegistry(config);
+    const session = registry.create({
+      to: '+15551230002',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish',
+      predictiveMode: 'restaurant_reservation_v1',
+      fillerVoiceGender: 'female'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      fillerVoiceGender: 'female',
+      translationSessionConfig: {
+        realtimeTranslationVoiceMode: 'dynamic_voice_adaptation',
+        fillerTtsVoice: 'nova'
       }
     });
   });

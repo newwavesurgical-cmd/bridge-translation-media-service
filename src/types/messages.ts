@@ -1,6 +1,7 @@
 export type Speaker = 'owner' | 'remote';
 export type TranscriptKind = 'source' | 'translation';
 export type PredictiveMode = 'off' | 'restaurant_reservation_v1';
+export type FillerVoiceGender = 'auto' | 'male' | 'female';
 
 export type AppClientMessage =
   | {
@@ -135,6 +136,7 @@ export interface CreateCallRequest {
   introMessageText?: string;
   introDisclaimerText?: string;
   predictiveMode?: PredictiveMode;
+  fillerVoiceGender?: FillerVoiceGender;
   clientCallId?: string;
 }
 

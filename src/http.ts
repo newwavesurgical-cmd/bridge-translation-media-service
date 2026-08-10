@@ -16,6 +16,7 @@ const createCallSchema = z.object({
   introMessageText: z.string().max(800).optional(),
   introDisclaimerText: z.string().max(800).optional(),
   predictiveMode: z.enum(['off', 'restaurant_reservation_v1']).optional(),
+  fillerVoiceGender: z.enum(['auto', 'male', 'female']).optional(),
   clientCallId: z.string().optional()
 });
 

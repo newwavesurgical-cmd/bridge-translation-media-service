@@ -11,6 +11,8 @@ const envSchema = z.object({
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
   OPENAI_TTS_VOICE: z.string().default('cedar'),
   OPENAI_FILLER_TTS_VOICE: z.string().default('onyx'),
+  OPENAI_FILLER_TTS_VOICE_MALE: z.string().default('onyx'),
+  OPENAI_FILLER_TTS_VOICE_FEMALE: z.string().default('nova'),
   OPENAI_SAFETY_IDENTIFIER: z.string().default('bridge-phone-call-prototype'),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),
