@@ -13,6 +13,8 @@ const createCallSchema = z.object({
   userLanguage: z.string().min(2),
   remoteLanguage: z.string().min(2),
   announceTranslationAtStart: z.boolean().optional(),
+  introMessageText: z.string().max(800).optional(),
+  introDisclaimerText: z.string().max(800).optional(),
   clientCallId: z.string().optional()
 });
 
@@ -97,7 +99,9 @@ export function createBridgeMediaServer(config: AppConfig) {
           callId,
           userLanguage: session.data.userLanguage,
           remoteLanguage: session.data.remoteLanguage,
-          announceTranslationAtStart: session.data.announceTranslationAtStart
+          announceTranslationAtStart: session.data.announceTranslationAtStart,
+          introMessageText: session.data.introMessageText,
+          introDisclaimerText: session.data.introDisclaimerText
         });
         return sendXml(res, 200, xml);
       }

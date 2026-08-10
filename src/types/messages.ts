@@ -114,6 +114,8 @@ export interface CreateCallRequest {
   userLanguage: string;
   remoteLanguage: string;
   announceTranslationAtStart?: boolean;
+  introMessageText?: string;
+  introDisclaimerText?: string;
   clientCallId?: string;
 }
 

@@ -124,4 +124,20 @@ describe('CallSession Twilio pre-start binding', () => {
       ]
     });
   });
+
+  it('retains sanitized custom intro text in diagnostics', () => {
+    const registry = new CallRegistry(config);
+    const session = registry.create({
+      to: '+15551230000',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish',
+      introMessageText: '  Hola, llamo para una reservacion.  ',
+      introDisclaimerText: 'Estoy usando un traductor en vivo.'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      introMessageText: 'Hola, llamo para una reservacion.',
+      introDisclaimerText: 'Estoy usando un traductor en vivo.'
+    });
+  });
 });

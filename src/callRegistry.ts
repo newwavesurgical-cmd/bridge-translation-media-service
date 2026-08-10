@@ -30,6 +30,8 @@ export interface CallRecord {
   userLanguage: string;
   remoteLanguage: string;
   announceTranslationAtStart: boolean;
+  introMessageText?: string;
+  introDisclaimerText?: string;
   createdAt: string;
   state: 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
   error?: string;
@@ -76,6 +78,8 @@ export class CallRegistry {
       userLanguage: request.userLanguage,
       remoteLanguage: request.remoteLanguage,
       announceTranslationAtStart: request.announceTranslationAtStart ?? true,
+      introMessageText: normalizeIntroText(request.introMessageText),
+      introDisclaimerText: normalizeIntroText(request.introDisclaimerText),
       createdAt: new Date().toISOString(),
       state: 'created',
       appToken: makeAppToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, callId),
@@ -264,6 +268,8 @@ export class CallSession {
       to: redactPhone(this.record.to),
       userLanguage: this.record.userLanguage,
       remoteLanguage: this.record.remoteLanguage,
+      introMessageText: redactIntroText(this.record.introMessageText),
+      introDisclaimerText: redactIntroText(this.record.introDisclaimerText),
       appConnected: Boolean(this.appWs),
       twilioConnected: Boolean(this.twilioWs),
       twilioStreamSid: this.record.twilioStreamSid ?? null,
@@ -500,6 +506,18 @@ function redactPhone(phone: string): string {
     return '****';
   }
   return `${'*'.repeat(Math.max(0, phone.length - 4))}${phone.slice(-4)}`;
+}
+
+function normalizeIntroText(text: string | undefined): string | undefined {
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, 800) : undefined;
+}
+
+function redactIntroText(text: string | undefined): string | null {
+  if (!text) {
+    return null;
+  }
+  return text.length > 160 ? `${text.slice(0, 160)}...` : text;
 }
 
 function pcm16Rms(samples: Int16Array): number {

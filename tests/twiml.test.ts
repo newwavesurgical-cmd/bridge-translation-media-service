@@ -37,4 +37,36 @@ describe('translated call TwiML', () => {
     expect(xml).toContain('language="es-ES"');
     expect(xml).toContain('Esta llamada usa traduccion en vivo');
   });
+
+  it('plays custom translated intro blocks before connecting the media stream', () => {
+    const xml = buildTranslatedCallTwiMl({
+      config,
+      callId: 'call_test',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish',
+      announceTranslationAtStart: true,
+      introMessageText: 'Hola, llamo para hacer una reservacion para cinco personas.',
+      introDisclaimerText:
+        'Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia.'
+    });
+
+    expect(xml.indexOf('Hola, llamo para hacer una reservacion')).toBeLessThan(xml.indexOf('<Connect>'));
+    expect(xml.indexOf('Estoy usando un traductor en vivo')).toBeLessThan(xml.indexOf('<Connect>'));
+    expect(xml).not.toContain('Esta llamada usa traduccion en vivo. Por favor, hable normalmente.');
+  });
+
+  it('does not play intro text when the announcement is disabled', () => {
+    const xml = buildTranslatedCallTwiMl({
+      config,
+      callId: 'call_test',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish',
+      announceTranslationAtStart: false,
+      introMessageText: 'Hola, llamo para hacer una reservacion.',
+      introDisclaimerText: 'Estoy usando un traductor en vivo.'
+    });
+
+    expect(xml).not.toContain('<Say');
+    expect(xml).toContain('<Connect>');
+  });
 });

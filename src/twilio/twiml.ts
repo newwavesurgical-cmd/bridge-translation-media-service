@@ -10,6 +10,8 @@ interface BuildTwiMlOptions {
   userLanguage: string;
   remoteLanguage: string;
   announceTranslationAtStart: boolean;
+  introMessageText?: string;
+  introDisclaimerText?: string;
 }
 
 export function buildTranslatedCallTwiMl(options: BuildTwiMlOptions): string {
@@ -19,10 +21,11 @@ export function buildTranslatedCallTwiMl(options: BuildTwiMlOptions): string {
 
   const response = new twiml.VoiceResponse();
   if (options.announceTranslationAtStart) {
-    response.say(
-      { language: twilioSayLanguage(options.remoteLanguage) as 'es-ES' },
-      translationIntroText(options.remoteLanguage)
-    );
+    const language = twilioSayLanguage(options.remoteLanguage) as 'es-ES';
+    const introBlocks = introTextBlocks(options);
+    for (const block of introBlocks) {
+      response.say({ language }, block);
+    }
   }
 
   const connect = response.connect();
@@ -60,6 +63,16 @@ function twilioSayLanguage(language: string): string {
     ko: 'ko-KR'
   };
   return map[normalized] ?? 'en-US';
+}
+
+function introTextBlocks(options: BuildTwiMlOptions): string[] {
+  const blocks = [options.introMessageText, options.introDisclaimerText].map(normalizeIntroText).filter((text): text is string => Boolean(text));
+  return blocks.length > 0 ? blocks : [translationIntroText(options.remoteLanguage)];
+}
+
+function normalizeIntroText(text: string | undefined): string | undefined {
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, 800) : undefined;
 }
 
 function translationIntroText(language: string): string {

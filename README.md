@@ -65,7 +65,9 @@ curl -sS http://localhost:8787/calls \
     "to":"+15555550123",
     "userLanguage":"English",
     "remoteLanguage":"Spanish",
-    "announceTranslationAtStart":true
+    "announceTranslationAtStart":true,
+    "introMessageText":"Hola, llamo para hacer una reservacion para cinco personas.",
+    "introDisclaimerText":"Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia."
   }'
 ```
 
@@ -105,9 +107,13 @@ Body:
   "to": "+525512345678",
   "userLanguage": "English",
   "remoteLanguage": "Spanish",
-  "announceTranslationAtStart": true
+  "announceTranslationAtStart": true,
+  "introMessageText": "Hola, llamo para hacer una reservacion para cinco personas.",
+  "introDisclaimerText": "Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia."
 }
 ```
+
+`introMessageText` and `introDisclaimerText` are optional text-to-speech blocks played before the Twilio media stream connects. They should already be translated into the remote party's language. If neither custom field is sent and `announceTranslationAtStart` is true, the service plays its default translation announcement.
 
 Response:
 
