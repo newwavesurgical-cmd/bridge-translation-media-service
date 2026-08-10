@@ -10,6 +10,10 @@ services:
         value: 8787
       - key: OPENAI_TRANSLATION_MODEL
         value: gpt-realtime-translate
+      - key: OPENAI_TTS_MODEL
+        value: gpt-4o-mini-tts
+      - key: OPENAI_TTS_VOICE
+        value: marin
       - key: OPENAI_SAFETY_IDENTIFIER
         value: bridge-phone-call-prototype
       - key: DRY_RUN_CALLS

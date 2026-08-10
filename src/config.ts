@@ -8,6 +8,8 @@ const envSchema = z.object({
   APP_STREAM_PUBLIC_WSS_URL: z.string().url().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_TRANSLATION_MODEL: z.string().default('gpt-realtime-translate'),
+  OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
+  OPENAI_TTS_VOICE: z.string().default('marin'),
   OPENAI_SAFETY_IDENTIFIER: z.string().default('bridge-phone-call-prototype'),
   TWILIO_ACCOUNT_SID: z.string().optional(),
   TWILIO_AUTH_TOKEN: z.string().optional(),

@@ -67,7 +67,8 @@ curl -sS http://localhost:8787/calls \
     "remoteLanguage":"Spanish",
     "announceTranslationAtStart":true,
     "introMessageText":"Hola, llamo para hacer una reservacion para cinco personas.",
-    "introDisclaimerText":"Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia."
+    "introDisclaimerText":"Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia.",
+    "predictiveMode":"off"
   }'
 ```
 
@@ -109,11 +110,14 @@ Body:
   "remoteLanguage": "Spanish",
   "announceTranslationAtStart": true,
   "introMessageText": "Hola, llamo para hacer una reservacion para cinco personas.",
-  "introDisclaimerText": "Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia."
+  "introDisclaimerText": "Estoy usando un traductor en vivo, asi que puede haber unos segundos de silencio antes de mis respuestas. Gracias por su paciencia.",
+  "predictiveMode": "off"
 }
 ```
 
 `introMessageText` and `introDisclaimerText` are optional text-to-speech blocks played before the Twilio media stream connects. They should already be translated into the remote party's language. If neither custom field is sent and `announceTranslationAtStart` is true, the service plays its default translation announcement.
+
+`predictiveMode` is optional and defaults to `off`. The first experimental value is `restaurant_reservation_v1`, which only supports English user language to Spanish remote language. In that mode, recognized reservation slot questions can trigger safe Spanish prefix audio while the service listens for the user's slot answer. During those predictive slot turns, direct owner-to-remote translated audio is suppressed to avoid duplicate speech.
 
 Response:
 

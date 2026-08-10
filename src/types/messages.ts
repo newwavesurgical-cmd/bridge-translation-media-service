@@ -1,5 +1,6 @@
 export type Speaker = 'owner' | 'remote';
 export type TranscriptKind = 'source' | 'translation';
+export type PredictiveMode = 'off' | 'restaurant_reservation_v1';
 
 export type AppClientMessage =
   | {
@@ -42,6 +43,23 @@ export type AppServerMessage =
       speaker: Speaker;
       transcriptKind: TranscriptKind;
       delta: string;
+    }
+  | {
+      type: 'predictive_event';
+      event:
+        | 'turn_started'
+        | 'prefix_audio_started'
+        | 'slot_resolved'
+        | 'completion_audio_started'
+        | 'turn_timeout'
+        | 'unsupported_language'
+        | 'speech_error';
+      mode: PredictiveMode;
+      slot?: string;
+      intent?: string;
+      text?: string;
+      detail?: string;
+      at: string;
     }
   | {
       type: 'error';
@@ -116,6 +134,7 @@ export interface CreateCallRequest {
   announceTranslationAtStart?: boolean;
   introMessageText?: string;
   introDisclaimerText?: string;
+  predictiveMode?: PredictiveMode;
   clientCallId?: string;
 }
 

@@ -3,13 +3,17 @@ import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
 import {
   base64ToPcm16,
+  base64ToBytes,
+  bytesToBase64,
   makeDtmfMuLaw8kBase64,
   openAiPcm24kBase64ToTwilioMuLaw8kBase64,
   twilioMuLaw8kBase64ToOpenAiPcm24kBase64
 } from './audio/codec.js';
+import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
+import { PredictiveReservationController } from './predictive/reservationController.js';
 import { completeTwilioCall } from './twilio/client.js';
-import type { AppClientMessage, AppServerMessage, CreateCallRequest, TwilioMediaMessage } from './types/messages.js';
+import type { AppClientMessage, AppServerMessage, CreateCallRequest, PredictiveMode, TwilioMediaMessage } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const MAX_TRANSCRIPT_DIAGNOSTIC_TAIL = 200;
@@ -32,6 +36,7 @@ export interface CallRecord {
   announceTranslationAtStart: boolean;
   introMessageText?: string;
   introDisclaimerText?: string;
+  predictiveMode: PredictiveMode;
   createdAt: string;
   state: 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
   error?: string;
@@ -80,6 +85,7 @@ export class CallRegistry {
       announceTranslationAtStart: request.announceTranslationAtStart ?? true,
       introMessageText: normalizeIntroText(request.introMessageText),
       introDisclaimerText: normalizeIntroText(request.introDisclaimerText),
+      predictiveMode: request.predictiveMode ?? 'off',
       createdAt: new Date().toISOString(),
       state: 'created',
       appToken: makeAppToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, callId),
@@ -129,12 +135,22 @@ export class CallSession {
   private twilioWs?: WebSocket;
   private ownerToRemote?: OpenAiTranslationSession;
   private remoteToOwner?: OpenAiTranslationSession;
+  private predictive?: PredictiveReservationController;
 
   constructor(
     private readonly config: AppConfig,
     private readonly record: CallRecord,
     private readonly onDispose: (diagnostics: Record<string, unknown>) => void
-  ) {}
+  ) {
+    if (record.predictiveMode === 'restaurant_reservation_v1') {
+      this.predictive = new PredictiveReservationController({
+        userLanguage: record.userLanguage,
+        remoteLanguage: record.remoteLanguage,
+        speakToRemote: (text, phase) => this.speakPredictiveTextToRemote(text, phase),
+        emitEvent: (event) => this.sendApp({ type: 'predictive_event', ...event })
+      });
+    }
+  }
 
   get callId(): string {
     return this.record.callId;
@@ -270,6 +286,7 @@ export class CallSession {
       remoteLanguage: this.record.remoteLanguage,
       introMessageText: redactIntroText(this.record.introMessageText),
       introDisclaimerText: redactIntroText(this.record.introDisclaimerText),
+      ...(this.predictive?.diagnostics() ?? defaultPredictiveDiagnostics(this.record.predictiveMode)),
       appConnected: Boolean(this.appWs),
       twilioConnected: Boolean(this.twilioWs),
       twilioStreamSid: this.record.twilioStreamSid ?? null,
@@ -370,6 +387,10 @@ export class CallSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.remoteLanguage,
         onAudioDelta: (pcm24k) => {
+          if (this.predictive?.shouldSuppressOwnerTranslation()) {
+            this.predictive.recordSuppressedOwnerAudioChunk();
+            return;
+          }
           if (!this.isRecentSpeech('owner')) {
             this.record.counters.ownerTranslatedAudioDroppedByGate += 1;
             return;
@@ -378,7 +399,10 @@ export class CallSession {
           const muLaw8k = openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k);
           this.sendTwilioMedia(muLaw8k, `owner-to-remote-${Date.now()}`);
         },
-        onInputTranscriptDelta: (delta) => this.emitTranscript('owner', 'source', delta),
+        onInputTranscriptDelta: (delta) => {
+          this.predictive?.handleOwnerSourceDelta(delta);
+          this.emitTranscript('owner', 'source', delta);
+        },
         onOutputTranscriptDelta: (delta) => this.emitTranscript('owner', 'translation', delta),
         onStatus: () => this.sendStatus(),
         onError: (error) => this.fail(error)
@@ -400,7 +424,12 @@ export class CallSession {
           this.sendApp({ type: 'translated_audio', speaker: 'remote', audio: pcm24k, sampleRate: 24000, encoding: 'pcm16' });
         },
         onInputTranscriptDelta: (delta) => this.emitTranscript('remote', 'source', delta),
-        onOutputTranscriptDelta: (delta) => this.emitTranscript('remote', 'translation', delta),
+        onOutputTranscriptDelta: (delta) => {
+          if (this.isRecentSpeech('remote')) {
+            this.predictive?.handleRemoteTranslationDelta(delta);
+          }
+          this.emitTranscript('remote', 'translation', delta);
+        },
         onStatus: () => this.sendStatus(),
         onError: (error) => this.fail(error)
       });
@@ -439,6 +468,27 @@ export class CallSession {
         mark: { name: markName }
       })
     );
+  }
+
+  private async speakPredictiveTextToRemote(text: string, phase: 'prefix' | 'completion'): Promise<number> {
+    const pcm24k = await createSpeechPcm24kBase64(this.config, {
+      text,
+      language: this.record.remoteLanguage
+    });
+    return this.sendPcm24kToTwilioInChunks(pcm24k, `predictive-${phase}-${Date.now()}`);
+  }
+
+  private sendPcm24kToTwilioInChunks(pcm24k: string, markPrefix: string): number {
+    const muLaw8k = openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k);
+    const bytes = base64ToBytes(muLaw8k);
+    const chunkSize = 160;
+    let chunks = 0;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      const chunk = bytes.slice(offset, offset + chunkSize);
+      this.sendTwilioMedia(bytesToBase64(chunk), `${markPrefix}-${chunks}`);
+      chunks += 1;
+    }
+    return chunks;
   }
 
   private sendApp(message: AppServerMessage): void {
@@ -518,6 +568,23 @@ function redactIntroText(text: string | undefined): string | null {
     return null;
   }
   return text.length > 160 ? `${text.slice(0, 160)}...` : text;
+}
+
+function defaultPredictiveDiagnostics(mode: PredictiveMode): Record<string, unknown> {
+  return {
+    predictiveMode: mode,
+    predictiveActiveTurn: false,
+    predictiveRecognizedIntent: null,
+    predictivePendingSlot: null,
+    predictiveResolvedSlots: {},
+    predictiveSuppressedOwnerAudioChunks: 0,
+    predictivePrefixAudioChunks: 0,
+    predictiveCompletionAudioChunks: 0,
+    remoteQuestionUnderstoodAt: null,
+    safePrefixFirstAudioAt: null,
+    userSlotDetectedAt: null,
+    completionFirstAudioAt: null
+  };
 }
 
 function pcm16Rms(samples: Int16Array): number {

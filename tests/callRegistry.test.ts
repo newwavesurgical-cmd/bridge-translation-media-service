@@ -140,4 +140,29 @@ describe('CallSession Twilio pre-start binding', () => {
       introDisclaimerText: 'Estoy usando un traductor en vivo.'
     });
   });
+
+  it('defaults predictive mode off and records opt-in predictive diagnostics', () => {
+    const registry = new CallRegistry(config);
+    const normal = registry.create({
+      to: '+15551230000',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish'
+    });
+    const predictive = registry.create({
+      to: '+15551230001',
+      userLanguage: 'English',
+      remoteLanguage: 'Spanish',
+      predictiveMode: 'restaurant_reservation_v1'
+    });
+
+    expect(normal.diagnostics()).toMatchObject({
+      predictiveMode: 'off',
+      predictiveActiveTurn: false
+    });
+    expect(predictive.diagnostics()).toMatchObject({
+      predictiveMode: 'restaurant_reservation_v1',
+      predictiveActiveTurn: false,
+      predictiveResolvedSlots: {}
+    });
+  });
 });
