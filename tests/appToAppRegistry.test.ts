@@ -39,8 +39,11 @@ describe('AppToAppRegistry', () => {
     expect(session.participantStreamUrl('receiver')).toMatch(
       /^wss:\/\/bridge-media\.example\.com\/app-to-app\/stream\/app2app_test\/receiver\?token=/
     );
+    expect(session.inviteCode).toMatch(/^[2-9A-Z]{9}$/);
+    expect(registry.getByInviteCode(session.inviteCode)).toBe(session);
     expect(session.diagnostics()).toMatchObject({
       sessionId: 'app2app_test',
+      inviteCode: session.inviteCode,
       mode: 'app-to-app',
       initiatorLanguage: 'English',
       receiverLanguage: 'Spanish',
@@ -62,6 +65,28 @@ describe('AppToAppRegistry', () => {
 
     expect(session.verifyParticipantToken('initiator', initiatorToken)).toBe(true);
     expect(session.verifyParticipantToken('receiver', initiatorToken)).toBe(false);
+  });
+
+  it('resolves receiver invite details without exposing the code in the websocket token', () => {
+    const registry = new AppToAppRegistry(config);
+    const session = registry.create({
+      initiatorLanguage: 'English',
+      receiverLanguage: 'Spanish',
+      clientSessionId: 'app2app_invite_test'
+    });
+
+    expect(registry.getByInviteCode(` ${session.inviteCode.toLowerCase()} `)).toBe(session);
+    expect(registry.getByInviteCode('wrong-code')).toBeUndefined();
+    expect(session.receiverInvite()).toMatchObject({
+      sessionId: 'app2app_invite_test',
+      role: 'receiver',
+      initiatorLanguage: 'English',
+      receiverLanguage: 'Spanish',
+      inviteCode: session.inviteCode
+    });
+    expect(String(session.receiverInvite().receiverStreamUrl)).toContain(
+      '/app-to-app/stream/app2app_invite_test/receiver?token='
+    );
   });
 
   it('keeps app-to-app filler settings in diagnostics', () => {
@@ -112,9 +137,11 @@ describe('app-to-app HTTP endpoint', () => {
     });
 
     expect(session.participantStreamUrl('receiver')).toContain('/app-to-app/stream/app2app_http_test/receiver?token=');
+    expect(session.inviteCode).toMatch(/^[2-9A-Z]{9}$/);
     expect(appToAppRegistry.listDiagnostics()).toMatchObject([
       {
         sessionId: 'app2app_http_test',
+        inviteCode: session.inviteCode,
         mode: 'app-to-app',
         initiatorLanguage: 'English',
         receiverLanguage: 'Spanish'

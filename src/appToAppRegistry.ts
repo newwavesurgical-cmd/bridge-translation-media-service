@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
 import { makeId, signValue } from './auth.js';
@@ -11,6 +12,8 @@ const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const SPEECH_RMS_THRESHOLD = 0.003;
 const FILLER_AFTER_SILENCE_MS = 900;
 const FILLER_COOLDOWN_MS = 11_000;
+const APP_TO_APP_INVITE_TTL_MS = 30 * 60 * 1000;
+const APP_TO_APP_INVITE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
 export type AppToAppParticipant = 'initiator' | 'receiver';
 
@@ -77,6 +80,8 @@ type AppToAppServerMessage =
 
 interface AppToAppRecord {
   sessionId: string;
+  inviteCode: string;
+  inviteExpiresAt: string;
   initiatorLanguage: string;
   receiverLanguage: string;
   createdAt: string;
@@ -120,6 +125,7 @@ interface ParticipantTiming {
 
 export class AppToAppRegistry {
   private readonly sessions = new Map<string, AppToAppSession>();
+  private readonly inviteCodes = new Map<string, string>();
   private readonly recentDiagnostics: Array<Record<string, unknown>> = [];
 
   constructor(private readonly config: AppConfig) {}
@@ -129,8 +135,11 @@ export class AppToAppRegistry {
       throw new Error('BRIDGE_MEDIA_SHARED_SECRET is required');
     }
     const sessionId = request.clientSessionId ?? makeId('app2app');
+    const inviteCode = this.createUniqueInviteCode();
     const record: AppToAppRecord = {
       sessionId,
+      inviteCode,
+      inviteExpiresAt: new Date(Date.now() + APP_TO_APP_INVITE_TTL_MS).toISOString(),
       initiatorLanguage: request.initiatorLanguage,
       receiverLanguage: request.receiverLanguage,
       createdAt: new Date().toISOString(),
@@ -161,6 +170,7 @@ export class AppToAppRegistry {
     };
     const session = new AppToAppSession(this.config, record, (diagnostics) => this.delete(sessionId, diagnostics));
     this.sessions.set(sessionId, session);
+    this.inviteCodes.set(inviteCode, sessionId);
     return session;
   }
 
@@ -168,7 +178,25 @@ export class AppToAppRegistry {
     return this.sessions.get(sessionId);
   }
 
+  getByInviteCode(inviteCode: string): AppToAppSession | undefined {
+    const normalized = normalizeInviteCode(inviteCode);
+    const sessionId = this.inviteCodes.get(normalized);
+    if (!sessionId) {
+      return undefined;
+    }
+    const session = this.sessions.get(sessionId);
+    if (!session || session.inviteExpired()) {
+      this.inviteCodes.delete(normalized);
+      return undefined;
+    }
+    return session;
+  }
+
   delete(sessionId: string, diagnostics?: Record<string, unknown>): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      this.inviteCodes.delete(session.inviteCode);
+    }
     if (diagnostics) {
       this.recentDiagnostics.unshift(diagnostics);
       this.recentDiagnostics.splice(8);
@@ -182,6 +210,16 @@ export class AppToAppRegistry {
 
   listRecentDiagnostics(): Array<Record<string, unknown>> {
     return this.recentDiagnostics;
+  }
+
+  private createUniqueInviteCode(): string {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const code = makeInviteCode();
+      if (!this.inviteCodes.has(code)) {
+        return code;
+      }
+    }
+    throw new Error('Unable to allocate app-to-app invite code');
   }
 }
 
@@ -202,6 +240,29 @@ export class AppToAppSession {
     return this.record.sessionId;
   }
 
+  get inviteCode(): string {
+    return this.record.inviteCode;
+  }
+
+  inviteExpired(): boolean {
+    return Date.now() > Date.parse(this.record.inviteExpiresAt);
+  }
+
+  receiverInvite(): Record<string, unknown> {
+    if (this.inviteExpired()) {
+      throw new Error('invite expired');
+    }
+    return {
+      sessionId: this.sessionId,
+      role: 'receiver',
+      initiatorLanguage: this.record.initiatorLanguage,
+      receiverLanguage: this.record.receiverLanguage,
+      receiverStreamUrl: this.participantStreamUrl('receiver'),
+      inviteCode: this.record.inviteCode,
+      inviteExpiresAt: this.record.inviteExpiresAt
+    };
+  }
+
   verifyParticipantToken(participant: AppToAppParticipant, token: string): boolean {
     if (!this.config.BRIDGE_MEDIA_SHARED_SECRET) {
       return false;
@@ -219,6 +280,8 @@ export class AppToAppSession {
   diagnostics(): Record<string, unknown> {
     return {
       sessionId: this.record.sessionId,
+      inviteCode: this.record.inviteCode,
+      inviteExpiresAt: this.record.inviteExpiresAt,
       state: this.record.state,
       mode: 'app-to-app',
       initiatorLanguage: this.record.initiatorLanguage,
@@ -635,6 +698,19 @@ export class AppToAppSession {
 
 function makeParticipantToken(secret: string, sessionId: string, participant: AppToAppParticipant): string {
   return signValue(secret, `app-to-app:${sessionId}:${participant}`);
+}
+
+function makeInviteCode(): string {
+  let code = '';
+  const bytes = crypto.randomBytes(9);
+  for (const byte of bytes) {
+    code += APP_TO_APP_INVITE_ALPHABET[byte % APP_TO_APP_INVITE_ALPHABET.length];
+  }
+  return code;
+}
+
+function normalizeInviteCode(inviteCode: string): string {
+  return inviteCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
 function otherParticipant(participant: AppToAppParticipant): AppToAppParticipant {

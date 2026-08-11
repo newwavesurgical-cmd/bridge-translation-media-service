@@ -124,8 +124,25 @@ export function createBridgeMediaServer(config: AppConfig) {
           status: 'created',
           initiatorStreamUrl: session.participantStreamUrl('initiator'),
           receiverStreamUrl: session.participantStreamUrl('receiver'),
-          inviteUrlPath: `/app-to-app?sessionId=${encodeURIComponent(session.sessionId)}&role=receiver`,
+          inviteCode: session.inviteCode,
+          inviteUrlPath: `/j/${encodeURIComponent(session.inviteCode)}`,
+          legacyInviteUrlPath: `/app-to-app?sessionId=${encodeURIComponent(session.sessionId)}&role=receiver`,
           diagnostics: session.diagnostics()
+        });
+      }
+
+      if (req.method === 'GET' && url.pathname.startsWith('/app-to-app/invites/')) {
+        const inviteCode = decodeURIComponent(url.pathname.replace('/app-to-app/invites/', ''));
+        const session = appToAppRegistry.getByInviteCode(inviteCode);
+        if (!session) {
+          return sendJson(res, 404, {
+            ok: false,
+            error: 'invite not found or expired'
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          ...session.receiverInvite()
         });
       }
 
