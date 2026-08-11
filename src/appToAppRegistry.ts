@@ -76,6 +76,13 @@ type AppToAppServerMessage =
       transcriptKind: TranscriptKind;
       delta: string;
     }
+  | {
+      type: 'participant_activity';
+      participant: AppToAppParticipant;
+      speaking: boolean;
+      audioRmsPercent: number;
+      at: string;
+    }
   | { type: 'error'; message: string };
 
 interface AppToAppRecord {
@@ -97,6 +104,8 @@ interface AppToAppRecord {
   lastSpeechAt: Partial<Record<AppToAppParticipant, string>>;
   lastFillerAt: Partial<Record<AppToAppParticipant, string>>;
   lastFillerText: Partial<Record<AppToAppParticipant, string>>;
+  speaking: Record<AppToAppParticipant, boolean>;
+  lastAudioRms: Record<AppToAppParticipant, number>;
   timing: Record<AppToAppParticipant, ParticipantTiming>;
   transcripts: TranscriptEntry[];
   counters: {
@@ -152,6 +161,14 @@ export class AppToAppRegistry {
       lastSpeechAt: {},
       lastFillerAt: {},
       lastFillerText: {},
+      speaking: {
+        initiator: false,
+        receiver: false
+      },
+      lastAudioRms: {
+        initiator: 0,
+        receiver: 0
+      },
       timing: {
         initiator: createParticipantTiming(),
         receiver: createParticipantTiming()
@@ -229,6 +246,7 @@ export class AppToAppSession {
   private initiatorToReceiver?: OpenAiTranslationSession;
   private receiverToInitiator?: OpenAiTranslationSession;
   private readonly fillerTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
+  private readonly speakingTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
 
   constructor(
     private readonly config: AppConfig,
@@ -299,6 +317,11 @@ export class AppToAppSession {
       lastSpeechAt: { ...this.record.lastSpeechAt },
       lastFillerAt: { ...this.record.lastFillerAt },
       lastFillerText: { ...this.record.lastFillerText },
+      speaking: { ...this.record.speaking },
+      lastAudioRmsPercent: {
+        initiator: Number((this.record.lastAudioRms.initiator * 100).toFixed(2)),
+        receiver: Number((this.record.lastAudioRms.receiver * 100).toFixed(2))
+      },
       timing: {
         initiator: summarizeParticipantTiming(this.record.timing.initiator),
         receiver: summarizeParticipantTiming(this.record.timing.receiver)
@@ -365,6 +388,7 @@ export class AppToAppSession {
   private routeAudio(from: AppToAppParticipant, audio: string): void {
     this.ensureTranslationSessions();
     const rms = this.trackAudioTiming(from, audio);
+    this.updateParticipantActivity(from, rms);
     this.trackParticipantAudioActivity(from, rms);
     if (from === 'initiator') {
       this.record.counters.initiatorAudioChunks += 1;
@@ -373,6 +397,41 @@ export class AppToAppSession {
     }
     this.record.counters.receiverAudioChunks += 1;
     this.receiverToInitiator?.appendPcm16Base64(audio);
+  }
+
+  private updateParticipantActivity(participant: AppToAppParticipant, rms: number): void {
+    this.record.lastAudioRms[participant] = rms;
+    if (rms < SPEECH_RMS_THRESHOLD) {
+      return;
+    }
+
+    if (!this.record.speaking[participant]) {
+      this.record.speaking[participant] = true;
+      this.sendActivityToBoth(participant, true, rms);
+    }
+
+    const existing = this.speakingTimers[participant];
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => {
+      this.record.speaking[participant] = false;
+      this.sendActivityToBoth(participant, false, this.record.lastAudioRms[participant]);
+    }, 900);
+    timer.unref?.();
+    this.speakingTimers[participant] = timer;
+  }
+
+  private sendActivityToBoth(participant: AppToAppParticipant, speaking: boolean, rms: number): void {
+    const message: AppToAppServerMessage = {
+      type: 'participant_activity',
+      participant,
+      speaking,
+      audioRmsPercent: Number((rms * 100).toFixed(2)),
+      at: new Date().toISOString()
+    };
+    this.sendTo('initiator', message);
+    this.sendTo('receiver', message);
   }
 
   private trackParticipantAudioActivity(participant: AppToAppParticipant, rms: number): void {
@@ -627,6 +686,11 @@ export class AppToAppSession {
     this.record.state = 'ended';
     this.record.endedAt = new Date().toISOString();
     for (const timer of Object.values(this.fillerTimers)) {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
+    for (const timer of Object.values(this.speakingTimers)) {
       if (timer) {
         clearTimeout(timer);
       }

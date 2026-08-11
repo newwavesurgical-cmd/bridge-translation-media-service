@@ -118,6 +118,14 @@ describe('AppToAppRegistry', () => {
           audioRmsPeakPercent: 0
         }
       },
+      speaking: {
+        initiator: false,
+        receiver: false
+      },
+      lastAudioRmsPercent: {
+        initiator: 0,
+        receiver: 0
+      },
       counters: {
         fillerAudioChunksToInitiator: 0,
         fillerAudioChunksToReceiver: 0,
