@@ -160,3 +160,18 @@ export interface CreateInPersonSessionResponse {
   streamUrl: string;
   diagnostics: Record<string, unknown>;
 }
+
+export interface CreateAppToAppSessionRequest {
+  initiatorLanguage: string;
+  receiverLanguage: string;
+  clientSessionId?: string;
+}
+
+export interface CreateAppToAppSessionResponse {
+  sessionId: string;
+  status: 'created';
+  initiatorStreamUrl: string;
+  receiverStreamUrl: string;
+  inviteUrlPath: string;
+  diagnostics: Record<string, unknown>;
+}

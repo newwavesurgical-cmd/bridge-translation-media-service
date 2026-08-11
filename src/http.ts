@@ -6,6 +6,7 @@ import type { AppConfig } from './config.js';
 import { mediaRouterConfigured, openAiConfigured, twilioConfigured } from './config.js';
 import { CallRegistry } from './callRegistry.js';
 import { InPersonRegistry } from './inPersonRegistry.js';
+import { AppToAppRegistry, type AppToAppParticipant } from './appToAppRegistry.js';
 import { originateTranslatedCall } from './twilio/client.js';
 import { buildTranslatedCallTwiMl } from './twilio/twiml.js';
 
@@ -27,12 +28,20 @@ const createInPersonSessionSchema = z.object({
   clientSessionId: z.string().optional()
 });
 
+const createAppToAppSessionSchema = z.object({
+  initiatorLanguage: z.string().min(2),
+  receiverLanguage: z.string().min(2),
+  clientSessionId: z.string().optional()
+});
+
 export function createBridgeMediaServer(config: AppConfig) {
   const registry = new CallRegistry(config);
   const inPersonRegistry = new InPersonRegistry(config);
+  const appToAppRegistry = new AppToAppRegistry(config);
   const appWss = new WebSocketServer({ noServer: true });
   const twilioWss = new WebSocketServer({ noServer: true });
   const inPersonWss = new WebSocketServer({ noServer: true });
+  const appToAppWss = new WebSocketServer({ noServer: true });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -52,7 +61,9 @@ export function createBridgeMediaServer(config: AppConfig) {
           activeCalls: registry.listDiagnostics(),
           recentCalls: registry.listRecentDiagnostics(),
           activeInPersonSessions: inPersonRegistry.listDiagnostics(),
-          recentInPersonSessions: inPersonRegistry.listRecentDiagnostics()
+          recentInPersonSessions: inPersonRegistry.listRecentDiagnostics(),
+          activeAppToAppSessions: appToAppRegistry.listDiagnostics(),
+          recentAppToAppSessions: appToAppRegistry.listRecentDiagnostics()
         });
       }
 
@@ -84,6 +95,22 @@ export function createBridgeMediaServer(config: AppConfig) {
           sessionId: session.sessionId,
           status: 'created',
           streamUrl: session.streamUrl(),
+          diagnostics: session.diagnostics()
+        });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/app-to-app/sessions') {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const body = createAppToAppSessionSchema.parse(await readJson(req));
+        const session = appToAppRegistry.create(body);
+        return sendJson(res, 201, {
+          sessionId: session.sessionId,
+          status: 'created',
+          initiatorStreamUrl: session.participantStreamUrl('initiator'),
+          receiverStreamUrl: session.participantStreamUrl('receiver'),
+          inviteUrlPath: `/app-to-app?sessionId=${encodeURIComponent(session.sessionId)}&role=receiver`,
           diagnostics: session.diagnostics()
         });
       }
@@ -175,6 +202,26 @@ export function createBridgeMediaServer(config: AppConfig) {
       return;
     }
 
+    if (url.pathname.startsWith('/app-to-app/stream/')) {
+      appToAppWss.handleUpgrade(req, socket, head, (ws) => {
+        const parts = url.pathname.split('/').filter(Boolean);
+        const sessionId = decodeURIComponent(parts[2] ?? '');
+        const participant = parts[3] as AppToAppParticipant | undefined;
+        const token = url.searchParams.get('token') ?? '';
+        const session = appToAppRegistry.get(sessionId);
+        if (
+          !session ||
+          (participant !== 'initiator' && participant !== 'receiver') ||
+          !session.verifyParticipantToken(participant, token)
+        ) {
+          ws.close();
+          return;
+        }
+        session.bindParticipant(participant, ws);
+      });
+      return;
+    }
+
     if (url.pathname === '/twilio/stream') {
       twilioWss.handleUpgrade(req, socket, head, (ws) => {
         let bound = false;
@@ -211,7 +258,7 @@ export function createBridgeMediaServer(config: AppConfig) {
     socket.destroy();
   });
 
-  return { server, registry, inPersonRegistry };
+  return { server, registry, inPersonRegistry, appToAppRegistry };
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {
