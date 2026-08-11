@@ -92,6 +92,7 @@ interface AppToAppRecord {
   lastSpeechAt: Partial<Record<AppToAppParticipant, string>>;
   lastFillerAt: Partial<Record<AppToAppParticipant, string>>;
   lastFillerText: Partial<Record<AppToAppParticipant, string>>;
+  timing: Record<AppToAppParticipant, ParticipantTiming>;
   transcripts: TranscriptEntry[];
   counters: {
     initiatorAudioChunks: number;
@@ -103,6 +104,18 @@ interface AppToAppRecord {
     fillerSpeechErrors: number;
     transcriptDeltas: number;
   };
+}
+
+interface ParticipantTiming {
+  firstAudioAt?: string;
+  lastAudioAt?: string;
+  firstInputTranscriptAt?: string;
+  firstOutputTranscriptAt?: string;
+  firstTranslatedAudioAt?: string;
+  lastTranslatedAudioAt?: string;
+  audioRmsAvg: number;
+  audioRmsPeak: number;
+  audioRmsSamples: number;
 }
 
 export class AppToAppRegistry {
@@ -130,6 +143,10 @@ export class AppToAppRegistry {
       lastSpeechAt: {},
       lastFillerAt: {},
       lastFillerText: {},
+      timing: {
+        initiator: createParticipantTiming(),
+        receiver: createParticipantTiming()
+      },
       transcripts: [],
       counters: {
         initiatorAudioChunks: 0,
@@ -219,6 +236,10 @@ export class AppToAppSession {
       lastSpeechAt: { ...this.record.lastSpeechAt },
       lastFillerAt: { ...this.record.lastFillerAt },
       lastFillerText: { ...this.record.lastFillerText },
+      timing: {
+        initiator: summarizeParticipantTiming(this.record.timing.initiator),
+        receiver: summarizeParticipantTiming(this.record.timing.receiver)
+      },
       error: this.record.error ?? null,
       counters: { ...this.record.counters },
       transcriptDiagnosticNote: 'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
@@ -280,7 +301,8 @@ export class AppToAppSession {
 
   private routeAudio(from: AppToAppParticipant, audio: string): void {
     this.ensureTranslationSessions();
-    this.trackParticipantAudioActivity(from, audio);
+    const rms = this.trackAudioTiming(from, audio);
+    this.trackParticipantAudioActivity(from, rms);
     if (from === 'initiator') {
       this.record.counters.initiatorAudioChunks += 1;
       this.initiatorToReceiver?.appendPcm16Base64(audio);
@@ -290,11 +312,10 @@ export class AppToAppSession {
     this.receiverToInitiator?.appendPcm16Base64(audio);
   }
 
-  private trackParticipantAudioActivity(participant: AppToAppParticipant, audio: string): void {
+  private trackParticipantAudioActivity(participant: AppToAppParticipant, rms: number): void {
     if (!this.record.fillerBridgeEnabled) {
       return;
     }
-    const rms = pcm16RmsForAppToAppDiagnostics(audio);
     if (rms < SPEECH_RMS_THRESHOLD) {
       return;
     }
@@ -408,6 +429,7 @@ export class AppToAppSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.receiverLanguage,
         onAudioDelta: (pcm24k) => {
+          this.trackTranslatedAudioTiming('initiator');
           this.record.counters.translatedAudioChunksToReceiver += 1;
           this.sendTo('receiver', {
             type: 'translated_audio',
@@ -419,8 +441,14 @@ export class AppToAppSession {
             encoding: 'pcm16'
           });
         },
-        onInputTranscriptDelta: (delta) => this.emitTranscript('initiator', 'source', delta),
-        onOutputTranscriptDelta: (delta) => this.emitTranscript('initiator', 'translation', delta),
+        onInputTranscriptDelta: (delta) => {
+          this.trackTranscriptTiming('initiator', 'source');
+          this.emitTranscript('initiator', 'source', delta);
+        },
+        onOutputTranscriptDelta: (delta) => {
+          this.trackTranscriptTiming('initiator', 'translation');
+          this.emitTranscript('initiator', 'translation', delta);
+        },
         onStatus: () => this.sendStatusToBoth(),
         onError: (error) => this.fail(error)
       });
@@ -433,6 +461,7 @@ export class AppToAppSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.initiatorLanguage,
         onAudioDelta: (pcm24k) => {
+          this.trackTranslatedAudioTiming('receiver');
           this.record.counters.translatedAudioChunksToInitiator += 1;
           this.sendTo('initiator', {
             type: 'translated_audio',
@@ -444,8 +473,14 @@ export class AppToAppSession {
             encoding: 'pcm16'
           });
         },
-        onInputTranscriptDelta: (delta) => this.emitTranscript('receiver', 'source', delta),
-        onOutputTranscriptDelta: (delta) => this.emitTranscript('receiver', 'translation', delta),
+        onInputTranscriptDelta: (delta) => {
+          this.trackTranscriptTiming('receiver', 'source');
+          this.emitTranscript('receiver', 'source', delta);
+        },
+        onOutputTranscriptDelta: (delta) => {
+          this.trackTranscriptTiming('receiver', 'translation');
+          this.emitTranscript('receiver', 'translation', delta);
+        },
         onStatus: () => this.sendStatusToBoth(),
         onError: (error) => this.fail(error)
       });
@@ -493,6 +528,36 @@ export class AppToAppSession {
       transcriptKind: kind,
       delta
     });
+  }
+
+  private trackAudioTiming(participant: AppToAppParticipant, audio: string): number {
+    const timing = this.record.timing[participant];
+    const now = new Date().toISOString();
+    timing.firstAudioAt ??= now;
+    timing.lastAudioAt = now;
+
+    const rms = pcm16RmsForAppToAppDiagnostics(audio);
+    timing.audioRmsSamples += 1;
+    timing.audioRmsAvg += (rms - timing.audioRmsAvg) / timing.audioRmsSamples;
+    timing.audioRmsPeak = Math.max(timing.audioRmsPeak, rms);
+    return rms;
+  }
+
+  private trackTranscriptTiming(participant: AppToAppParticipant, kind: TranscriptKind): void {
+    const timing = this.record.timing[participant];
+    const now = new Date().toISOString();
+    if (kind === 'source') {
+      timing.firstInputTranscriptAt ??= now;
+      return;
+    }
+    timing.firstOutputTranscriptAt ??= now;
+  }
+
+  private trackTranslatedAudioTiming(sourceParticipant: AppToAppParticipant): void {
+    const timing = this.record.timing[sourceParticipant];
+    const now = new Date().toISOString();
+    timing.firstTranslatedAudioAt ??= now;
+    timing.lastTranslatedAudioAt = now;
   }
 
   private close(): void {
@@ -574,6 +639,32 @@ function makeParticipantToken(secret: string, sessionId: string, participant: Ap
 
 function otherParticipant(participant: AppToAppParticipant): AppToAppParticipant {
   return participant === 'initiator' ? 'receiver' : 'initiator';
+}
+
+function createParticipantTiming(): ParticipantTiming {
+  return {
+    audioRmsAvg: 0,
+    audioRmsPeak: 0,
+    audioRmsSamples: 0
+  };
+}
+
+function summarizeParticipantTiming(timing: ParticipantTiming): Record<string, unknown> {
+  return {
+    ...timing,
+    audioRmsAvgPercent: Number((timing.audioRmsAvg * 100).toFixed(2)),
+    audioRmsPeakPercent: Number((timing.audioRmsPeak * 100).toFixed(2)),
+    firstInputTranscriptLatencyMs: latencyMs(timing.firstAudioAt, timing.firstInputTranscriptAt),
+    firstOutputTranscriptLatencyMs: latencyMs(timing.firstAudioAt, timing.firstOutputTranscriptAt),
+    firstTranslatedAudioLatencyMs: latencyMs(timing.firstAudioAt, timing.firstTranslatedAudioAt)
+  };
+}
+
+function latencyMs(start?: string, end?: string): number | null {
+  if (!start || !end) {
+    return null;
+  }
+  return Date.parse(end) - Date.parse(start);
 }
 
 export function pcm16RmsForAppToAppDiagnostics(base64Pcm16: string): number {

@@ -81,6 +81,18 @@ describe('AppToAppRegistry', () => {
       fillerBridgeEnabled: true,
       fillerVoiceGender: 'female',
       predictiveMode: 'restaurant_reservation_v1',
+      timing: {
+        initiator: {
+          firstTranslatedAudioLatencyMs: null,
+          audioRmsAvgPercent: 0,
+          audioRmsPeakPercent: 0
+        },
+        receiver: {
+          firstTranslatedAudioLatencyMs: null,
+          audioRmsAvgPercent: 0,
+          audioRmsPeakPercent: 0
+        }
+      },
       counters: {
         fillerAudioChunksToInitiator: 0,
         fillerAudioChunksToReceiver: 0,
