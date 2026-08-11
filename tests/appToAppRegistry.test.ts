@@ -63,6 +63,31 @@ describe('AppToAppRegistry', () => {
     expect(session.verifyParticipantToken('initiator', initiatorToken)).toBe(true);
     expect(session.verifyParticipantToken('receiver', initiatorToken)).toBe(false);
   });
+
+  it('keeps app-to-app filler settings in diagnostics', () => {
+    const registry = new AppToAppRegistry(config);
+    const session = registry.create({
+      initiatorLanguage: 'English',
+      receiverLanguage: 'Spanish',
+      clientSessionId: 'app2app_filler_test',
+      fillerBridgeEnabled: true,
+      fillerVoiceGender: 'female',
+      predictiveMode: 'restaurant_reservation_v1'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      sessionId: 'app2app_filler_test',
+      mode: 'app-to-app',
+      fillerBridgeEnabled: true,
+      fillerVoiceGender: 'female',
+      predictiveMode: 'restaurant_reservation_v1',
+      counters: {
+        fillerAudioChunksToInitiator: 0,
+        fillerAudioChunksToReceiver: 0,
+        fillerSpeechErrors: 0
+      }
+    });
+  });
 });
 
 describe('app-to-app HTTP endpoint', () => {

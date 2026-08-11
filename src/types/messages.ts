@@ -165,6 +165,9 @@ export interface CreateAppToAppSessionRequest {
   initiatorLanguage: string;
   receiverLanguage: string;
   clientSessionId?: string;
+  fillerBridgeEnabled?: boolean;
+  fillerVoiceGender?: FillerVoiceGender;
+  predictiveMode?: PredictiveMode;
 }
 
 export interface CreateAppToAppSessionResponse {

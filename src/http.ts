@@ -31,7 +31,21 @@ const createInPersonSessionSchema = z.object({
 const createAppToAppSessionSchema = z.object({
   initiatorLanguage: z.string().min(2),
   receiverLanguage: z.string().min(2),
-  clientSessionId: z.string().optional()
+  clientSessionId: z.string().optional(),
+  fillerBridgeEnabled: z.boolean().optional(),
+  fillerVoiceGender: z.enum(['auto', 'male', 'female']).optional(),
+  predictiveMode: z.preprocess(
+    (value) => {
+      if (value === true) {
+        return 'restaurant_reservation_v1';
+      }
+      if (value === false) {
+        return 'off';
+      }
+      return value;
+    },
+    z.enum(['off', 'restaurant_reservation_v1']).optional()
+  )
 });
 
 export function createBridgeMediaServer(config: AppConfig) {

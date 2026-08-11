@@ -1,11 +1,16 @@
 import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
 import { makeId, signValue } from './auth.js';
-import { base64ToPcm16 } from './audio/codec.js';
+import { base64ToBytes, base64ToPcm16, bytesToBase64 } from './audio/codec.js';
+import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
-import type { TranscriptKind } from './types/messages.js';
+import { fillerTextForLanguage } from './predictive/reservationController.js';
+import type { FillerVoiceGender, PredictiveMode, TranscriptKind } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
+const SPEECH_RMS_THRESHOLD = 0.003;
+const FILLER_AFTER_SILENCE_MS = 900;
+const FILLER_COOLDOWN_MS = 11_000;
 
 export type AppToAppParticipant = 'initiator' | 'receiver';
 
@@ -25,6 +30,9 @@ export interface CreateAppToAppSessionRequest {
   initiatorLanguage: string;
   receiverLanguage: string;
   clientSessionId?: string;
+  fillerBridgeEnabled?: boolean;
+  fillerVoiceGender?: FillerVoiceGender;
+  predictiveMode?: PredictiveMode;
 }
 
 type AppToAppClientMessage =
@@ -78,12 +86,21 @@ interface AppToAppRecord {
   receiverToken: string;
   lastActivityAt?: string;
   endedAt?: string;
+  fillerBridgeEnabled: boolean;
+  fillerVoiceGender: FillerVoiceGender;
+  predictiveMode: PredictiveMode;
+  lastSpeechAt: Partial<Record<AppToAppParticipant, string>>;
+  lastFillerAt: Partial<Record<AppToAppParticipant, string>>;
+  lastFillerText: Partial<Record<AppToAppParticipant, string>>;
   transcripts: TranscriptEntry[];
   counters: {
     initiatorAudioChunks: number;
     receiverAudioChunks: number;
     translatedAudioChunksToInitiator: number;
     translatedAudioChunksToReceiver: number;
+    fillerAudioChunksToInitiator: number;
+    fillerAudioChunksToReceiver: number;
+    fillerSpeechErrors: number;
     transcriptDeltas: number;
   };
 }
@@ -107,12 +124,21 @@ export class AppToAppRegistry {
       state: 'created',
       initiatorToken: makeParticipantToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, sessionId, 'initiator'),
       receiverToken: makeParticipantToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, sessionId, 'receiver'),
+      fillerBridgeEnabled: Boolean(request.fillerBridgeEnabled),
+      fillerVoiceGender: request.fillerVoiceGender ?? 'auto',
+      predictiveMode: request.predictiveMode ?? 'off',
+      lastSpeechAt: {},
+      lastFillerAt: {},
+      lastFillerText: {},
       transcripts: [],
       counters: {
         initiatorAudioChunks: 0,
         receiverAudioChunks: 0,
         translatedAudioChunksToInitiator: 0,
         translatedAudioChunksToReceiver: 0,
+        fillerAudioChunksToInitiator: 0,
+        fillerAudioChunksToReceiver: 0,
+        fillerSpeechErrors: 0,
         transcriptDeltas: 0
       }
     };
@@ -147,6 +173,7 @@ export class AppToAppSession {
   private receiverWs?: WebSocket;
   private initiatorToReceiver?: OpenAiTranslationSession;
   private receiverToInitiator?: OpenAiTranslationSession;
+  private readonly fillerTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
 
   constructor(
     private readonly config: AppConfig,
@@ -183,6 +210,15 @@ export class AppToAppSession {
       receiverConnected: Boolean(this.receiverWs),
       sessionA: this.initiatorToReceiver?.status ?? 'idle',
       sessionB: this.receiverToInitiator?.status ?? 'idle',
+      fillerBridgeEnabled: this.record.fillerBridgeEnabled,
+      fillerVoiceGender: this.record.fillerVoiceGender,
+      predictiveMode: this.record.predictiveMode,
+      fillerModeNote: this.record.fillerBridgeEnabled
+        ? 'App-to-app filler is enabled. It sends short non-substantive TTS to the participant who just spoke after a brief silence.'
+        : 'App-to-app filler is off.',
+      lastSpeechAt: { ...this.record.lastSpeechAt },
+      lastFillerAt: { ...this.record.lastFillerAt },
+      lastFillerText: { ...this.record.lastFillerText },
       error: this.record.error ?? null,
       counters: { ...this.record.counters },
       transcriptDiagnosticNote: 'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
@@ -244,6 +280,7 @@ export class AppToAppSession {
 
   private routeAudio(from: AppToAppParticipant, audio: string): void {
     this.ensureTranslationSessions();
+    this.trackParticipantAudioActivity(from, audio);
     if (from === 'initiator') {
       this.record.counters.initiatorAudioChunks += 1;
       this.initiatorToReceiver?.appendPcm16Base64(audio);
@@ -251,6 +288,117 @@ export class AppToAppSession {
     }
     this.record.counters.receiverAudioChunks += 1;
     this.receiverToInitiator?.appendPcm16Base64(audio);
+  }
+
+  private trackParticipantAudioActivity(participant: AppToAppParticipant, audio: string): void {
+    if (!this.record.fillerBridgeEnabled) {
+      return;
+    }
+    const rms = pcm16RmsForAppToAppDiagnostics(audio);
+    if (rms < SPEECH_RMS_THRESHOLD) {
+      return;
+    }
+    this.record.lastSpeechAt[participant] = new Date().toISOString();
+    this.scheduleFillerAfterSilence(participant);
+  }
+
+  private scheduleFillerAfterSilence(participant: AppToAppParticipant): void {
+    const existing = this.fillerTimers[participant];
+    if (existing) {
+      clearTimeout(existing);
+    }
+    const timer = setTimeout(() => void this.maybeSpeakFillerToParticipant(participant), FILLER_AFTER_SILENCE_MS);
+    timer.unref?.();
+    this.fillerTimers[participant] = timer;
+  }
+
+  private async maybeSpeakFillerToParticipant(participant: AppToAppParticipant): Promise<void> {
+    if (!this.record.fillerBridgeEnabled || this.record.state === 'ended') {
+      return;
+    }
+    const lastSpeechAt = this.record.lastSpeechAt[participant];
+    if (!lastSpeechAt || Date.now() - Date.parse(lastSpeechAt) < FILLER_AFTER_SILENCE_MS) {
+      return;
+    }
+    const lastFillerAt = this.record.lastFillerAt[participant];
+    if (lastFillerAt && Date.now() - Date.parse(lastFillerAt) < FILLER_COOLDOWN_MS) {
+      return;
+    }
+    const ws = this.wsFor(participant);
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const language = participant === 'initiator' ? this.record.initiatorLanguage : this.record.receiverLanguage;
+    const text = fillerTextForLanguage(language, '', this.record.lastFillerText[participant] ?? '');
+    this.record.lastFillerText[participant] = text;
+    this.record.lastFillerAt[participant] = new Date().toISOString();
+
+    try {
+      const fillerVoice = this.fillerVoiceSettings();
+      const pcm24k = await createSpeechPcm24kBase64(this.config, {
+        text,
+        language,
+        voice: fillerVoice.voice,
+        instructions: `Speak naturally in ${language}. This is a very short thinking filler in a two-person translated web session. ${fillerVoice.instructions} Do not add any words beyond the input text.`,
+        speed: 0.98
+      });
+      const chunks = this.sendFillerPcm24kToParticipant(participant, pcm24k);
+      if (participant === 'initiator') {
+        this.record.counters.fillerAudioChunksToInitiator += chunks;
+      } else {
+        this.record.counters.fillerAudioChunksToReceiver += chunks;
+      }
+    } catch (error) {
+      this.record.counters.fillerSpeechErrors += 1;
+      this.record.error = error instanceof Error ? error.message : 'App-to-app filler speech failed';
+      this.sendTo(participant, {
+        type: 'error',
+        message: this.record.error
+      });
+    }
+  }
+
+  private sendFillerPcm24kToParticipant(participant: AppToAppParticipant, pcm24k: string): number {
+    const bytes = base64ToBytes(pcm24k);
+    const chunkSize = 4800;
+    let chunks = 0;
+    const from = otherParticipant(participant);
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+      const chunk = bytes.slice(offset, offset + chunkSize);
+      this.sendTo(participant, {
+        type: 'translated_audio',
+        speaker: 'remote',
+        from,
+        to: participant,
+        audio: bytesToBase64(chunk),
+        sampleRate: 24000,
+        encoding: 'pcm16'
+      });
+      chunks += 1;
+    }
+    return chunks;
+  }
+
+  private fillerVoiceSettings(): { voice: string; instructions: string } {
+    switch (this.record.fillerVoiceGender) {
+      case 'male':
+        return {
+          voice: this.config.OPENAI_FILLER_TTS_VOICE_MALE,
+          instructions: 'Use a clearly masculine adult voice with a calm conversational delivery.'
+        };
+      case 'female':
+        return {
+          voice: this.config.OPENAI_FILLER_TTS_VOICE_FEMALE,
+          instructions: 'Use a clearly feminine adult voice with a warm conversational delivery.'
+        };
+      case 'auto':
+      default:
+        return {
+          voice: this.config.OPENAI_FILLER_TTS_VOICE,
+          instructions: 'Use the configured default filler voice with a natural, calm delivery.'
+        };
+    }
   }
 
   private ensureTranslationSessions(): void {
@@ -350,6 +498,11 @@ export class AppToAppSession {
   private close(): void {
     this.record.state = 'ended';
     this.record.endedAt = new Date().toISOString();
+    for (const timer of Object.values(this.fillerTimers)) {
+      if (timer) {
+        clearTimeout(timer);
+      }
+    }
     this.initiatorToReceiver?.close();
     this.receiverToInitiator?.close();
     this.initiatorWs?.close();
