@@ -5,6 +5,7 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import { mediaRouterConfigured, openAiConfigured, twilioConfigured } from './config.js';
 import { CallRegistry } from './callRegistry.js';
+import { InPersonRegistry } from './inPersonRegistry.js';
 import { originateTranslatedCall } from './twilio/client.js';
 import { buildTranslatedCallTwiMl } from './twilio/twiml.js';
 
@@ -20,10 +21,18 @@ const createCallSchema = z.object({
   clientCallId: z.string().optional()
 });
 
+const createInPersonSessionSchema = z.object({
+  userLanguage: z.string().min(2),
+  partnerLanguage: z.string().min(2),
+  clientSessionId: z.string().optional()
+});
+
 export function createBridgeMediaServer(config: AppConfig) {
   const registry = new CallRegistry(config);
+  const inPersonRegistry = new InPersonRegistry(config);
   const appWss = new WebSocketServer({ noServer: true });
   const twilioWss = new WebSocketServer({ noServer: true });
+  const inPersonWss = new WebSocketServer({ noServer: true });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -41,7 +50,9 @@ export function createBridgeMediaServer(config: AppConfig) {
           mediaRouterConfigured: mediaRouterConfigured(config),
           dryRunCalls: config.DRY_RUN_CALLS,
           activeCalls: registry.listDiagnostics(),
-          recentCalls: registry.listRecentDiagnostics()
+          recentCalls: registry.listRecentDiagnostics(),
+          activeInPersonSessions: inPersonRegistry.listDiagnostics(),
+          recentInPersonSessions: inPersonRegistry.listRecentDiagnostics()
         });
       }
 
@@ -59,6 +70,20 @@ export function createBridgeMediaServer(config: AppConfig) {
           callSid,
           status: config.DRY_RUN_CALLS ? 'dry_run' : 'calling',
           appStreamUrl: session.appStreamUrl(),
+          diagnostics: session.diagnostics()
+        });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/in-person/sessions') {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const body = createInPersonSessionSchema.parse(await readJson(req));
+        const session = inPersonRegistry.create(body);
+        return sendJson(res, 201, {
+          sessionId: session.sessionId,
+          status: 'created',
+          streamUrl: session.streamUrl(),
           diagnostics: session.diagnostics()
         });
       }
@@ -136,6 +161,20 @@ export function createBridgeMediaServer(config: AppConfig) {
       return;
     }
 
+    if (url.pathname.startsWith('/in-person/stream/')) {
+      inPersonWss.handleUpgrade(req, socket, head, (ws) => {
+        const sessionId = decodeURIComponent(url.pathname.replace('/in-person/stream/', ''));
+        const token = url.searchParams.get('token') ?? '';
+        const session = inPersonRegistry.get(sessionId);
+        if (!session || !session.verifyAppToken(token)) {
+          ws.close();
+          return;
+        }
+        session.bindApp(ws);
+      });
+      return;
+    }
+
     if (url.pathname === '/twilio/stream') {
       twilioWss.handleUpgrade(req, socket, head, (ws) => {
         let bound = false;
@@ -172,7 +211,7 @@ export function createBridgeMediaServer(config: AppConfig) {
     socket.destroy();
   });
 
-  return { server, registry };
+  return { server, registry, inPersonRegistry };
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {

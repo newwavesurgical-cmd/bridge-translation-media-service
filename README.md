@@ -22,6 +22,17 @@ Direction B:
 
 The two directions stay separate. The remote party does not install anything and receives a normal telephone call.
 
+In-Person Native Lab:
+
+`Native USB userAudio -> /in-person/stream/:sessionId -> OpenAI translation -> partner translated audio`
+
+`Native USB partnerAudio -> /in-person/stream/:sessionId -> OpenAI translation -> user translated audio`
+
+This path bypasses Twilio. It is for testing dual-channel USB microphone input
+from the Android native bridge. Physical channel identity determines routing:
+`userAudio` always translates to the partner output, and `partnerAudio` always
+translates to the user/private output.
+
 ## Environment
 
 Copy `.env.example` to `.env` and fill in values.
@@ -98,6 +109,69 @@ DRY_RUN_CALLS=false
 `GET /health`
 
 Returns booleans for Twilio/OpenAI/router configuration and active-call diagnostics.
+
+`POST /in-person/sessions`
+
+If `BRIDGE_MEDIA_API_KEY` is configured, include `Authorization: Bearer YOUR_SERVICE_API_KEY`.
+
+Creates a Twilio-free native dual-channel lab session:
+
+```json
+{
+  "userLanguage": "English",
+  "partnerLanguage": "Spanish"
+}
+```
+
+Response:
+
+```json
+{
+  "sessionId": "inperson_...",
+  "status": "created",
+  "streamUrl": "wss://.../in-person/stream/inperson_...?token=...",
+  "diagnostics": {}
+}
+```
+
+Connect the app to `streamUrl`, then send native PCM from the Android bridge:
+
+```json
+{
+  "type": "dual_audio",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "userAudio": "base64-pcm16-from-owner-mic",
+  "partnerAudio": "base64-pcm16-from-partner-mic"
+}
+```
+
+The server sends translated audio and transcript deltas:
+
+```json
+{
+  "type": "translated_audio",
+  "speaker": "partner",
+  "target": "user",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "audio": "base64-pcm16"
+}
+```
+
+```json
+{
+  "type": "translated_audio",
+  "speaker": "owner",
+  "target": "partner",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "audio": "base64-pcm16"
+}
+```
+
+Use `target:"user"` for the owner/private output and `target:"partner"` for the
+outward speaker output. Do not infer routing from language or speaker detection.
 
 `POST /calls`
 

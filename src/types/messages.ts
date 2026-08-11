@@ -147,3 +147,16 @@ export interface CreateCallResponse {
   appStreamUrl: string;
   diagnostics: Record<string, unknown>;
 }
+
+export interface CreateInPersonSessionRequest {
+  userLanguage: string;
+  partnerLanguage: string;
+  clientSessionId?: string;
+}
+
+export interface CreateInPersonSessionResponse {
+  sessionId: string;
+  status: 'created';
+  streamUrl: string;
+  diagnostics: Record<string, unknown>;
+}
