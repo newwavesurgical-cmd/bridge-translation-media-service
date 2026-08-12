@@ -37,6 +37,8 @@ describe('InPersonRegistry', () => {
     expect(session.diagnostics()).toMatchObject({
       sessionId: 'inperson_test',
       mode: 'in-person-native-dual-channel',
+      inputMode: 'dual_channel',
+      phoneOnlyMode: false,
       userLanguage: 'English',
       partnerLanguage: 'Spanish',
       appConnected: false,
@@ -53,6 +55,62 @@ describe('InPersonRegistry', () => {
           mode: 'monitor',
           expectedLanguage: 'Spanish',
           suppressed: false
+        }
+      }
+    });
+  });
+
+  it('creates a phone-only hold-to-speak session without enabling suppression by default', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_hold_test',
+      inputMode: 'single_mic_hold_to_speak'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      sessionId: 'inperson_hold_test',
+      mode: 'in-person-phone-hold-to-speak',
+      inputMode: 'single_mic_hold_to_speak',
+      phoneOnlyMode: true,
+      languageGateMode: 'monitor',
+      languageGate: {
+        owner: {
+          mode: 'monitor',
+          expectedLanguage: 'English'
+        },
+        partner: {
+          mode: 'monitor',
+          expectedLanguage: 'Spanish'
+        }
+      }
+    });
+  });
+
+  it('defaults phone-only auto routing to soft language suppression', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_auto_test',
+      inputMode: 'single_mic_auto'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      sessionId: 'inperson_auto_test',
+      mode: 'in-person-phone-auto-language-routing',
+      inputMode: 'single_mic_auto',
+      phoneOnlyMode: true,
+      languageGateMode: 'soft_suppress',
+      languageGate: {
+        owner: {
+          mode: 'soft_suppress',
+          expectedLanguage: 'English'
+        },
+        partner: {
+          mode: 'soft_suppress',
+          expectedLanguage: 'Spanish'
         }
       }
     });

@@ -4,7 +4,12 @@ import { makeAppToken, makeId, verifyAppToken } from './auth.js';
 import { base64ToPcm16 } from './audio/codec.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { TranscriptLanguageGate } from './languageGate.js';
-import type { CreateInPersonSessionRequest, LanguageGateMode, TranscriptKind } from './types/messages.js';
+import type {
+  CreateInPersonSessionRequest,
+  InPersonInputMode,
+  LanguageGateMode,
+  TranscriptKind
+} from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 
@@ -23,6 +28,12 @@ type InPersonClientMessage =
   | {
       type: 'audio';
       speaker?: InPersonSpeaker | 'user';
+      audio: string;
+      sampleRate?: 24000;
+      encoding?: 'pcm16';
+    }
+  | {
+      type: 'single_audio';
       audio: string;
       sampleRate?: 24000;
       encoding?: 'pcm16';
@@ -71,6 +82,7 @@ interface InPersonRecord {
   state: 'created' | 'live' | 'ended' | 'error';
   error?: string;
   appToken: string;
+  inputMode: InPersonInputMode;
   lastActivityAt?: string;
   endedAt?: string;
   languageGateMode: LanguageGateMode;
@@ -95,6 +107,8 @@ export class InPersonRegistry {
       throw new Error('BRIDGE_MEDIA_SHARED_SECRET is required');
     }
     const sessionId = request.clientSessionId ?? makeId('inperson');
+    const inputMode = request.inputMode ?? 'dual_channel';
+    const languageGateMode = request.languageGateMode ?? (inputMode === 'single_mic_auto' ? 'soft_suppress' : 'monitor');
     const record: InPersonRecord = {
       sessionId,
       userLanguage: request.userLanguage,
@@ -102,7 +116,8 @@ export class InPersonRegistry {
       createdAt: new Date().toISOString(),
       state: 'created',
       appToken: makeAppToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, sessionId),
-      languageGateMode: request.languageGateMode ?? 'monitor',
+      inputMode,
+      languageGateMode,
       transcripts: [],
       counters: {
         userAudioChunks: 0,
@@ -195,7 +210,9 @@ export class InPersonSession {
     return {
       sessionId: this.record.sessionId,
       state: this.record.state,
-      mode: 'in-person-native-dual-channel',
+      mode: this.diagnosticModeName(),
+      inputMode: this.record.inputMode,
+      phoneOnlyMode: this.record.inputMode !== 'dual_channel',
       userLanguage: this.record.userLanguage,
       partnerLanguage: this.record.partnerLanguage,
       appConnected: Boolean(this.appWs),
@@ -204,6 +221,7 @@ export class InPersonSession {
       languageGateMode: this.record.languageGateMode,
       languageGateNote:
         'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
+      routingModeNote: this.routingModeNote(),
       languageGate: {
         owner: this.languageGates.owner.diagnostics(),
         partner: this.languageGates.partner.diagnostics()
@@ -237,6 +255,10 @@ export class InPersonSession {
       this.routeAudio(speaker, message.audio);
       return;
     }
+    if (message.type === 'single_audio') {
+      this.routeSingleMicAudio(message.audio);
+      return;
+    }
     if (message.type === 'dual_audio') {
       const ownerAudio = message.ownerAudio ?? message.userAudio;
       if (ownerAudio) {
@@ -250,6 +272,18 @@ export class InPersonSession {
     if (message.type === 'hangup') {
       this.close();
     }
+  }
+
+  private routeSingleMicAudio(audio: string): void {
+    if (this.record.inputMode !== 'single_mic_auto') {
+      this.sendApp({
+        type: 'error',
+        message: 'single_audio is only valid when inputMode is single_mic_auto.'
+      });
+      return;
+    }
+    this.routeAudio('owner', audio);
+    this.routeAudio('partner', audio);
   }
 
   private routeAudio(speaker: InPersonSpeaker, audio: string): void {
@@ -378,6 +412,26 @@ export class InPersonSession {
 
   private touch(): void {
     this.record.lastActivityAt = new Date().toISOString();
+  }
+
+  private diagnosticModeName(): string {
+    if (this.record.inputMode === 'single_mic_hold_to_speak') {
+      return 'in-person-phone-hold-to-speak';
+    }
+    if (this.record.inputMode === 'single_mic_auto') {
+      return 'in-person-phone-auto-language-routing';
+    }
+    return 'in-person-native-dual-channel';
+  }
+
+  private routingModeNote(): string {
+    if (this.record.inputMode === 'single_mic_hold_to_speak') {
+      return 'Phone-only hold-to-speak mode: the client sends the same physical microphone as owner while held/locked and partner while released. This is not true dual-channel full duplex.';
+    }
+    if (this.record.inputMode === 'single_mic_auto') {
+      return 'Experimental phone-only automatic mode: the client sends one microphone stream as single_audio and the server feeds both translation directions while transcript language gates suppress confident wrong-language output.';
+    }
+    return 'Dual-channel mode: physical channel identity determines routing. owner/user audio translates to partner output; partner audio translates to user/private output.';
   }
 
   private inPersonStreamBaseUrl(): string {

@@ -173,6 +173,73 @@ The server sends translated audio and transcript deltas:
 Use `target:"user"` for the owner/private output and `target:"partner"` for the
 outward speaker output. Do not infer routing from language or speaker detection.
 
+Phone-only in-person sessions can use the same endpoint without the native USB
+bridge. These modes are intentionally labeled as phone-only fallbacks, not true
+dual-channel full duplex.
+
+Reliable hold-to-speak mode:
+
+```json
+{
+  "userLanguage": "English",
+  "partnerLanguage": "Spanish",
+  "inputMode": "single_mic_hold_to_speak",
+  "languageGateMode": "monitor"
+}
+```
+
+While the user is holding or locking the speaking control, stream microphone
+chunks as owner audio:
+
+```json
+{
+  "type": "audio",
+  "speaker": "owner",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "audio": "base64-pcm16-from-phone-mic"
+}
+```
+
+When the user releases the control, stream the same physical microphone as
+partner audio:
+
+```json
+{
+  "type": "audio",
+  "speaker": "partner",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "audio": "base64-pcm16-from-phone-mic"
+}
+```
+
+Experimental automatic phone-only mode:
+
+```json
+{
+  "userLanguage": "English",
+  "partnerLanguage": "Spanish",
+  "inputMode": "single_mic_auto"
+}
+```
+
+If `languageGateMode` is omitted for `single_mic_auto`, the service defaults to
+`soft_suppress`. Stream one microphone into both translation directions with:
+
+```json
+{
+  "type": "single_audio",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "audio": "base64-pcm16-from-phone-mic"
+}
+```
+
+The server feeds both translation sessions and uses transcript language gates to
+suppress output after confident wrong-language evidence. This can reduce
+cross-language pickup, but it is not as reliable as physical channel separation.
+
 `POST /calls`
 
 If `BRIDGE_MEDIA_API_KEY` is configured, include `Authorization: Bearer YOUR_SERVICE_API_KEY`.
