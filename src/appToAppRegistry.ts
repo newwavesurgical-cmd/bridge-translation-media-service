@@ -13,6 +13,7 @@ const SPEECH_RMS_THRESHOLD = 0.003;
 const FILLER_AFTER_SILENCE_MS = 1_000;
 const FILLER_REPEAT_MS = 4_800;
 const FILLER_CHUNK_INTERVAL_MS = 100;
+const FILLER_TRANSLATION_RECENT_MS = 350;
 const APP_TO_APP_INVITE_TTL_MS = 30 * 60 * 1000;
 const APP_TO_APP_INVITE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
@@ -125,6 +126,10 @@ interface AppToAppRecord {
     translatedAudioChunksToReceiver: number;
     fillerAudioChunksToInitiator: number;
     fillerAudioChunksToReceiver: number;
+    fillerAttempts: number;
+    fillerAudioClipsStarted: number;
+    fillerSkippedTranslatedRecently: number;
+    fillerSkippedTargetSpeaking: number;
     fillerSpeechErrors: number;
     transcriptDeltas: number;
   };
@@ -155,6 +160,9 @@ export class AppToAppRegistry {
     }
     const sessionId = request.clientSessionId ?? makeId('app2app');
     const inviteCode = this.createUniqueInviteCode();
+    const fillerBridgeEnabled = Boolean(
+      request.fillerBridgeEnabled || request.predictiveMode === 'restaurant_reservation_v1'
+    );
     const record: AppToAppRecord = {
       sessionId,
       inviteCode,
@@ -165,7 +173,7 @@ export class AppToAppRegistry {
       state: 'created',
       initiatorToken: makeParticipantToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, sessionId, 'initiator'),
       receiverToken: makeParticipantToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, sessionId, 'receiver'),
-      fillerBridgeEnabled: Boolean(request.fillerBridgeEnabled),
+      fillerBridgeEnabled,
       fillerVoiceGender: request.fillerVoiceGender ?? 'auto',
       predictiveMode: request.predictiveMode ?? 'off',
       lastSpeechAt: {},
@@ -191,6 +199,10 @@ export class AppToAppRegistry {
         translatedAudioChunksToReceiver: 0,
         fillerAudioChunksToInitiator: 0,
         fillerAudioChunksToReceiver: 0,
+        fillerAttempts: 0,
+        fillerAudioClipsStarted: 0,
+        fillerSkippedTranslatedRecently: 0,
+        fillerSkippedTargetSpeaking: 0,
         fillerSpeechErrors: 0,
         transcriptDeltas: 0
       }
@@ -257,6 +269,8 @@ export class AppToAppSession {
   private receiverToInitiator?: OpenAiTranslationSession;
   private readonly fillerTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
   private readonly fillerOverlays: Partial<Record<AppToAppParticipant, FillerOverlayState>> = {};
+  private readonly fillerAudioCache = new Map<string, Promise<string>>();
+  private readonly preparedFillerText: Partial<Record<AppToAppParticipant, string>> = {};
   private readonly speakingTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
   private fillerOverlaySequence = 0;
 
@@ -358,6 +372,7 @@ export class AppToAppSession {
     this.record.state = 'live';
     this.touch();
     this.ensureTranslationSessions();
+    this.prewarmFillerForTarget(participant);
     this.sendStatusToBoth();
 
     ws.on('message', (raw) => this.handleParticipantMessage(participant, raw.toString()));
@@ -476,11 +491,13 @@ export class AppToAppSession {
     if (!this.record.fillerBridgeEnabled || this.record.state === 'ended') {
       return;
     }
+    this.record.counters.fillerAttempts += 1;
     const lastSpeechAt = this.record.lastSpeechAt[source];
     if (!lastSpeechAt || Date.now() - Date.parse(lastSpeechAt) < FILLER_AFTER_SILENCE_MS) {
       return;
     }
-    if (this.translatedAudioStartedAfter(source, lastSpeechAt)) {
+    if (this.translatedAudioRecentlyFlowing(source)) {
+      this.record.counters.fillerSkippedTranslatedRecently += 1;
       return;
     }
     const target = otherParticipant(source);
@@ -493,10 +510,14 @@ export class AppToAppSession {
       return;
     }
     const lastSpeechAt = this.record.lastSpeechAt[source];
-    if (!lastSpeechAt || this.translatedAudioStartedAfter(source, lastSpeechAt)) {
+    if (!lastSpeechAt || this.translatedAudioRecentlyFlowing(source)) {
+      if (lastSpeechAt) {
+        this.record.counters.fillerSkippedTranslatedRecently += 1;
+      }
       return;
     }
     if (this.record.speaking[target]) {
+      this.record.counters.fillerSkippedTargetSpeaking += 1;
       return;
     }
 
@@ -513,24 +534,19 @@ export class AppToAppSession {
     };
     this.fillerOverlays[target] = overlay;
 
-    const language = target === 'initiator' ? this.record.initiatorLanguage : this.record.receiverLanguage;
-    const text = fillerTextForLanguage(language, '', this.record.lastFillerText[target] ?? '');
+    const language = this.languageForParticipant(target);
+    const text = this.preparedFillerText[target] ?? this.nextFillerText(target);
+    delete this.preparedFillerText[target];
     this.record.lastFillerText[target] = text;
     this.record.lastFillerAt[target] = new Date().toISOString();
 
     try {
-      const fillerVoice = this.fillerVoiceSettings();
-      const pcm24k = await createSpeechPcm24kBase64(this.config, {
-        text,
-        language,
-        voice: fillerVoice.voice,
-        instructions: `Speak naturally in ${language}. This is a very short thinking filler in a two-person translated web session. ${fillerVoice.instructions} Do not add any words beyond the input text.`,
-        speed: 0.98
-      });
-      if (overlay.cancelled || this.fillerOverlays[target] !== overlay || this.translatedAudioStartedAfter(source, lastSpeechAt)) {
+      const pcm24k = await this.getFillerPcm24k(text, language);
+      if (overlay.cancelled || this.fillerOverlays[target] !== overlay || this.translatedAudioRecentlyFlowing(source)) {
         this.cancelFillerForTarget(target);
         return;
       }
+      this.record.counters.fillerAudioClipsStarted += 1;
       const chunks = this.sendFillerPcm24kToParticipantPaced(overlay, pcm24k);
       if (target === 'initiator') {
         this.record.counters.fillerAudioChunksToInitiator += chunks;
@@ -538,6 +554,7 @@ export class AppToAppSession {
         this.record.counters.fillerAudioChunksToReceiver += chunks;
       }
       if (!overlay.cancelled && this.fillerOverlays[target] === overlay) {
+        this.prewarmFillerForTarget(target);
         overlay.repeatTimer = setTimeout(() => void this.speakFillerOverlayPhrase(source, target), FILLER_REPEAT_MS);
         overlay.repeatTimer.unref?.();
       }
@@ -596,9 +613,53 @@ export class AppToAppSession {
     delete this.fillerOverlays[target];
   }
 
-  private translatedAudioStartedAfter(source: AppToAppParticipant, isoTime: string): boolean {
+  private translatedAudioRecentlyFlowing(source: AppToAppParticipant): boolean {
     const lastTranslatedAudioAt = this.record.timing[source].lastTranslatedAudioAt;
-    return Boolean(lastTranslatedAudioAt && Date.parse(lastTranslatedAudioAt) >= Date.parse(isoTime));
+    if (!lastTranslatedAudioAt) {
+      return false;
+    }
+    return Date.now() - Date.parse(lastTranslatedAudioAt) < FILLER_TRANSLATION_RECENT_MS;
+  }
+
+  private languageForParticipant(participant: AppToAppParticipant): string {
+    return participant === 'initiator' ? this.record.initiatorLanguage : this.record.receiverLanguage;
+  }
+
+  private nextFillerText(target: AppToAppParticipant): string {
+    return fillerTextForLanguage(this.languageForParticipant(target), '', this.record.lastFillerText[target] ?? '');
+  }
+
+  private prewarmFillerForTarget(target: AppToAppParticipant): void {
+    if (!this.record.fillerBridgeEnabled || this.record.state === 'ended' || this.preparedFillerText[target]) {
+      return;
+    }
+    const text = this.nextFillerText(target);
+    this.preparedFillerText[target] = text;
+    void this.getFillerPcm24k(text, this.languageForParticipant(target)).catch((error) => {
+      this.record.counters.fillerSpeechErrors += 1;
+      this.record.error = error instanceof Error ? error.message : 'App-to-app filler prewarm failed';
+      if (this.preparedFillerText[target] === text) {
+        delete this.preparedFillerText[target];
+      }
+    });
+  }
+
+  private getFillerPcm24k(text: string, language: string): Promise<string> {
+    const fillerVoice = this.fillerVoiceSettings();
+    const key = [language, fillerVoice.voice, text].join('\u0000');
+    const cached = this.fillerAudioCache.get(key);
+    if (cached) {
+      return cached;
+    }
+    const promise = createSpeechPcm24kBase64(this.config, {
+      text,
+      language,
+      voice: fillerVoice.voice,
+      instructions: `Speak naturally in ${language}. This is a very short thinking filler in a two-person translated web session. ${fillerVoice.instructions} Do not add any words beyond the input text.`,
+      speed: 0.98
+    });
+    this.fillerAudioCache.set(key, promise);
+    return promise;
   }
 
   private fillerVoiceSettings(): { voice: string; instructions: string } {
