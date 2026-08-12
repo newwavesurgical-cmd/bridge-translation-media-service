@@ -106,6 +106,19 @@ describe('AppToAppRegistry', () => {
       fillerBridgeEnabled: true,
       fillerVoiceGender: 'female',
       predictiveMode: 'restaurant_reservation_v1',
+      languageGateMode: 'monitor',
+      languageGate: {
+        initiator: {
+          mode: 'monitor',
+          expectedLanguage: 'English',
+          suppressed: false
+        },
+        receiver: {
+          mode: 'monitor',
+          expectedLanguage: 'Spanish',
+          suppressed: false
+        }
+      },
       timing: {
         initiator: {
           firstTranslatedAudioLatencyMs: null,

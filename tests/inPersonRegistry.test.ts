@@ -41,7 +41,20 @@ describe('InPersonRegistry', () => {
       partnerLanguage: 'Spanish',
       appConnected: false,
       sessionA: 'idle',
-      sessionB: 'idle'
+      sessionB: 'idle',
+      languageGateMode: 'monitor',
+      languageGate: {
+        owner: {
+          mode: 'monitor',
+          expectedLanguage: 'English',
+          suppressed: false
+        },
+        partner: {
+          mode: 'monitor',
+          expectedLanguage: 'Spanish',
+          suppressed: false
+        }
+      }
     });
   });
 });

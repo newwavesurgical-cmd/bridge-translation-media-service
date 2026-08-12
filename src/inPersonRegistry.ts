@@ -3,7 +3,8 @@ import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken } from './auth.js';
 import { base64ToPcm16 } from './audio/codec.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
-import type { CreateInPersonSessionRequest, TranscriptKind } from './types/messages.js';
+import { TranscriptLanguageGate } from './languageGate.js';
+import type { CreateInPersonSessionRequest, LanguageGateMode, TranscriptKind } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 
@@ -72,6 +73,7 @@ interface InPersonRecord {
   appToken: string;
   lastActivityAt?: string;
   endedAt?: string;
+  languageGateMode: LanguageGateMode;
   transcripts: TranscriptEntry[];
   counters: {
     userAudioChunks: number;
@@ -100,6 +102,7 @@ export class InPersonRegistry {
       createdAt: new Date().toISOString(),
       state: 'created',
       appToken: makeAppToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, sessionId),
+      languageGateMode: request.languageGateMode ?? 'monitor',
       transcripts: [],
       counters: {
         userAudioChunks: 0,
@@ -139,12 +142,18 @@ export class InPersonSession {
   private appWs?: WebSocket;
   private ownerToPartner?: OpenAiTranslationSession;
   private partnerToOwner?: OpenAiTranslationSession;
+  private readonly languageGates: Record<InPersonSpeaker, TranscriptLanguageGate>;
 
   constructor(
     private readonly config: AppConfig,
     private readonly record: InPersonRecord,
     private readonly onDispose: (diagnostics: Record<string, unknown>) => void
-  ) {}
+  ) {
+    this.languageGates = {
+      owner: new TranscriptLanguageGate(record.userLanguage, record.languageGateMode),
+      partner: new TranscriptLanguageGate(record.partnerLanguage, record.languageGateMode)
+    };
+  }
 
   get sessionId(): string {
     return this.record.sessionId;
@@ -192,6 +201,13 @@ export class InPersonSession {
       appConnected: Boolean(this.appWs),
       sessionA: this.ownerToPartner?.status ?? 'idle',
       sessionB: this.partnerToOwner?.status ?? 'idle',
+      languageGateMode: this.record.languageGateMode,
+      languageGateNote:
+        'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
+      languageGate: {
+        owner: this.languageGates.owner.diagnostics(),
+        partner: this.languageGates.partner.diagnostics()
+      },
       error: this.record.error ?? null,
       counters: { ...this.record.counters },
       transcriptDiagnosticNote: 'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
@@ -254,6 +270,9 @@ export class InPersonSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.partnerLanguage,
         onAudioDelta: (pcm24k) => {
+          if (this.languageGates.owner.shouldSuppressOutput()) {
+            return;
+          }
           this.record.counters.partnerTranslatedAudioChunks += 1;
           this.sendApp({
             type: 'translated_audio',
@@ -264,8 +283,15 @@ export class InPersonSession {
             encoding: 'pcm16'
           });
         },
-        onInputTranscriptDelta: (delta) => this.emitTranscript('owner', 'source', 'partner', delta),
-        onOutputTranscriptDelta: (delta) => this.emitTranscript('owner', 'translation', 'partner', delta),
+        onInputTranscriptDelta: (delta) => {
+          this.languageGates.owner.observe(delta);
+          this.emitTranscript('owner', 'source', 'partner', delta);
+        },
+        onOutputTranscriptDelta: (delta) => {
+          if (!this.languageGates.owner.shouldSuppressOutput()) {
+            this.emitTranscript('owner', 'translation', 'partner', delta);
+          }
+        },
         onStatus: () => this.sendStatus(),
         onError: (error) => this.fail(error)
       });
@@ -278,6 +304,9 @@ export class InPersonSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.userLanguage,
         onAudioDelta: (pcm24k) => {
+          if (this.languageGates.partner.shouldSuppressOutput()) {
+            return;
+          }
           this.record.counters.userTranslatedAudioChunks += 1;
           this.sendApp({
             type: 'translated_audio',
@@ -288,8 +317,15 @@ export class InPersonSession {
             encoding: 'pcm16'
           });
         },
-        onInputTranscriptDelta: (delta) => this.emitTranscript('partner', 'source', 'user', delta),
-        onOutputTranscriptDelta: (delta) => this.emitTranscript('partner', 'translation', 'user', delta),
+        onInputTranscriptDelta: (delta) => {
+          this.languageGates.partner.observe(delta);
+          this.emitTranscript('partner', 'source', 'user', delta);
+        },
+        onOutputTranscriptDelta: (delta) => {
+          if (!this.languageGates.partner.shouldSuppressOutput()) {
+            this.emitTranscript('partner', 'translation', 'user', delta);
+          }
+        },
         onStatus: () => this.sendStatus(),
         onError: (error) => this.fail(error)
       });

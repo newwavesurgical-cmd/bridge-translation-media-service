@@ -25,7 +25,8 @@ const createCallSchema = z.object({
 const createInPersonSessionSchema = z.object({
   userLanguage: z.string().min(2),
   partnerLanguage: z.string().min(2),
-  clientSessionId: z.string().optional()
+  clientSessionId: z.string().optional(),
+  languageGateMode: z.enum(['off', 'monitor', 'soft_suppress']).optional()
 });
 
 const createAppToAppSessionSchema = z.object({
@@ -34,6 +35,7 @@ const createAppToAppSessionSchema = z.object({
   clientSessionId: z.string().optional(),
   fillerBridgeEnabled: z.boolean().optional(),
   fillerVoiceGender: z.enum(['auto', 'male', 'female']).optional(),
+  languageGateMode: z.enum(['off', 'monitor', 'soft_suppress']).optional(),
   predictiveMode: z.preprocess(
     (value) => {
       if (value === true) {

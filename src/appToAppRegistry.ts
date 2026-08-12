@@ -6,7 +6,8 @@ import { base64ToBytes, base64ToPcm16, bytesToBase64 } from './audio/codec.js';
 import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { fillerTextForLanguage } from './predictive/reservationController.js';
-import type { FillerVoiceGender, PredictiveMode, TranscriptKind } from './types/messages.js';
+import { TranscriptLanguageGate } from './languageGate.js';
+import type { FillerVoiceGender, LanguageGateMode, PredictiveMode, TranscriptKind } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const SPEECH_RMS_THRESHOLD = 0.003;
@@ -47,6 +48,7 @@ export interface CreateAppToAppSessionRequest {
   fillerBridgeEnabled?: boolean;
   fillerVoiceGender?: FillerVoiceGender;
   predictiveMode?: PredictiveMode;
+  languageGateMode?: LanguageGateMode;
 }
 
 type AppToAppClientMessage =
@@ -112,6 +114,7 @@ interface AppToAppRecord {
   fillerBridgeEnabled: boolean;
   fillerVoiceGender: FillerVoiceGender;
   predictiveMode: PredictiveMode;
+  languageGateMode: LanguageGateMode;
   lastSpeechAt: Partial<Record<AppToAppParticipant, string>>;
   lastFillerAt: Partial<Record<AppToAppParticipant, string>>;
   lastFillerText: Partial<Record<AppToAppParticipant, string>>;
@@ -176,6 +179,7 @@ export class AppToAppRegistry {
       fillerBridgeEnabled,
       fillerVoiceGender: request.fillerVoiceGender ?? 'auto',
       predictiveMode: request.predictiveMode ?? 'off',
+      languageGateMode: request.languageGateMode ?? 'monitor',
       lastSpeechAt: {},
       lastFillerAt: {},
       lastFillerText: {},
@@ -272,13 +276,19 @@ export class AppToAppSession {
   private readonly fillerAudioCache = new Map<string, Promise<string>>();
   private readonly preparedFillerText: Partial<Record<AppToAppParticipant, string>> = {};
   private readonly speakingTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
+  private readonly languageGates: Record<AppToAppParticipant, TranscriptLanguageGate>;
   private fillerOverlaySequence = 0;
 
   constructor(
     private readonly config: AppConfig,
     private readonly record: AppToAppRecord,
     private readonly onDispose: (diagnostics: Record<string, unknown>) => void
-  ) {}
+  ) {
+    this.languageGates = {
+      initiator: new TranscriptLanguageGate(record.initiatorLanguage, record.languageGateMode),
+      receiver: new TranscriptLanguageGate(record.receiverLanguage, record.languageGateMode)
+    };
+  }
 
   get sessionId(): string {
     return this.record.sessionId;
@@ -337,6 +347,13 @@ export class AppToAppSession {
       fillerBridgeEnabled: this.record.fillerBridgeEnabled,
       fillerVoiceGender: this.record.fillerVoiceGender,
       predictiveMode: this.record.predictiveMode,
+      languageGateMode: this.record.languageGateMode,
+      languageGateNote:
+        'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
+      languageGate: {
+        initiator: this.languageGates.initiator.diagnostics(),
+        receiver: this.languageGates.receiver.diagnostics()
+      },
       fillerModeNote: this.record.fillerBridgeEnabled
         ? 'App-to-app filler overlay is enabled. It sends slow, non-substantive filler to the listener after source-speaker silence, then cancels as soon as real translated audio starts.'
         : 'App-to-app filler is off.',
@@ -690,6 +707,9 @@ export class AppToAppSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.receiverLanguage,
         onAudioDelta: (pcm24k) => {
+          if (this.languageGates.initiator.shouldSuppressOutput()) {
+            return;
+          }
           this.trackTranslatedAudioTiming('initiator');
           this.record.counters.translatedAudioChunksToReceiver += 1;
           this.cancelFillerForTarget('receiver');
@@ -704,10 +724,14 @@ export class AppToAppSession {
           });
         },
         onInputTranscriptDelta: (delta) => {
+          this.languageGates.initiator.observe(delta);
           this.trackTranscriptTiming('initiator', 'source');
           this.emitTranscript('initiator', 'source', delta);
         },
         onOutputTranscriptDelta: (delta) => {
+          if (this.languageGates.initiator.shouldSuppressOutput()) {
+            return;
+          }
           this.trackTranscriptTiming('initiator', 'translation');
           this.emitTranscript('initiator', 'translation', delta);
         },
@@ -723,6 +747,9 @@ export class AppToAppSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.initiatorLanguage,
         onAudioDelta: (pcm24k) => {
+          if (this.languageGates.receiver.shouldSuppressOutput()) {
+            return;
+          }
           this.trackTranslatedAudioTiming('receiver');
           this.record.counters.translatedAudioChunksToInitiator += 1;
           this.cancelFillerForTarget('initiator');
@@ -737,10 +764,14 @@ export class AppToAppSession {
           });
         },
         onInputTranscriptDelta: (delta) => {
+          this.languageGates.receiver.observe(delta);
           this.trackTranscriptTiming('receiver', 'source');
           this.emitTranscript('receiver', 'source', delta);
         },
         onOutputTranscriptDelta: (delta) => {
+          if (this.languageGates.receiver.shouldSuppressOutput()) {
+            return;
+          }
           this.trackTranscriptTiming('receiver', 'translation');
           this.emitTranscript('receiver', 'translation', delta);
         },

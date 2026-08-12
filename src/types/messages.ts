@@ -2,6 +2,7 @@ export type Speaker = 'owner' | 'remote';
 export type TranscriptKind = 'source' | 'translation';
 export type PredictiveMode = 'off' | 'restaurant_reservation_v1';
 export type FillerVoiceGender = 'auto' | 'male' | 'female';
+export type LanguageGateMode = 'off' | 'monitor' | 'soft_suppress';
 
 export type AppClientMessage =
   | {
@@ -152,6 +153,7 @@ export interface CreateInPersonSessionRequest {
   userLanguage: string;
   partnerLanguage: string;
   clientSessionId?: string;
+  languageGateMode?: LanguageGateMode;
 }
 
 export interface CreateInPersonSessionResponse {
@@ -168,6 +170,7 @@ export interface CreateAppToAppSessionRequest {
   fillerBridgeEnabled?: boolean;
   fillerVoiceGender?: FillerVoiceGender;
   predictiveMode?: PredictiveMode;
+  languageGateMode?: LanguageGateMode;
 }
 
 export interface CreateAppToAppSessionResponse {
