@@ -126,6 +126,10 @@ describe('AppToAppRegistry', () => {
         initiator: 0,
         receiver: 0
       },
+      fillerOverlayActive: {
+        initiator: false,
+        receiver: false
+      },
       counters: {
         fillerAudioChunksToInitiator: 0,
         fillerAudioChunksToReceiver: 0,

@@ -10,8 +10,9 @@ import type { FillerVoiceGender, PredictiveMode, TranscriptKind } from './types/
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const SPEECH_RMS_THRESHOLD = 0.003;
-const FILLER_AFTER_SILENCE_MS = 900;
-const FILLER_COOLDOWN_MS = 11_000;
+const FILLER_AFTER_SILENCE_MS = 1_000;
+const FILLER_REPEAT_MS = 4_800;
+const FILLER_CHUNK_INTERVAL_MS = 100;
 const APP_TO_APP_INVITE_TTL_MS = 30 * 60 * 1000;
 const APP_TO_APP_INVITE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 
@@ -27,6 +28,15 @@ type TranscriptEntry = {
   speaker: TranscriptSpeaker;
   kind: TranscriptKind;
   delta: string;
+};
+
+type FillerOverlayState = {
+  id: number;
+  source: AppToAppParticipant;
+  target: AppToAppParticipant;
+  cancelled: boolean;
+  chunkTimer?: ReturnType<typeof setTimeout>;
+  repeatTimer?: ReturnType<typeof setTimeout>;
 };
 
 export interface CreateAppToAppSessionRequest {
@@ -246,7 +256,9 @@ export class AppToAppSession {
   private initiatorToReceiver?: OpenAiTranslationSession;
   private receiverToInitiator?: OpenAiTranslationSession;
   private readonly fillerTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
+  private readonly fillerOverlays: Partial<Record<AppToAppParticipant, FillerOverlayState>> = {};
   private readonly speakingTimers: Partial<Record<AppToAppParticipant, ReturnType<typeof setTimeout>>> = {};
+  private fillerOverlaySequence = 0;
 
   constructor(
     private readonly config: AppConfig,
@@ -312,11 +324,15 @@ export class AppToAppSession {
       fillerVoiceGender: this.record.fillerVoiceGender,
       predictiveMode: this.record.predictiveMode,
       fillerModeNote: this.record.fillerBridgeEnabled
-        ? 'App-to-app filler is enabled. It sends short non-substantive TTS to the participant who just spoke after a brief silence.'
+        ? 'App-to-app filler overlay is enabled. It sends slow, non-substantive filler to the listener after source-speaker silence, then cancels as soon as real translated audio starts.'
         : 'App-to-app filler is off.',
       lastSpeechAt: { ...this.record.lastSpeechAt },
       lastFillerAt: { ...this.record.lastFillerAt },
       lastFillerText: { ...this.record.lastFillerText },
+      fillerOverlayActive: {
+        initiator: Boolean(this.fillerOverlays.initiator && !this.fillerOverlays.initiator.cancelled),
+        receiver: Boolean(this.fillerOverlays.receiver && !this.fillerOverlays.receiver.cancelled)
+      },
       speaking: { ...this.record.speaking },
       lastAudioRmsPercent: {
         initiator: Number((this.record.lastAudioRms.initiator * 100).toFixed(2)),
@@ -441,6 +457,7 @@ export class AppToAppSession {
     if (rms < SPEECH_RMS_THRESHOLD) {
       return;
     }
+    this.cancelFillerForTarget(participant);
     this.record.lastSpeechAt[participant] = new Date().toISOString();
     this.scheduleFillerAfterSilence(participant);
   }
@@ -450,32 +467,56 @@ export class AppToAppSession {
     if (existing) {
       clearTimeout(existing);
     }
-    const timer = setTimeout(() => void this.maybeSpeakFillerToParticipant(participant), FILLER_AFTER_SILENCE_MS);
+    const timer = setTimeout(() => void this.maybeStartFillerOverlay(participant), FILLER_AFTER_SILENCE_MS);
     timer.unref?.();
     this.fillerTimers[participant] = timer;
   }
 
-  private async maybeSpeakFillerToParticipant(participant: AppToAppParticipant): Promise<void> {
+  private async maybeStartFillerOverlay(source: AppToAppParticipant): Promise<void> {
     if (!this.record.fillerBridgeEnabled || this.record.state === 'ended') {
       return;
     }
-    const lastSpeechAt = this.record.lastSpeechAt[participant];
+    const lastSpeechAt = this.record.lastSpeechAt[source];
     if (!lastSpeechAt || Date.now() - Date.parse(lastSpeechAt) < FILLER_AFTER_SILENCE_MS) {
       return;
     }
-    const lastFillerAt = this.record.lastFillerAt[participant];
-    if (lastFillerAt && Date.now() - Date.parse(lastFillerAt) < FILLER_COOLDOWN_MS) {
+    if (this.translatedAudioStartedAfter(source, lastSpeechAt)) {
       return;
     }
-    const ws = this.wsFor(participant);
+    const target = otherParticipant(source);
+    this.cancelFillerForTarget(target);
+    await this.speakFillerOverlayPhrase(source, target);
+  }
+
+  private async speakFillerOverlayPhrase(source: AppToAppParticipant, target: AppToAppParticipant): Promise<void> {
+    if (!this.record.fillerBridgeEnabled || this.record.state === 'ended') {
+      return;
+    }
+    const lastSpeechAt = this.record.lastSpeechAt[source];
+    if (!lastSpeechAt || this.translatedAudioStartedAfter(source, lastSpeechAt)) {
+      return;
+    }
+    if (this.record.speaking[target]) {
+      return;
+    }
+
+    const ws = this.wsFor(target);
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
 
-    const language = participant === 'initiator' ? this.record.initiatorLanguage : this.record.receiverLanguage;
-    const text = fillerTextForLanguage(language, '', this.record.lastFillerText[participant] ?? '');
-    this.record.lastFillerText[participant] = text;
-    this.record.lastFillerAt[participant] = new Date().toISOString();
+    const overlay: FillerOverlayState = {
+      id: ++this.fillerOverlaySequence,
+      source,
+      target,
+      cancelled: false
+    };
+    this.fillerOverlays[target] = overlay;
+
+    const language = target === 'initiator' ? this.record.initiatorLanguage : this.record.receiverLanguage;
+    const text = fillerTextForLanguage(language, '', this.record.lastFillerText[target] ?? '');
+    this.record.lastFillerText[target] = text;
+    this.record.lastFillerAt[target] = new Date().toISOString();
 
     try {
       const fillerVoice = this.fillerVoiceSettings();
@@ -486,41 +527,78 @@ export class AppToAppSession {
         instructions: `Speak naturally in ${language}. This is a very short thinking filler in a two-person translated web session. ${fillerVoice.instructions} Do not add any words beyond the input text.`,
         speed: 0.98
       });
-      const chunks = this.sendFillerPcm24kToParticipant(participant, pcm24k);
-      if (participant === 'initiator') {
+      if (overlay.cancelled || this.fillerOverlays[target] !== overlay || this.translatedAudioStartedAfter(source, lastSpeechAt)) {
+        this.cancelFillerForTarget(target);
+        return;
+      }
+      const chunks = this.sendFillerPcm24kToParticipantPaced(overlay, pcm24k);
+      if (target === 'initiator') {
         this.record.counters.fillerAudioChunksToInitiator += chunks;
       } else {
         this.record.counters.fillerAudioChunksToReceiver += chunks;
       }
+      if (!overlay.cancelled && this.fillerOverlays[target] === overlay) {
+        overlay.repeatTimer = setTimeout(() => void this.speakFillerOverlayPhrase(source, target), FILLER_REPEAT_MS);
+        overlay.repeatTimer.unref?.();
+      }
     } catch (error) {
+      this.cancelFillerForTarget(target);
       this.record.counters.fillerSpeechErrors += 1;
       this.record.error = error instanceof Error ? error.message : 'App-to-app filler speech failed';
-      this.sendTo(participant, {
+      this.sendTo(target, {
         type: 'error',
         message: this.record.error
       });
     }
   }
 
-  private sendFillerPcm24kToParticipant(participant: AppToAppParticipant, pcm24k: string): number {
-    const bytes = base64ToBytes(pcm24k);
+  private sendFillerPcm24kToParticipantPaced(overlay: FillerOverlayState, pcm24k: string): number {
+    const bytes = fadePcm16Base64(pcm24k);
     const chunkSize = 4800;
-    let chunks = 0;
-    const from = otherParticipant(participant);
-    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunks = Math.ceil(bytes.length / chunkSize);
+    const sendChunk = (index: number): void => {
+      if (overlay.cancelled || this.fillerOverlays[overlay.target] !== overlay || this.record.state === 'ended') {
+        return;
+      }
+      const offset = index * chunkSize;
+      if (offset >= bytes.length) {
+        return;
+      }
       const chunk = bytes.slice(offset, offset + chunkSize);
-      this.sendTo(participant, {
+      this.sendTo(overlay.target, {
         type: 'translated_audio',
         speaker: 'remote',
-        from,
-        to: participant,
+        from: overlay.source,
+        to: overlay.target,
         audio: bytesToBase64(chunk),
         sampleRate: 24000,
         encoding: 'pcm16'
       });
-      chunks += 1;
-    }
+      overlay.chunkTimer = setTimeout(() => sendChunk(index + 1), FILLER_CHUNK_INTERVAL_MS);
+      overlay.chunkTimer.unref?.();
+    };
+    sendChunk(0);
     return chunks;
+  }
+
+  private cancelFillerForTarget(target: AppToAppParticipant): void {
+    const overlay = this.fillerOverlays[target];
+    if (!overlay) {
+      return;
+    }
+    overlay.cancelled = true;
+    if (overlay.chunkTimer) {
+      clearTimeout(overlay.chunkTimer);
+    }
+    if (overlay.repeatTimer) {
+      clearTimeout(overlay.repeatTimer);
+    }
+    delete this.fillerOverlays[target];
+  }
+
+  private translatedAudioStartedAfter(source: AppToAppParticipant, isoTime: string): boolean {
+    const lastTranslatedAudioAt = this.record.timing[source].lastTranslatedAudioAt;
+    return Boolean(lastTranslatedAudioAt && Date.parse(lastTranslatedAudioAt) >= Date.parse(isoTime));
   }
 
   private fillerVoiceSettings(): { voice: string; instructions: string } {
@@ -553,6 +631,7 @@ export class AppToAppSession {
         onAudioDelta: (pcm24k) => {
           this.trackTranslatedAudioTiming('initiator');
           this.record.counters.translatedAudioChunksToReceiver += 1;
+          this.cancelFillerForTarget('receiver');
           this.sendTo('receiver', {
             type: 'translated_audio',
             speaker: 'remote',
@@ -585,6 +664,7 @@ export class AppToAppSession {
         onAudioDelta: (pcm24k) => {
           this.trackTranslatedAudioTiming('receiver');
           this.record.counters.translatedAudioChunksToInitiator += 1;
+          this.cancelFillerForTarget('initiator');
           this.sendTo('initiator', {
             type: 'translated_audio',
             speaker: 'remote',
@@ -690,6 +770,8 @@ export class AppToAppSession {
         clearTimeout(timer);
       }
     }
+    this.cancelFillerForTarget('initiator');
+    this.cancelFillerForTarget('receiver');
     for (const timer of Object.values(this.speakingTimers)) {
       if (timer) {
         clearTimeout(timer);
@@ -779,6 +861,18 @@ function normalizeInviteCode(inviteCode: string): string {
 
 function otherParticipant(participant: AppToAppParticipant): AppToAppParticipant {
   return participant === 'initiator' ? 'receiver' : 'initiator';
+}
+
+function fadePcm16Base64(base64: string, sampleRate = 24000, fadeMs = 35): Uint8Array {
+  const pcm = base64ToPcm16(base64);
+  const fadeSamples = Math.min(Math.floor((sampleRate * fadeMs) / 1000), Math.floor(pcm.length / 2));
+  for (let index = 0; index < fadeSamples; index += 1) {
+    const scale = index / fadeSamples;
+    pcm[index] = Math.round(pcm[index] * scale);
+    const tailIndex = pcm.length - 1 - index;
+    pcm[tailIndex] = Math.round(pcm[tailIndex] * scale);
+  }
+  return Buffer.from(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 }
 
 function createParticipantTiming(): ParticipantTiming {
