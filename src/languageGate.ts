@@ -34,7 +34,7 @@ const MAX_EVENTS = 16;
 const MAX_ROLLING_TEXT_LENGTH = 140;
 const RECENT_TURN_TEXT_LENGTH = 90;
 const ROLLING_TEXT_STALE_MS = 1200;
-const OUTPUT_PASS_FRESH_MS = 1800;
+const OUTPUT_PASS_FRESH_MS = 12000;
 
 const ENGLISH_WORDS = new Set([
   'a',
@@ -87,8 +87,11 @@ const ENGLISH_WORDS = new Set([
 const SPANISH_WORDS = new Set([
   'a',
   'ahora',
+  'aqui',
+  'aquí',
   'ayuda',
   'ayudar',
+  'bien',
   'claro',
   'como',
   'con',
@@ -104,6 +107,9 @@ const SPANISH_WORDS = new Set([
   'el',
   'en',
   'endes',
+  'esa',
+  'ese',
+  'eso',
   'enti',
   'entiendes',
   'escucha',
@@ -115,7 +121,9 @@ const SPANISH_WORDS = new Set([
   'funcionando',
   'gracias',
   'hablas',
+  'historia',
   'hola',
+  'impresionante',
   'informacion',
   'información',
   'la',
@@ -131,9 +139,12 @@ const SPANISH_WORDS = new Set([
   'personas',
   'por',
   'porque',
+  'pasa',
+  'pasando',
   'puede',
   'puedes',
   'que',
+  'qué',
   'quiero',
   'ridiculo',
   'ridículo',
@@ -317,7 +328,7 @@ export function classifyLanguage(text: string): { language: LanguageCode | null;
     spanishScore += 2;
   }
   if (
-    /\b(?:enti\s*endes|entiendes|diciendo|dices|funciona|funcionando|est[aá]\s*funcionando|direcci[oó]n|molesta|hablas|tengo|tampoco|qu[eé]\s*t[uú]|por\s*qu[eé])\b/i.test(
+    /\b(?:enti\s*endes|entiendes|diciendo|dices|funciona|funcionando|est[aá]\s*funcionando|direcci[oó]n|molesta|hablas|tengo|tampoco|qu[eé]\s*t[uú]|por\s*qu[eé]|qu[eé]\s+pasa|qu[eé]\s+est[aá]\s+pasando|historia\s+muy\s+linda|muy\s+impresionante)\b/i.test(
       text
     )
   ) {

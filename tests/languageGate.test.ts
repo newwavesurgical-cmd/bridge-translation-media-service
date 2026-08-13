@@ -25,6 +25,9 @@ describe('TranscriptLanguageGate', () => {
     expect(classifyLanguage('Eso sí me molesta.')).toMatchObject({
       language: 'es'
     });
+    expect(classifyLanguage('Esa es una historia muy linda. ¿Qué está pasando aquí?')).toMatchObject({
+      language: 'es'
+    });
   });
 
   it('keeps short or universal fragments uncertain', () => {
@@ -74,7 +77,11 @@ describe('TranscriptLanguageGate', () => {
     expect(gate.observe('Can you help me make a reservation for four people?')).toBe('pass');
     expect(gate.shouldPassOutput()).toBe(true);
 
-    vi.advanceTimersByTime(1900);
+    vi.advanceTimersByTime(5000);
+
+    expect(gate.shouldPassOutput()).toBe(true);
+
+    vi.advanceTimersByTime(8000);
 
     expect(gate.shouldPassOutput()).toBe(false);
     expect(gate.diagnostics()).toMatchObject({
@@ -127,7 +134,7 @@ describe('TranscriptLanguageGate', () => {
       vi.advanceTimersByTime(100);
     }
 
-    vi.advanceTimersByTime(1900);
+    vi.advanceTimersByTime(13000);
     expect(ownerGate.shouldPassOutput()).toBe(false);
 
     for (const delta of ['Tú ', 'enti', 'endes ', 'lo ', 'que ', 'te ', 'estoy ', 'diciendo?']) {
@@ -153,12 +160,33 @@ describe('TranscriptLanguageGate', () => {
     partnerGate.observe('This is a long English passage about a restaurant reservation and what happens next.');
     expect(ownerGate.shouldPassOutput()).toBe(true);
 
-    vi.advanceTimersByTime(1900);
+    vi.advanceTimersByTime(5000);
+
+    expect(ownerGate.shouldPassOutput()).toBe(true);
+
+    vi.advanceTimersByTime(8000);
 
     expect(ownerGate.shouldPassOutput()).toBe(false);
     ownerGate.observe('Eso sí me molesta. ¿Qué está pasando?');
     partnerGate.observe('Eso sí me molesta. ¿Qué está pasando?');
 
+    expect(ownerGate.shouldPassOutput()).toBe(false);
+    expect(partnerGate.shouldPassOutput()).toBe(true);
+  });
+
+  it('closes the old English pass immediately when a clear Spanish story turn starts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const ownerGate = new TranscriptLanguageGate('English', 'soft_suppress');
+    const partnerGate = new TranscriptLanguageGate('Spanish', 'soft_suppress');
+
+    expect(ownerGate.observe('Are you ready to get to work?')).toBe('pass');
+    partnerGate.observe('Are you ready to get to work?');
+    vi.advanceTimersByTime(1000);
+    expect(ownerGate.shouldPassOutput()).toBe(true);
+
+    expect(ownerGate.observe('Esa es una historia muy linda. ¿Qué está pasando aquí?')).toBe('suppress');
+    expect(partnerGate.observe('Esa es una historia muy linda. ¿Qué está pasando aquí?')).toBe('pass');
     expect(ownerGate.shouldPassOutput()).toBe(false);
     expect(partnerGate.shouldPassOutput()).toBe(true);
   });
