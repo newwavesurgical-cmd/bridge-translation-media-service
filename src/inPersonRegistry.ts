@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
-import { makeAppToken, makeId, verifyAppToken } from './auth.js';
+import { makeAppToken, makeId, makeInPersonDisplayToken, verifyAppToken, verifyInPersonDisplayToken } from './auth.js';
 import { base64ToPcm16 } from './audio/codec.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { TranscriptLanguageGate, type LanguageGateDecision } from './languageGate.js';
@@ -19,6 +19,7 @@ const SINGLE_MIC_ROUTE_POST_SPEECH_SILENCE_MS = 1800;
 
 type InPersonSpeaker = 'owner' | 'partner';
 type InPersonTarget = 'user' | 'partner';
+export type InPersonDisplayView = 'owner' | 'partner';
 type SingleMicRoute = 'auto' | InPersonSpeaker;
 
 type TranscriptEntry = {
@@ -124,6 +125,33 @@ type InPersonServerMessage =
     }
   | { type: 'error'; message: string };
 
+type InPersonDisplayServerMessage =
+  | {
+      type: 'display_status';
+      sessionId: string;
+      view: InPersonDisplayView;
+      target: InPersonTarget;
+      state: string;
+      appConnected: boolean;
+      userLanguage: string;
+      partnerLanguage: string;
+    }
+  | {
+      type: 'display_snapshot';
+      sessionId: string;
+      view: InPersonDisplayView;
+      target: InPersonTarget;
+      transcriptTail: TranscriptEntry[];
+    }
+  | {
+      type: 'transcript_delta';
+      speaker: InPersonSpeaker;
+      target: InPersonTarget;
+      transcriptKind: TranscriptKind;
+      delta: string;
+    }
+  | { type: 'error'; message: string };
+
 interface InPersonRecord {
   sessionId: string;
   userLanguage: string;
@@ -212,6 +240,10 @@ export class InPersonRegistry {
 
 export class InPersonSession {
   private appWs?: WebSocket;
+  private readonly displaySockets: Record<InPersonDisplayView, Set<WebSocket>> = {
+    owner: new Set(),
+    partner: new Set()
+  };
   private ownerToPartner?: OpenAiTranslationSession;
   private partnerToOwner?: OpenAiTranslationSession;
   private readonly languageGates: Record<InPersonSpeaker, TranscriptLanguageGate>;
@@ -242,9 +274,40 @@ export class InPersonSession {
     );
   }
 
+  verifyDisplayToken(view: InPersonDisplayView, token: string): boolean {
+    return Boolean(
+      this.config.BRIDGE_MEDIA_SHARED_SECRET &&
+        verifyInPersonDisplayToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, this.sessionId, view, token)
+    );
+  }
+
   streamUrl(): string {
     const base = this.inPersonStreamBaseUrl();
     return `${base}/${encodeURIComponent(this.sessionId)}?token=${encodeURIComponent(this.record.appToken)}`;
+  }
+
+  displayStreamUrl(view: InPersonDisplayView): string {
+    const base = this.inPersonDisplayStreamBaseUrl();
+    if (!this.config.BRIDGE_MEDIA_SHARED_SECRET) {
+      throw new Error('BRIDGE_MEDIA_SHARED_SECRET is required');
+    }
+    const token = makeInPersonDisplayToken(this.config.BRIDGE_MEDIA_SHARED_SECRET, this.sessionId, view);
+    return `${base}/${encodeURIComponent(this.sessionId)}/${view}?token=${encodeURIComponent(token)}`;
+  }
+
+  displayStreams(): Record<InPersonDisplayView, { view: InPersonDisplayView; target: InPersonTarget; streamUrl: string }> {
+    return {
+      owner: {
+        view: 'owner',
+        target: 'user',
+        streamUrl: this.displayStreamUrl('owner')
+      },
+      partner: {
+        view: 'partner',
+        target: 'partner',
+        streamUrl: this.displayStreamUrl('partner')
+      }
+    };
   }
 
   bindApp(ws: WebSocket): void {
@@ -263,8 +326,22 @@ export class InPersonSession {
         this.record.endedAt = new Date().toISOString();
         this.ownerToPartner?.close();
         this.partnerToOwner?.close();
+        this.closeDisplaySockets();
         this.onDispose(this.diagnostics());
       }
+    });
+  }
+
+  bindDisplay(view: InPersonDisplayView, ws: WebSocket): void {
+    this.displaySockets[view].add(ws);
+    this.sendDisplayStatus(view, ws);
+    this.sendDisplaySnapshot(view, ws);
+
+    ws.on('message', () => {
+      this.sendDisplay(ws, { type: 'error', message: 'Display connections are read-only.' });
+    });
+    ws.on('close', () => {
+      this.displaySockets[view].delete(ws);
     });
   }
 
@@ -278,6 +355,10 @@ export class InPersonSession {
       userLanguage: this.record.userLanguage,
       partnerLanguage: this.record.partnerLanguage,
       appConnected: Boolean(this.appWs),
+      displaySubscribers: {
+        owner: this.displaySockets.owner.size,
+        partner: this.displaySockets.partner.size
+      },
       sessionA: this.ownerToPartner?.status ?? 'idle',
       sessionB: this.partnerToOwner?.status ?? 'idle',
       singleMicRoute: this.singleMicRoute,
@@ -545,7 +626,9 @@ export class InPersonSession {
     if (this.record.transcripts.length > MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS) {
       this.record.transcripts.splice(0, this.record.transcripts.length - MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS);
     }
-    this.sendApp({ type: 'transcript_delta', speaker, target, transcriptKind: kind, delta });
+    const message = { type: 'transcript_delta' as const, speaker, target, transcriptKind: kind, delta };
+    this.sendApp(message);
+    this.sendDisplayTranscript(target, message);
   }
 
   private shouldEmitTranscriptForDecision(speaker: InPersonSpeaker, decision: LanguageGateDecision): boolean {
@@ -673,6 +756,7 @@ export class InPersonSession {
     this.ownerToPartner?.close();
     this.partnerToOwner?.close();
     this.appWs?.close();
+    this.closeDisplaySockets();
     this.onDispose(this.diagnostics());
   }
 
@@ -692,6 +776,8 @@ export class InPersonSession {
       routeOverrideSpeechAgeMs: this.singleMicRouteSpeechStartedAt ? Date.now() - this.singleMicRouteSpeechStartedAt : null,
       routeOverrideLastSpeechAgeMs: this.singleMicRouteLastSpeechAt ? Date.now() - this.singleMicRouteLastSpeechAt : null
     });
+    this.sendDisplayStatus('owner');
+    this.sendDisplayStatus('partner');
   }
 
   private sendRouteStatusIfChanged(): void {
@@ -710,6 +796,64 @@ export class InPersonSession {
       return;
     }
     this.appWs.send(JSON.stringify(message));
+  }
+
+  private sendDisplayTranscript(
+    target: InPersonTarget,
+    message: Extract<InPersonDisplayServerMessage, { type: 'transcript_delta' }>
+  ): void {
+    const view = target === 'partner' ? 'partner' : 'owner';
+    for (const ws of this.displaySockets[view]) {
+      this.sendDisplay(ws, message);
+    }
+  }
+
+  private sendDisplayStatus(view: InPersonDisplayView, specificSocket?: WebSocket): void {
+    const target = displayTargetForView(view);
+    const message: InPersonDisplayServerMessage = {
+      type: 'display_status',
+      sessionId: this.sessionId,
+      view,
+      target,
+      state: this.record.state,
+      appConnected: Boolean(this.appWs),
+      userLanguage: this.record.userLanguage,
+      partnerLanguage: this.record.partnerLanguage
+    };
+    if (specificSocket) {
+      this.sendDisplay(specificSocket, message);
+      return;
+    }
+    for (const ws of this.displaySockets[view]) {
+      this.sendDisplay(ws, message);
+    }
+  }
+
+  private sendDisplaySnapshot(view: InPersonDisplayView, ws: WebSocket): void {
+    const target = displayTargetForView(view);
+    this.sendDisplay(ws, {
+      type: 'display_snapshot',
+      sessionId: this.sessionId,
+      view,
+      target,
+      transcriptTail: this.record.transcripts.filter((entry) => transcriptTarget(entry.speaker) === target).slice(-120)
+    });
+  }
+
+  private sendDisplay(ws: WebSocket, message: InPersonDisplayServerMessage): void {
+    if (ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    ws.send(JSON.stringify(message));
+  }
+
+  private closeDisplaySockets(): void {
+    for (const view of ['owner', 'partner'] as const) {
+      for (const ws of this.displaySockets[view]) {
+        ws.close();
+      }
+      this.displaySockets[view].clear();
+    }
   }
 
   private fail(error: Error): void {
@@ -767,6 +911,13 @@ export class InPersonSession {
     }
     return `ws://localhost:${this.config.PORT}/in-person/stream`;
   }
+
+  private inPersonDisplayStreamBaseUrl(): string {
+    if (this.config.APP_STREAM_PUBLIC_WSS_URL) {
+      return this.config.APP_STREAM_PUBLIC_WSS_URL.replace(/\/app\/stream\/?$/, '/in-person/display');
+    }
+    return `ws://localhost:${this.config.PORT}/in-person/display`;
+  }
 }
 
 export function pcm16RmsForInPersonDiagnostics(base64Pcm16: string): number {
@@ -799,4 +950,12 @@ function createAudioTimingStats(): AudioTimingStats {
 
 function rollingAverage(currentAverage: number, samples: number, nextValue: number): number {
   return Math.round(((currentAverage * samples + nextValue) / (samples + 1)) * 10) / 10;
+}
+
+function displayTargetForView(view: InPersonDisplayView): InPersonTarget {
+  return view === 'partner' ? 'partner' : 'user';
+}
+
+function transcriptTarget(speaker: InPersonSpeaker): InPersonTarget {
+  return speaker === 'owner' ? 'partner' : 'user';
 }

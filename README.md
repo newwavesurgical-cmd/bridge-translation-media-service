@@ -130,6 +130,18 @@ Response:
   "sessionId": "inperson_...",
   "status": "created",
   "streamUrl": "wss://.../in-person/stream/inperson_...?token=...",
+  "displayStreams": {
+    "owner": {
+      "view": "owner",
+      "target": "user",
+      "streamUrl": "wss://.../in-person/display/inperson_.../owner?token=..."
+    },
+    "partner": {
+      "view": "partner",
+      "target": "partner",
+      "streamUrl": "wss://.../in-person/display/inperson_.../partner?token=..."
+    }
+  },
   "diagnostics": {}
 }
 ```
@@ -172,6 +184,25 @@ The server sends translated audio and transcript deltas:
 
 Use `target:"user"` for the owner/private output and `target:"partner"` for the
 outward speaker output. Do not infer routing from language or speaker detection.
+
+### In-Person Companion Displays
+
+In-person sessions expose read-only text display streams for QR companion
+screens. These streams cannot send microphone audio, hang up, or control
+routing.
+
+Partner-facing display:
+
+`wss://.../in-person/display/:sessionId/partner?token=...`
+
+Owner-facing display:
+
+`wss://.../in-person/display/:sessionId/owner?token=...`
+
+On connect, the display receives a `display_status`, then a `display_snapshot`,
+then only matching `transcript_delta` messages for that view. The partner
+display receives `target:"partner"` transcript deltas; the owner display
+receives `target:"user"` transcript deltas.
 
 Phone-only in-person sessions can use the same endpoint without the native USB
 bridge. These modes are intentionally labeled as phone-only fallbacks, not true

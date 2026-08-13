@@ -5,7 +5,7 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import { mediaRouterConfigured, openAiConfigured, twilioConfigured } from './config.js';
 import { CallRegistry } from './callRegistry.js';
-import { InPersonRegistry } from './inPersonRegistry.js';
+import { InPersonRegistry, type InPersonDisplayView } from './inPersonRegistry.js';
 import { AppToAppRegistry, type AppToAppParticipant } from './appToAppRegistry.js';
 import { originateTranslatedCall } from './twilio/client.js';
 import { buildTranslatedCallTwiMl } from './twilio/twiml.js';
@@ -112,6 +112,7 @@ export function createBridgeMediaServer(config: AppConfig) {
           sessionId: session.sessionId,
           status: 'created',
           streamUrl: session.streamUrl(),
+          displayStreams: session.displayStreams(),
           diagnostics: session.diagnostics()
         });
       }
@@ -232,6 +233,22 @@ export function createBridgeMediaServer(config: AppConfig) {
           return;
         }
         session.bindApp(ws);
+      });
+      return;
+    }
+
+    if (url.pathname.startsWith('/in-person/display/')) {
+      inPersonWss.handleUpgrade(req, socket, head, (ws) => {
+        const parts = url.pathname.split('/').filter(Boolean);
+        const sessionId = decodeURIComponent(parts[2] ?? '');
+        const view = parts[3] as InPersonDisplayView | undefined;
+        const token = url.searchParams.get('token') ?? '';
+        const session = inPersonRegistry.get(sessionId);
+        if (!session || (view !== 'owner' && view !== 'partner') || !session.verifyDisplayToken(view, token)) {
+          ws.close();
+          return;
+        }
+        session.bindDisplay(view, ws);
       });
       return;
     }

@@ -162,6 +162,18 @@ export interface CreateInPersonSessionResponse {
   sessionId: string;
   status: 'created';
   streamUrl: string;
+  displayStreams?: {
+    owner: {
+      view: 'owner';
+      target: 'user';
+      streamUrl: string;
+    };
+    partner: {
+      view: 'partner';
+      target: 'partner';
+      streamUrl: string;
+    };
+  };
   diagnostics: Record<string, unknown>;
 }
 

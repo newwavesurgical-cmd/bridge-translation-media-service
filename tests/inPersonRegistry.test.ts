@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import WebSocket from 'ws';
 import { createBridgeMediaServer } from '../src/http.js';
 import { InPersonRegistry } from '../src/inPersonRegistry.js';
 import { pcm16ToBase64 } from '../src/audio/codec.js';
@@ -154,6 +155,97 @@ describe('InPersonRegistry', () => {
         }
       },
       audioTimingTail: []
+    });
+  });
+
+  it('creates read-only owner and partner display streams', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_display_test'
+    });
+
+    expect(session.displayStreams()).toMatchObject({
+      owner: {
+        view: 'owner',
+        target: 'user'
+      },
+      partner: {
+        view: 'partner',
+        target: 'partner'
+      }
+    });
+    expect(session.displayStreams().owner.streamUrl).toMatch(
+      /^wss:\/\/bridge-media\.example\.com\/in-person\/display\/inperson_display_test\/owner\?token=/
+    );
+    expect(session.displayStreams().partner.streamUrl).toMatch(
+      /^wss:\/\/bridge-media\.example\.com\/in-person\/display\/inperson_display_test\/partner\?token=/
+    );
+    expect(session.diagnostics()).toMatchObject({
+      displaySubscribers: {
+        owner: 0,
+        partner: 0
+      }
+    });
+  });
+
+  it('sends display subscribers only the transcript lane for their target', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_display_filter_test'
+    });
+    const sent: unknown[] = [];
+    const ws = {
+      readyState: WebSocket.OPEN,
+      send: vi.fn((raw: string) => sent.push(JSON.parse(raw))),
+      on: vi.fn(),
+      close: vi.fn()
+    } as unknown as WebSocket;
+
+    session.bindDisplay('partner', ws);
+    expect(sent).toMatchObject([
+      {
+        type: 'display_status',
+        view: 'partner',
+        target: 'partner'
+      },
+      {
+        type: 'display_snapshot',
+        view: 'partner',
+        target: 'partner',
+        transcriptTail: []
+      }
+    ]);
+    expect(session.diagnostics()).toMatchObject({
+      displaySubscribers: {
+        partner: 1
+      }
+    });
+
+    const emitTranscript = (
+      session as unknown as {
+        emitTranscript(speaker: 'owner' | 'partner', kind: 'source' | 'translation', target: 'user' | 'partner', delta: string): void;
+      }
+    ).emitTranscript.bind(session);
+    emitTranscript('owner', 'translation', 'partner', 'Hola.');
+    emitTranscript('partner', 'translation', 'user', 'Hello.');
+
+    expect(sent).toContainEqual({
+      type: 'transcript_delta',
+      speaker: 'owner',
+      target: 'partner',
+      transcriptKind: 'translation',
+      delta: 'Hola.'
+    });
+    expect(sent).not.toContainEqual({
+      type: 'transcript_delta',
+      speaker: 'partner',
+      target: 'user',
+      transcriptKind: 'translation',
+      delta: 'Hello.'
     });
   });
 

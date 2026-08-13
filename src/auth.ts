@@ -10,7 +10,12 @@ export function signValue(secret: string, value: string): string {
 
 export function verifySignedValue(secret: string, value: string, signature: string): boolean {
   const expected = signValue(secret, value);
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+  const expectedBuffer = Buffer.from(expected);
+  const signatureBuffer = Buffer.from(signature);
+  if (expectedBuffer.length !== signatureBuffer.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(expectedBuffer, signatureBuffer);
 }
 
 export function makeStreamToken(secret: string, callId: string): string {
@@ -27,4 +32,12 @@ export function makeAppToken(secret: string, callId: string): string {
 
 export function verifyAppToken(secret: string, callId: string, token: string): boolean {
   return verifySignedValue(secret, `app-stream:${callId}`, token);
+}
+
+export function makeInPersonDisplayToken(secret: string, sessionId: string, view: string): string {
+  return signValue(secret, `in-person-display:${sessionId}:${view}`);
+}
+
+export function verifyInPersonDisplayToken(secret: string, sessionId: string, view: string, token: string): boolean {
+  return verifySignedValue(secret, `in-person-display:${sessionId}:${view}`, token);
 }
