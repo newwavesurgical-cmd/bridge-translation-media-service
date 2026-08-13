@@ -125,6 +125,38 @@ describe('InPersonRegistry', () => {
     });
   });
 
+  it('includes server-side translated audio timing diagnostics', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_timing_test',
+      inputMode: 'single_mic_auto'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      audioTiming: {
+        ownerToPartner: {
+          inputChunks: 0,
+          openAiAudioChunks: 0,
+          emittedAudioChunks: 0,
+          suppressedAudioChunks: 0,
+          maxOpenAiAudioGapMs: 0,
+          maxEmitGapMs: 0
+        },
+        partnerToOwner: {
+          inputChunks: 0,
+          openAiAudioChunks: 0,
+          emittedAudioChunks: 0,
+          suppressedAudioChunks: 0,
+          maxOpenAiAudioGapMs: 0,
+          maxEmitGapMs: 0
+        }
+      },
+      audioTimingTail: []
+    });
+  });
+
   it('allows phone-only auto sessions to be manually routed to one language side', () => {
     const registry = new InPersonRegistry(config);
     const session = registry.create({

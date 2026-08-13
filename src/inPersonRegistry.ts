@@ -12,6 +12,7 @@ import type {
 } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
+const MAX_AUDIO_TIMING_EVENTS = 80;
 const SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS = 0.012;
 const SINGLE_MIC_ROUTE_ARMED_TIMEOUT_MS = 5000;
 const SINGLE_MIC_ROUTE_POST_SPEECH_SILENCE_MS = 1800;
@@ -25,6 +26,40 @@ type TranscriptEntry = {
   speaker: InPersonSpeaker;
   kind: TranscriptKind;
   delta: string;
+};
+
+type InPersonTranslationDirection = 'ownerToPartner' | 'partnerToOwner';
+
+type AudioTimingEvent = {
+  at: string;
+  direction: InPersonTranslationDirection;
+  event: 'input' | 'openai_audio' | 'emit' | 'suppress';
+  gapMs?: number;
+  reason?: string;
+};
+
+type AudioTimingStats = {
+  inputChunks: number;
+  openAiAudioChunks: number;
+  emittedAudioChunks: number;
+  suppressedAudioChunks: number;
+  firstInputAt?: string;
+  lastInputAt?: string;
+  firstOpenAiAudioAt?: string;
+  lastOpenAiAudioAt?: string;
+  firstEmittedAt?: string;
+  lastEmittedAt?: string;
+  lastSuppressedAt?: string;
+  lastInputToOpenAiAudioMs?: number;
+  lastOpenAiToEmitMs?: number;
+  lastOpenAiAudioGapMs?: number;
+  maxOpenAiAudioGapMs: number;
+  avgOpenAiAudioGapMs: number;
+  openAiAudioGapSamples: number;
+  lastEmitGapMs?: number;
+  maxEmitGapMs: number;
+  avgEmitGapMs: number;
+  emitGapSamples: number;
 };
 
 type InPersonClientMessage =
@@ -102,6 +137,8 @@ interface InPersonRecord {
   endedAt?: string;
   languageGateMode: LanguageGateMode;
   transcripts: TranscriptEntry[];
+  audioTiming: Record<InPersonTranslationDirection, AudioTimingStats>;
+  audioTimingEvents: AudioTimingEvent[];
   counters: {
     userAudioChunks: number;
     partnerAudioChunks: number;
@@ -134,6 +171,11 @@ export class InPersonRegistry {
       inputMode,
       languageGateMode,
       transcripts: [],
+      audioTiming: {
+        ownerToPartner: createAudioTimingStats(),
+        partnerToOwner: createAudioTimingStats()
+      },
+      audioTimingEvents: [],
       counters: {
         userAudioChunks: 0,
         partnerAudioChunks: 0,
@@ -254,6 +296,13 @@ export class InPersonSession {
       },
       error: this.record.error ?? null,
       counters: { ...this.record.counters },
+      audioTimingNote:
+        'Server-side timing only. input = app audio received by media service; openai_audio = translated audio delta received from OpenAI; emit = media service sent translated audio to app; suppress = server intentionally dropped translated audio.',
+      audioTiming: {
+        ownerToPartner: { ...this.record.audioTiming.ownerToPartner },
+        partnerToOwner: { ...this.record.audioTiming.partnerToOwner }
+      },
+      audioTimingTail: this.record.audioTimingEvents.slice(-60),
       transcriptDiagnosticNote: 'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
       transcriptTail: this.record.transcripts.slice(-120),
       lastActivityAt: this.record.lastActivityAt ?? null,
@@ -399,10 +448,12 @@ export class InPersonSession {
     this.ensureTranslationSessions();
     if (speaker === 'owner') {
       this.record.counters.userAudioChunks += 1;
+      this.trackAudioInput('ownerToPartner');
       this.ownerToPartner?.appendPcm16Base64(audio);
       return;
     }
     this.record.counters.partnerAudioChunks += 1;
+    this.trackAudioInput('partnerToOwner');
     this.partnerToOwner?.appendPcm16Base64(audio);
   }
 
@@ -413,10 +464,13 @@ export class InPersonSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.partnerLanguage,
         onAudioDelta: (pcm24k) => {
+          this.trackOpenAiAudio('ownerToPartner');
           if (!this.shouldEmitTranslatedOutput('owner')) {
+            this.trackSuppressedAudio('ownerToPartner', this.suppressionReasonFor('owner'));
             return;
           }
           this.record.counters.partnerTranslatedAudioChunks += 1;
+          this.trackEmittedAudio('ownerToPartner');
           this.sendApp({
             type: 'translated_audio',
             speaker: 'owner',
@@ -450,10 +504,13 @@ export class InPersonSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.userLanguage,
         onAudioDelta: (pcm24k) => {
+          this.trackOpenAiAudio('partnerToOwner');
           if (!this.shouldEmitTranslatedOutput('partner')) {
+            this.trackSuppressedAudio('partnerToOwner', this.suppressionReasonFor('partner'));
             return;
           }
           this.record.counters.userTranslatedAudioChunks += 1;
+          this.trackEmittedAudio('partnerToOwner');
           this.sendApp({
             type: 'translated_audio',
             speaker: 'partner',
@@ -510,6 +567,104 @@ export class InPersonSession {
       return gate.shouldPassOutput();
     }
     return !gate.shouldSuppressOutput();
+  }
+
+  private suppressionReasonFor(speaker: InPersonSpeaker): string {
+    if (this.record.inputMode === 'single_mic_auto' && this.singleMicRoute !== 'auto') {
+      return this.singleMicRoute === speaker ? 'not_suppressed' : `manual_route_${this.singleMicRoute}`;
+    }
+    const gateDiagnostics = this.languageGates[speaker].diagnostics();
+    if (gateDiagnostics.suppressed) {
+      return `language_gate_${gateDiagnostics.detectedLanguage ?? 'unknown'}`;
+    }
+    if (this.record.inputMode === 'single_mic_auto' && !gateDiagnostics.passFresh) {
+      return 'language_gate_waiting_for_fresh_pass';
+    }
+    return 'unknown';
+  }
+
+  private trackAudioInput(direction: InPersonTranslationDirection): void {
+    const now = Date.now();
+    const stats = this.record.audioTiming[direction];
+    stats.inputChunks += 1;
+    if (!stats.firstInputAt) {
+      stats.firstInputAt = new Date(now).toISOString();
+    }
+    stats.lastInputAt = new Date(now).toISOString();
+    this.recordAudioTimingEvent(direction, 'input', now);
+  }
+
+  private trackOpenAiAudio(direction: InPersonTranslationDirection): void {
+    const now = Date.now();
+    const stats = this.record.audioTiming[direction];
+    stats.openAiAudioChunks += 1;
+    if (!stats.firstOpenAiAudioAt) {
+      stats.firstOpenAiAudioAt = new Date(now).toISOString();
+    }
+    if (stats.lastOpenAiAudioAt) {
+      const gapMs = now - Date.parse(stats.lastOpenAiAudioAt);
+      stats.lastOpenAiAudioGapMs = gapMs;
+      stats.maxOpenAiAudioGapMs = Math.max(stats.maxOpenAiAudioGapMs, gapMs);
+      stats.avgOpenAiAudioGapMs = rollingAverage(stats.avgOpenAiAudioGapMs, stats.openAiAudioGapSamples, gapMs);
+      stats.openAiAudioGapSamples += 1;
+      this.recordAudioTimingEvent(direction, 'openai_audio', now, gapMs);
+    } else {
+      this.recordAudioTimingEvent(direction, 'openai_audio', now);
+    }
+    stats.lastOpenAiAudioAt = new Date(now).toISOString();
+    if (stats.lastInputAt) {
+      stats.lastInputToOpenAiAudioMs = now - Date.parse(stats.lastInputAt);
+    }
+  }
+
+  private trackEmittedAudio(direction: InPersonTranslationDirection): void {
+    const now = Date.now();
+    const stats = this.record.audioTiming[direction];
+    stats.emittedAudioChunks += 1;
+    if (!stats.firstEmittedAt) {
+      stats.firstEmittedAt = new Date(now).toISOString();
+    }
+    if (stats.lastEmittedAt) {
+      const gapMs = now - Date.parse(stats.lastEmittedAt);
+      stats.lastEmitGapMs = gapMs;
+      stats.maxEmitGapMs = Math.max(stats.maxEmitGapMs, gapMs);
+      stats.avgEmitGapMs = rollingAverage(stats.avgEmitGapMs, stats.emitGapSamples, gapMs);
+      stats.emitGapSamples += 1;
+      this.recordAudioTimingEvent(direction, 'emit', now, gapMs);
+    } else {
+      this.recordAudioTimingEvent(direction, 'emit', now);
+    }
+    stats.lastEmittedAt = new Date(now).toISOString();
+    if (stats.lastOpenAiAudioAt) {
+      stats.lastOpenAiToEmitMs = now - Date.parse(stats.lastOpenAiAudioAt);
+    }
+  }
+
+  private trackSuppressedAudio(direction: InPersonTranslationDirection, reason: string): void {
+    const now = Date.now();
+    const stats = this.record.audioTiming[direction];
+    stats.suppressedAudioChunks += 1;
+    stats.lastSuppressedAt = new Date(now).toISOString();
+    this.recordAudioTimingEvent(direction, 'suppress', now, undefined, reason);
+  }
+
+  private recordAudioTimingEvent(
+    direction: InPersonTranslationDirection,
+    event: AudioTimingEvent['event'],
+    now: number,
+    gapMs?: number,
+    reason?: string
+  ): void {
+    this.record.audioTimingEvents.push({
+      at: new Date(now).toISOString(),
+      direction,
+      event,
+      ...(gapMs === undefined ? {} : { gapMs }),
+      ...(reason ? { reason } : {})
+    });
+    if (this.record.audioTimingEvents.length > MAX_AUDIO_TIMING_EVENTS) {
+      this.record.audioTimingEvents.splice(0, this.record.audioTimingEvents.length - MAX_AUDIO_TIMING_EVENTS);
+    }
   }
 
   private close(): void {
@@ -625,4 +780,23 @@ export function pcm16RmsForInPersonDiagnostics(base64Pcm16: string): number {
     sumSquares += normalized * normalized;
   }
   return Math.sqrt(sumSquares / samples.length);
+}
+
+function createAudioTimingStats(): AudioTimingStats {
+  return {
+    inputChunks: 0,
+    openAiAudioChunks: 0,
+    emittedAudioChunks: 0,
+    suppressedAudioChunks: 0,
+    maxOpenAiAudioGapMs: 0,
+    avgOpenAiAudioGapMs: 0,
+    openAiAudioGapSamples: 0,
+    maxEmitGapMs: 0,
+    avgEmitGapMs: 0,
+    emitGapSamples: 0
+  };
+}
+
+function rollingAverage(currentAverage: number, samples: number, nextValue: number): number {
+  return Math.round(((currentAverage * samples + nextValue) / (samples + 1)) * 10) / 10;
 }
