@@ -17,6 +17,8 @@ export interface LanguageGateDiagnostics {
   confidence: number;
   decision: LanguageGateDecision;
   suppressed: boolean;
+  passFresh: boolean;
+  passAgeMs: number | null;
   suppressionCount: number;
   uncertainCount: number;
   passCount: number;
@@ -32,6 +34,7 @@ const MAX_EVENTS = 16;
 const MAX_ROLLING_TEXT_LENGTH = 140;
 const RECENT_TURN_TEXT_LENGTH = 90;
 const ROLLING_TEXT_STALE_MS = 1200;
+const OUTPUT_PASS_FRESH_MS = 1800;
 
 const ENGLISH_WORDS = new Set([
   'a',
@@ -164,6 +167,7 @@ export class TranscriptLanguageGate {
   private lastText: string | null = null;
   private rollingText = '';
   private lastObservedAt = 0;
+  private lastPassAt = 0;
   private readonly recentEvents: LanguageGateEvent[] = [];
 
   constructor(
@@ -220,6 +224,7 @@ export class TranscriptLanguageGate {
       this.passCount += 1;
       this.decision = this.mode === 'monitor' ? 'monitor' : 'pass';
       this.suppressed = false;
+      this.lastPassAt = now;
     } else if (this.mode === 'soft_suppress') {
       this.suppressionCount += 1;
       this.lastSuppressedText = this.rollingText;
@@ -242,10 +247,14 @@ export class TranscriptLanguageGate {
     if (this.mode === 'off') {
       return true;
     }
-    return this.decision === 'pass' || this.decision === 'monitor';
+    if (this.decision !== 'pass' && this.decision !== 'monitor') {
+      return false;
+    }
+    return this.isPassFresh();
   }
 
   diagnostics(): LanguageGateDiagnostics {
+    const now = Date.now();
     return {
       mode: this.mode,
       expectedLanguage: this.expectedLanguage,
@@ -253,6 +262,8 @@ export class TranscriptLanguageGate {
       confidence: Number(this.confidence.toFixed(2)),
       decision: this.decision,
       suppressed: this.shouldSuppressOutput(),
+      passFresh: this.isPassFresh(now),
+      passAgeMs: this.lastPassAt ? now - this.lastPassAt : null,
       suppressionCount: this.suppressionCount,
       uncertainCount: this.uncertainCount,
       passCount: this.passCount,
@@ -274,6 +285,10 @@ export class TranscriptLanguageGate {
     if (this.recentEvents.length > MAX_EVENTS) {
       this.recentEvents.splice(0, this.recentEvents.length - MAX_EVENTS);
     }
+  }
+
+  private isPassFresh(now = Date.now()): boolean {
+    return Boolean(this.lastPassAt) && now - this.lastPassAt <= OUTPUT_PASS_FRESH_MS;
   }
 }
 

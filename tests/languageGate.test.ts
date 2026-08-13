@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { classifyLanguage, TranscriptLanguageGate } from '../src/languageGate.js';
 
 describe('TranscriptLanguageGate', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('classifies clear English and Spanish transcript fragments', () => {
     expect(classifyLanguage('Can you help me make a reservation for four people?')).toMatchObject({
       language: 'en'
@@ -57,6 +61,26 @@ describe('TranscriptLanguageGate', () => {
     expect(gate.observe('Can you help me make a reservation for four people?')).toBe('pass');
     expect(gate.shouldSuppressOutput()).toBe(false);
     expect(gate.shouldPassOutput()).toBe(true);
+    expect(gate.diagnostics()).toMatchObject({
+      passFresh: true
+    });
+  });
+
+  it('does not allow stale same-language passes to authorize a new auto turn', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const gate = new TranscriptLanguageGate('English', 'soft_suppress');
+
+    expect(gate.observe('Can you help me make a reservation for four people?')).toBe('pass');
+    expect(gate.shouldPassOutput()).toBe(true);
+
+    vi.advanceTimersByTime(1900);
+
+    expect(gate.shouldPassOutput()).toBe(false);
+    expect(gate.diagnostics()).toMatchObject({
+      decision: 'pass',
+      passFresh: false
+    });
   });
 
   it('classifies rolling transcript deltas instead of only the last fragment', () => {
@@ -92,21 +116,50 @@ describe('TranscriptLanguageGate', () => {
   });
 
   it('recognizes Spanish after logged English context with split realtime deltas', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const ownerGate = new TranscriptLanguageGate('English', 'soft_suppress');
     const partnerGate = new TranscriptLanguageGate('Spanish', 'soft_suppress');
 
     for (const delta of ["I've been talking to you for like 10 minutes", " and you're doing okay", ' but then you start having problems']) {
       expect(ownerGate.observe(delta)).not.toBe('suppress');
       partnerGate.observe(delta);
+      vi.advanceTimersByTime(100);
     }
+
+    vi.advanceTimersByTime(1900);
+    expect(ownerGate.shouldPassOutput()).toBe(false);
 
     for (const delta of ['Tú ', 'enti', 'endes ', 'lo ', 'que ', 'te ', 'estoy ', 'diciendo?']) {
       ownerGate.observe(delta);
       partnerGate.observe(delta);
+      vi.advanceTimersByTime(80);
     }
 
     expect(ownerGate.shouldPassOutput()).toBe(false);
     expect(partnerGate.shouldPassOutput()).toBe(true);
     expect(partnerGate.diagnostics().lastText).toContain('diciendo');
+  });
+
+  it('does not keep English output open when a later Spanish turn starts after a pause', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const ownerGate = new TranscriptLanguageGate('English', 'soft_suppress');
+    const partnerGate = new TranscriptLanguageGate('Spanish', 'soft_suppress');
+
+    expect(ownerGate.observe('This is a long English passage about a restaurant reservation and what happens next.')).toBe(
+      'pass'
+    );
+    partnerGate.observe('This is a long English passage about a restaurant reservation and what happens next.');
+    expect(ownerGate.shouldPassOutput()).toBe(true);
+
+    vi.advanceTimersByTime(1900);
+
+    expect(ownerGate.shouldPassOutput()).toBe(false);
+    ownerGate.observe('Eso sí me molesta. ¿Qué está pasando?');
+    partnerGate.observe('Eso sí me molesta. ¿Qué está pasando?');
+
+    expect(ownerGate.shouldPassOutput()).toBe(false);
+    expect(partnerGate.shouldPassOutput()).toBe(true);
   });
 });
