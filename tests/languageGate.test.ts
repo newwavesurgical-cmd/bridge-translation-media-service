@@ -90,6 +90,23 @@ describe('TranscriptLanguageGate', () => {
     });
   });
 
+  it('keeps output flowing through uncertain fragments after a recent same-language pass', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const gate = new TranscriptLanguageGate('English', 'soft_suppress');
+
+    expect(gate.observe("I'm looking for something that's not made out of cotton")).toBe('pass');
+    expect(gate.shouldPassOutput()).toBe(true);
+
+    vi.advanceTimersByTime(1300);
+    expect(gate.observe('Um, different type')).toBe('uncertain');
+    expect(gate.shouldSuppressOutput()).toBe(false);
+    expect(gate.shouldPassOutput()).toBe(true);
+
+    vi.advanceTimersByTime(11000);
+    expect(gate.shouldPassOutput()).toBe(false);
+  });
+
   it('classifies rolling transcript deltas instead of only the last fragment', () => {
     const gate = new TranscriptLanguageGate('English', 'soft_suppress');
 

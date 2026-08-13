@@ -258,6 +258,12 @@ export class TranscriptLanguageGate {
     if (this.mode === 'off') {
       return true;
     }
+    if (this.shouldSuppressOutput()) {
+      return false;
+    }
+    if (this.decision === 'uncertain') {
+      return this.isPassFresh();
+    }
     if (this.decision !== 'pass' && this.decision !== 'monitor') {
       return false;
     }
