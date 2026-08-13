@@ -12,6 +12,15 @@ describe('TranscriptLanguageGate', () => {
     expect(classifyLanguage('Porque estaba duplicando la información. No entiendo por qué estaba duplicándola.')).toMatchObject({
       language: 'es'
     });
+    expect(classifyLanguage('Tú enti endes lo que te estoy diciendo?')).toMatchObject({
+      language: 'es'
+    });
+    expect(classifyLanguage('Ya no funciona. Sí, tengo dirección.')).toMatchObject({
+      language: 'es'
+    });
+    expect(classifyLanguage('Eso sí me molesta.')).toMatchObject({
+      language: 'es'
+    });
   });
 
   it('keeps short or universal fragments uncertain', () => {
@@ -80,5 +89,24 @@ describe('TranscriptLanguageGate', () => {
     expect(ownerGate.shouldSuppressOutput()).toBe(true);
     expect(partnerGate.shouldSuppressOutput()).toBe(false);
     expect(ownerGate.diagnostics().lastText).not.toContain('common knowledge');
+  });
+
+  it('recognizes Spanish after logged English context with split realtime deltas', () => {
+    const ownerGate = new TranscriptLanguageGate('English', 'soft_suppress');
+    const partnerGate = new TranscriptLanguageGate('Spanish', 'soft_suppress');
+
+    for (const delta of ["I've been talking to you for like 10 minutes", " and you're doing okay", ' but then you start having problems']) {
+      expect(ownerGate.observe(delta)).not.toBe('suppress');
+      partnerGate.observe(delta);
+    }
+
+    for (const delta of ['Tú ', 'enti', 'endes ', 'lo ', 'que ', 'te ', 'estoy ', 'diciendo?']) {
+      ownerGate.observe(delta);
+      partnerGate.observe(delta);
+    }
+
+    expect(ownerGate.shouldPassOutput()).toBe(false);
+    expect(partnerGate.shouldPassOutput()).toBe(true);
+    expect(partnerGate.diagnostics().lastText).toContain('diciendo');
   });
 });

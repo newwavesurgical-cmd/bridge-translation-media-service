@@ -29,8 +29,9 @@ type LanguageCode = 'en' | 'es';
 
 const MIN_TEXT_LENGTH = 12;
 const MAX_EVENTS = 16;
-const MAX_ROLLING_TEXT_LENGTH = 260;
-const ROLLING_TEXT_STALE_MS = 2500;
+const MAX_ROLLING_TEXT_LENGTH = 140;
+const RECENT_TURN_TEXT_LENGTH = 90;
+const ROLLING_TEXT_STALE_MS = 1200;
 
 const ENGLISH_WORDS = new Set([
   'a',
@@ -92,16 +93,25 @@ const SPANISH_WORDS = new Set([
   'cuanto',
   'de',
   'del',
+  'dices',
+  'diciendo',
+  'direccion',
   'duplicando',
   'donde',
   'el',
   'en',
+  'endes',
+  'enti',
+  'entiendes',
   'escucha',
   'escuchar',
   'escucho',
   'esta',
   'estoy',
+  'funciona',
+  'funcionando',
   'gracias',
+  'hablas',
   'hola',
   'informacion',
   'información',
@@ -112,6 +122,7 @@ const SPANISH_WORDS = new Set([
   'me',
   'mesa',
   'momento',
+  'molesta',
   'necesito',
   'para',
   'personas',
@@ -129,9 +140,14 @@ const SPANISH_WORDS = new Set([
   'segundo',
   'si',
   'sí',
+  'tambien',
+  'tampoco',
+  'tengo',
+  'tu',
   'un',
   'una',
-  'usted'
+  'usted',
+  'ya'
 ]);
 
 const UNIVERSAL_WORDS = new Set(['ok', 'okay', 'no', 'yes', 'si', 'sí', 'hello', 'hola', 'gracias', 'thanks']);
@@ -180,7 +196,19 @@ export class TranscriptLanguageGate {
       this.rollingText = appendRollingText(this.rollingText, trimmed);
     }
     this.lastText = this.rollingText;
-    const detection = classifyLanguage(this.rollingText);
+    const fullDetection = classifyLanguage(this.rollingText);
+    const recentText = tailText(this.rollingText, RECENT_TURN_TEXT_LENGTH);
+    const recentDetection = classifyLanguage(recentText);
+    const detection =
+      recentDetection.language &&
+      recentDetection.confidence >= 0.72 &&
+      (!fullDetection.language || recentDetection.language !== fullDetection.language || recentDetection.language === expected)
+        ? recentDetection
+        : fullDetection;
+    if (detection === recentDetection) {
+      this.rollingText = recentText;
+      this.lastText = this.rollingText;
+    }
     this.detectedLanguage = detection.language;
     this.confidence = detection.confidence;
 
@@ -273,6 +301,20 @@ export function classifyLanguage(text: string): { language: LanguageCode | null;
   if (/[¿¡áéíóúüñ]/i.test(text)) {
     spanishScore += 2;
   }
+  if (
+    /\b(?:enti\s*endes|entiendes|diciendo|dices|funciona|funcionando|est[aá]\s*funcionando|direcci[oó]n|molesta|hablas|tengo|tampoco|qu[eé]\s*t[uú]|por\s*qu[eé])\b/i.test(
+      text
+    )
+  ) {
+    spanishScore += 3;
+  }
+  if (
+    /\b(?:t[uú]|me|no|ya|eso|s[ií])\b[\s,]*(?:enti|endes|entiendes|funciona|molesta|tengo|direcci[oó]n)\b/i.test(
+      text
+    )
+  ) {
+    spanishScore += 2;
+  }
   if (/\b(i'm|i’ll|i'd|don't|can't|wouldn't|you're|we're)\b/i.test(text)) {
     englishScore += 2;
   }
@@ -315,12 +357,19 @@ function appendRollingText(current: string, delta: string): string {
   if (combined.length <= MAX_ROLLING_TEXT_LENGTH) {
     return combined;
   }
-  return combined.slice(combined.length - MAX_ROLLING_TEXT_LENGTH).replace(/^\S+\s*/, '').trim();
+  return tailText(combined, MAX_ROLLING_TEXT_LENGTH);
+}
+
+function tailText(text: string, maxLength: number): string {
+  if (text.length <= maxLength) {
+    return text.trim();
+  }
+  return text.slice(text.length - maxLength).replace(/^\S+\s*/, '').trim();
 }
 
 function needsSpace(current: string, delta: string): boolean {
   if (!current || !delta) {
     return false;
   }
-  return /\w$/.test(current) && /^\w/.test(delta);
+  return /[\p{L}\p{N}]$/u.test(current) && /^[\p{L}\p{N}]/u.test(delta);
 }
