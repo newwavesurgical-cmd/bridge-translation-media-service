@@ -13,7 +13,8 @@ import type {
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 const SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS = 0.012;
-const SINGLE_MIC_ROUTE_PRIME_MS = 1200;
+const SINGLE_MIC_ROUTE_ARMED_TIMEOUT_MS = 5000;
+const SINGLE_MIC_ROUTE_POST_SPEECH_SILENCE_MS = 1800;
 
 type InPersonSpeaker = 'owner' | 'partner';
 type InPersonTarget = 'user' | 'partner';
@@ -69,6 +70,7 @@ type InPersonServerMessage =
       routeOverride?: boolean;
       routeOverrideAgeMs?: number | null;
       routeOverrideSpeechAgeMs?: number | null;
+      routeOverrideLastSpeechAgeMs?: number | null;
     }
   | {
       type: 'translated_audio';
@@ -174,6 +176,7 @@ export class InPersonSession {
   private singleMicRoute: SingleMicRoute = 'auto';
   private singleMicRouteSetAt = 0;
   private singleMicRouteSpeechStartedAt = 0;
+  private singleMicRouteLastSpeechAt = 0;
   private lastSentActiveSingleMicRoute: SingleMicRoute | null = null;
 
   constructor(
@@ -240,6 +243,7 @@ export class InPersonSession {
       routeOverride: this.singleMicRoute !== 'auto',
       routeOverrideAgeMs: this.singleMicRouteSetAt ? Date.now() - this.singleMicRouteSetAt : null,
       routeOverrideSpeechAgeMs: this.singleMicRouteSpeechStartedAt ? Date.now() - this.singleMicRouteSpeechStartedAt : null,
+      routeOverrideLastSpeechAgeMs: this.singleMicRouteLastSpeechAt ? Date.now() - this.singleMicRouteLastSpeechAt : null,
       languageGateMode: this.record.languageGateMode,
       languageGateNote:
         'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
@@ -333,6 +337,7 @@ export class InPersonSession {
     this.singleMicRoute = validated;
     this.singleMicRouteSetAt = validated === 'auto' ? 0 : Date.now();
     this.singleMicRouteSpeechStartedAt = 0;
+    this.singleMicRouteLastSpeechAt = 0;
     if (sendStatus) {
       this.sendStatus();
     }
@@ -358,15 +363,36 @@ export class InPersonSession {
     }
     const now = Date.now();
     const rms = pcm16RmsForInPersonDiagnostics(audio);
-    if (!this.singleMicRouteSpeechStartedAt && rms >= SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS) {
-      this.singleMicRouteSpeechStartedAt = now;
+    const speechLikely = rms >= SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS;
+    if (speechLikely) {
+      if (!this.singleMicRouteSpeechStartedAt) {
+        this.singleMicRouteSpeechStartedAt = now;
+      }
+      this.singleMicRouteLastSpeechAt = now;
+      return;
     }
-    if (this.singleMicRouteSpeechStartedAt && now - this.singleMicRouteSpeechStartedAt >= SINGLE_MIC_ROUTE_PRIME_MS) {
-      this.singleMicRoute = 'auto';
-      this.singleMicRouteSetAt = 0;
-      this.singleMicRouteSpeechStartedAt = 0;
-      this.sendStatus();
+
+    if (!this.singleMicRouteSpeechStartedAt) {
+      if (this.singleMicRouteSetAt && now - this.singleMicRouteSetAt >= SINGLE_MIC_ROUTE_ARMED_TIMEOUT_MS) {
+        this.resetSingleMicRouteToAuto();
+      }
+      return;
     }
+
+    if (this.singleMicRouteLastSpeechAt && now - this.singleMicRouteLastSpeechAt >= SINGLE_MIC_ROUTE_POST_SPEECH_SILENCE_MS) {
+      this.resetSingleMicRouteToAuto();
+    }
+  }
+
+  private resetSingleMicRouteToAuto(): void {
+    if (this.singleMicRoute === 'auto') {
+      return;
+    }
+    this.singleMicRoute = 'auto';
+    this.singleMicRouteSetAt = 0;
+    this.singleMicRouteSpeechStartedAt = 0;
+    this.singleMicRouteLastSpeechAt = 0;
+    this.sendStatus();
   }
 
   private routeAudio(speaker: InPersonSpeaker, audio: string): void {
@@ -508,7 +534,8 @@ export class InPersonSession {
       activeSingleMicRoute: this.lastSentActiveSingleMicRoute,
       routeOverride: this.singleMicRoute !== 'auto',
       routeOverrideAgeMs: this.singleMicRouteSetAt ? Date.now() - this.singleMicRouteSetAt : null,
-      routeOverrideSpeechAgeMs: this.singleMicRouteSpeechStartedAt ? Date.now() - this.singleMicRouteSpeechStartedAt : null
+      routeOverrideSpeechAgeMs: this.singleMicRouteSpeechStartedAt ? Date.now() - this.singleMicRouteSpeechStartedAt : null,
+      routeOverrideLastSpeechAgeMs: this.singleMicRouteLastSpeechAt ? Date.now() - this.singleMicRouteLastSpeechAt : null
     });
   }
 

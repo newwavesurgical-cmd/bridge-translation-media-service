@@ -261,9 +261,11 @@ Valid routes are:
 - `partner`: the next speech start is primed to the partner-language session,
   translating partner language into owner language.
 
-The server returns the route to `auto` after it hears speech for the short
-priming window. The intent is a nudge at the beginning of an utterance, not a
-sticky lock.
+The server keeps the selected route for the current utterance, then returns it
+to `auto` after the microphone is quiet. If the user taps a route and never
+speaks, the override expires after a short armed timeout. The intent is a
+temporary per-utterance nudge, not a sticky lock and not a fixed one-second
+timer that can cut off long speech.
 
 For low-latency clients, a route can also be sent on an individual audio frame.
 Frame routes are one-frame hints and should not be sent continuously for normal
@@ -280,10 +282,11 @@ button overrides:
 ```
 
 Status messages include `singleMicRoute`, `activeSingleMicRoute`,
-`routeOverride`, `routeOverrideAgeMs`, and `routeOverrideSpeechAgeMs` so the UI
-can light the current listening side. In automatic mode, `activeSingleMicRoute`
-reflects the current gate inference when available; in override mode it mirrors
-the selected route until the temporary override returns to `auto`.
+`routeOverride`, `routeOverrideAgeMs`, `routeOverrideSpeechAgeMs`, and
+`routeOverrideLastSpeechAgeMs` so the UI can light the current listening side.
+In automatic mode, `activeSingleMicRoute` reflects the current gate inference
+when available; in override mode it mirrors the selected route until the
+temporary override returns to `auto`.
 
 `POST /calls`
 

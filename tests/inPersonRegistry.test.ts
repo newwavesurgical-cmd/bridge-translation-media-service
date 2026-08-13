@@ -161,7 +161,7 @@ describe('InPersonRegistry', () => {
     });
   });
 
-  it('returns a manual single-mic route to auto after speech has started', () => {
+  it('keeps a manual single-mic route for the utterance and returns to auto after silence', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
     const registry = new InPersonRegistry(config);
@@ -190,8 +190,15 @@ describe('InPersonRegistry', () => {
       routeOverride: true
     });
 
-    vi.advanceTimersByTime(1199);
+    vi.advanceTimersByTime(30000);
     updateTemporaryRoute(pcmChunk(6000));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'partner',
+      routeOverride: true
+    });
+
+    vi.advanceTimersByTime(1799);
+    updateTemporaryRoute(pcmChunk(0));
     expect(session.diagnostics()).toMatchObject({
       singleMicRoute: 'partner',
       routeOverride: true
@@ -200,10 +207,48 @@ describe('InPersonRegistry', () => {
     vi.advanceTimersByTime(2);
     updateTemporaryRoute(pcmChunk(6000));
     expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'partner',
+      routeOverride: true
+    });
+
+    vi.advanceTimersByTime(1801);
+    updateTemporaryRoute(pcmChunk(0));
+    expect(session.diagnostics()).toMatchObject({
       singleMicRoute: 'auto',
       activeSingleMicRoute: 'auto',
       routeOverride: false,
       routeOverrideSpeechAgeMs: null
+    });
+  });
+
+  it('returns an unused manual single-mic route to auto if speech never starts', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_auto_unused_override_test',
+      inputMode: 'single_mic_auto'
+    });
+    const handle = (session as unknown as { handleAppMessage(raw: string): void }).handleAppMessage.bind(session);
+    const updateTemporaryRoute = (
+      session as unknown as { updateTemporarySingleMicRoute(audio: string): void }
+    ).updateTemporarySingleMicRoute.bind(session);
+
+    handle(JSON.stringify({ type: 'set_single_mic_route', route: 'owner' }));
+    vi.advanceTimersByTime(4999);
+    updateTemporaryRoute(pcmChunk(0));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'owner',
+      routeOverride: true
+    });
+
+    vi.advanceTimersByTime(2);
+    updateTemporaryRoute(pcmChunk(0));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'auto',
+      routeOverride: false
     });
   });
 });
