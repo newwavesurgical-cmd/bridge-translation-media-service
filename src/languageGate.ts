@@ -210,6 +210,13 @@ export class TranscriptLanguageGate {
     return this.mode === 'soft_suppress' && this.suppressed;
   }
 
+  shouldPassOutput(): boolean {
+    if (this.mode === 'off') {
+      return true;
+    }
+    return this.decision === 'pass' || this.decision === 'monitor';
+  }
+
   diagnostics(): LanguageGateDiagnostics {
     return {
       mode: this.mode,

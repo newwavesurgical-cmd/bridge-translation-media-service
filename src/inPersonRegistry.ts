@@ -304,7 +304,7 @@ export class InPersonSession {
         direction: 'owner-to-remote',
         targetLanguage: this.record.partnerLanguage,
         onAudioDelta: (pcm24k) => {
-          if (this.languageGates.owner.shouldSuppressOutput()) {
+          if (!this.shouldEmitTranslatedOutput('owner')) {
             return;
           }
           this.record.counters.partnerTranslatedAudioChunks += 1;
@@ -324,7 +324,7 @@ export class InPersonSession {
           }
         },
         onOutputTranscriptDelta: (delta) => {
-          if (!this.languageGates.owner.shouldSuppressOutput()) {
+          if (this.shouldEmitTranslatedOutput('owner')) {
             this.emitTranscript('owner', 'translation', 'partner', delta);
           }
         },
@@ -340,7 +340,7 @@ export class InPersonSession {
         direction: 'remote-to-owner',
         targetLanguage: this.record.userLanguage,
         onAudioDelta: (pcm24k) => {
-          if (this.languageGates.partner.shouldSuppressOutput()) {
+          if (!this.shouldEmitTranslatedOutput('partner')) {
             return;
           }
           this.record.counters.userTranslatedAudioChunks += 1;
@@ -360,7 +360,7 @@ export class InPersonSession {
           }
         },
         onOutputTranscriptDelta: (delta) => {
-          if (!this.languageGates.partner.shouldSuppressOutput()) {
+          if (this.shouldEmitTranslatedOutput('partner')) {
             this.emitTranscript('partner', 'translation', 'user', delta);
           }
         },
@@ -381,7 +381,15 @@ export class InPersonSession {
   }
 
   private shouldEmitTranscriptForDecision(decision: LanguageGateDecision): boolean {
-    return this.record.inputMode !== 'single_mic_auto' || decision !== 'suppress';
+    return this.record.inputMode !== 'single_mic_auto' || decision === 'pass';
+  }
+
+  private shouldEmitTranslatedOutput(speaker: InPersonSpeaker): boolean {
+    const gate = this.languageGates[speaker];
+    if (this.record.inputMode === 'single_mic_auto') {
+      return gate.shouldPassOutput();
+    }
+    return !gate.shouldSuppressOutput();
   }
 
   private close(): void {

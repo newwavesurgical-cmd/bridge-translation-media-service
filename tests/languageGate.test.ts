@@ -36,8 +36,10 @@ describe('TranscriptLanguageGate', () => {
   it('soft suppresses confidently wrong-language pickup', () => {
     const gate = new TranscriptLanguageGate('English', 'soft_suppress');
 
+    expect(gate.shouldPassOutput()).toBe(false);
     expect(gate.observe('Hola, necesito una mesa para cuatro personas.')).toBe('suppress');
     expect(gate.shouldSuppressOutput()).toBe(true);
+    expect(gate.shouldPassOutput()).toBe(false);
     expect(gate.diagnostics()).toMatchObject({
       suppressed: true,
       suppressionCount: 1
@@ -45,6 +47,7 @@ describe('TranscriptLanguageGate', () => {
 
     expect(gate.observe('Can you help me make a reservation for four people?')).toBe('pass');
     expect(gate.shouldSuppressOutput()).toBe(false);
+    expect(gate.shouldPassOutput()).toBe(true);
   });
 
   it('classifies rolling transcript deltas instead of only the last fragment', () => {
