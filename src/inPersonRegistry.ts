@@ -3,7 +3,7 @@ import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken } from './auth.js';
 import { base64ToPcm16 } from './audio/codec.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
-import { TranscriptLanguageGate } from './languageGate.js';
+import { TranscriptLanguageGate, type LanguageGateDecision } from './languageGate.js';
 import type {
   CreateInPersonSessionRequest,
   InPersonInputMode,
@@ -318,8 +318,10 @@ export class InPersonSession {
           });
         },
         onInputTranscriptDelta: (delta) => {
-          this.languageGates.owner.observe(delta);
-          this.emitTranscript('owner', 'source', 'partner', delta);
+          const decision = this.languageGates.owner.observe(delta);
+          if (this.shouldEmitTranscriptForDecision(decision)) {
+            this.emitTranscript('owner', 'source', 'partner', delta);
+          }
         },
         onOutputTranscriptDelta: (delta) => {
           if (!this.languageGates.owner.shouldSuppressOutput()) {
@@ -352,8 +354,10 @@ export class InPersonSession {
           });
         },
         onInputTranscriptDelta: (delta) => {
-          this.languageGates.partner.observe(delta);
-          this.emitTranscript('partner', 'source', 'user', delta);
+          const decision = this.languageGates.partner.observe(delta);
+          if (this.shouldEmitTranscriptForDecision(decision)) {
+            this.emitTranscript('partner', 'source', 'user', delta);
+          }
         },
         onOutputTranscriptDelta: (delta) => {
           if (!this.languageGates.partner.shouldSuppressOutput()) {
@@ -374,6 +378,10 @@ export class InPersonSession {
       this.record.transcripts.splice(0, this.record.transcripts.length - MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS);
     }
     this.sendApp({ type: 'transcript_delta', speaker, target, transcriptKind: kind, delta });
+  }
+
+  private shouldEmitTranscriptForDecision(decision: LanguageGateDecision): boolean {
+    return this.record.inputMode !== 'single_mic_auto' || decision !== 'suppress';
   }
 
   private close(): void {

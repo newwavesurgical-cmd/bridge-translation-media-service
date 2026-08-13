@@ -30,6 +30,7 @@ type LanguageCode = 'en' | 'es';
 const MIN_TEXT_LENGTH = 12;
 const MAX_EVENTS = 16;
 const MAX_ROLLING_TEXT_LENGTH = 260;
+const ROLLING_TEXT_STALE_MS = 2500;
 
 const ENGLISH_WORDS = new Set([
   'a',
@@ -91,6 +92,7 @@ const SPANISH_WORDS = new Set([
   'cuanto',
   'de',
   'del',
+  'duplicando',
   'donde',
   'el',
   'en',
@@ -101,6 +103,8 @@ const SPANISH_WORDS = new Set([
   'estoy',
   'gracias',
   'hola',
+  'informacion',
+  'información',
   'la',
   'las',
   'le',
@@ -112,10 +116,13 @@ const SPANISH_WORDS = new Set([
   'para',
   'personas',
   'por',
+  'porque',
   'puede',
   'puedes',
   'que',
   'quiero',
+  'ridiculo',
+  'ridículo',
   'reserva',
   'reservacion',
   'restaurante',
@@ -140,6 +147,7 @@ export class TranscriptLanguageGate {
   private lastSuppressedText: string | null = null;
   private lastText: string | null = null;
   private rollingText = '';
+  private lastObservedAt = 0;
   private readonly recentEvents: LanguageGateEvent[] = [];
 
   constructor(
@@ -153,9 +161,20 @@ export class TranscriptLanguageGate {
       return this.decision;
     }
 
+    const now = Date.now();
+    if (this.lastObservedAt && now - this.lastObservedAt > ROLLING_TEXT_STALE_MS) {
+      this.rollingText = '';
+    }
+    this.lastObservedAt = now;
+
     const expected = supportedLanguageCode(this.expectedLanguage);
     const deltaDetection = classifyLanguage(trimmed);
-    if (expected && deltaDetection.language === expected && deltaDetection.confidence >= 0.72) {
+    const currentDetection = classifyLanguage(this.rollingText);
+    const confidentDelta = deltaDetection.language && deltaDetection.confidence >= 0.72;
+    const deltaLanguageChanged =
+      confidentDelta && currentDetection.language && currentDetection.language !== deltaDetection.language;
+
+    if ((expected && deltaDetection.language === expected && deltaDetection.confidence >= 0.72) || deltaLanguageChanged) {
       this.rollingText = trimmed;
     } else {
       this.rollingText = appendRollingText(this.rollingText, trimmed);

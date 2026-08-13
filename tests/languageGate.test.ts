@@ -9,6 +9,9 @@ describe('TranscriptLanguageGate', () => {
     expect(classifyLanguage('Hola, necesito una mesa para cuatro personas.')).toMatchObject({
       language: 'es'
     });
+    expect(classifyLanguage('Porque estaba duplicando la información. No entiendo por qué estaba duplicándola.')).toMatchObject({
+      language: 'es'
+    });
   });
 
   it('keeps short or universal fragments uncertain', () => {
@@ -51,5 +54,28 @@ describe('TranscriptLanguageGate', () => {
     expect(gate.observe(' una mesa para')).toBe('suppress');
     expect(gate.shouldSuppressOutput()).toBe(true);
     expect(gate.diagnostics().lastText).toContain('Hola, necesito una mesa para');
+  });
+
+  it('replaces stale mixed rolling text when a confident opposite-language turn begins', () => {
+    const ownerGate = new TranscriptLanguageGate('English', 'soft_suppress');
+    const partnerGate = new TranscriptLanguageGate('Spanish', 'soft_suppress');
+
+    expect(ownerGate.observe("No, I'm not asking you anything ridiculous. It's common knowledge to be friendly.")).toBe(
+      'pass'
+    );
+    expect(partnerGate.observe("No, I'm not asking you anything ridiculous. It's common knowledge to be friendly.")).toBe(
+      'suppress'
+    );
+
+    expect(ownerGate.observe('Porque estaba duplicando la información. No entiendo por qué estaba duplicándola.')).toBe(
+      'suppress'
+    );
+    expect(partnerGate.observe('Porque estaba duplicando la información. No entiendo por qué estaba duplicándola.')).toBe(
+      'pass'
+    );
+
+    expect(ownerGate.shouldSuppressOutput()).toBe(true);
+    expect(partnerGate.shouldSuppressOutput()).toBe(false);
+    expect(ownerGate.diagnostics().lastText).not.toContain('common knowledge');
   });
 });
