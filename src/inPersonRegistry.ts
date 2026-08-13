@@ -15,6 +15,7 @@ const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
 
 type InPersonSpeaker = 'owner' | 'partner';
 type InPersonTarget = 'user' | 'partner';
+type SingleMicRoute = 'auto' | InPersonSpeaker;
 
 type TranscriptEntry = {
   at: string;
@@ -35,8 +36,13 @@ type InPersonClientMessage =
   | {
       type: 'single_audio';
       audio: string;
+      route?: SingleMicRoute;
       sampleRate?: 24000;
       encoding?: 'pcm16';
+    }
+  | {
+      type: 'set_single_mic_route';
+      route: SingleMicRoute;
     }
   | {
       type: 'dual_audio';
@@ -56,6 +62,9 @@ type InPersonServerMessage =
       appConnected: boolean;
       sessionA: string;
       sessionB: string;
+      singleMicRoute?: SingleMicRoute;
+      activeSingleMicRoute?: SingleMicRoute;
+      routeOverride?: boolean;
     }
   | {
       type: 'translated_audio';
@@ -158,6 +167,8 @@ export class InPersonSession {
   private ownerToPartner?: OpenAiTranslationSession;
   private partnerToOwner?: OpenAiTranslationSession;
   private readonly languageGates: Record<InPersonSpeaker, TranscriptLanguageGate>;
+  private singleMicRoute: SingleMicRoute = 'auto';
+  private lastSentActiveSingleMicRoute: SingleMicRoute | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -218,6 +229,9 @@ export class InPersonSession {
       appConnected: Boolean(this.appWs),
       sessionA: this.ownerToPartner?.status ?? 'idle',
       sessionB: this.partnerToOwner?.status ?? 'idle',
+      singleMicRoute: this.singleMicRoute,
+      activeSingleMicRoute: this.activeSingleMicRoute(),
+      routeOverride: this.singleMicRoute !== 'auto',
       languageGateMode: this.record.languageGateMode,
       languageGateNote:
         'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
@@ -256,7 +270,11 @@ export class InPersonSession {
       return;
     }
     if (message.type === 'single_audio') {
-      this.routeSingleMicAudio(message.audio);
+      this.routeSingleMicAudio(message.audio, message.route);
+      return;
+    }
+    if (message.type === 'set_single_mic_route') {
+      this.setSingleMicRoute(message.route);
       return;
     }
     if (message.type === 'dual_audio') {
@@ -274,7 +292,7 @@ export class InPersonSession {
     }
   }
 
-  private routeSingleMicAudio(audio: string): void {
+  private routeSingleMicAudio(audio: string, route?: SingleMicRoute): void {
     if (this.record.inputMode !== 'single_mic_auto') {
       this.sendApp({
         type: 'error',
@@ -282,8 +300,29 @@ export class InPersonSession {
       });
       return;
     }
+    if (route) {
+      this.setSingleMicRoute(route, false);
+    }
+    if (this.singleMicRoute === 'owner' || this.singleMicRoute === 'partner') {
+      this.routeAudio(this.singleMicRoute, audio);
+      return;
+    }
     this.routeAudio('owner', audio);
     this.routeAudio('partner', audio);
+  }
+
+  private setSingleMicRoute(route: SingleMicRoute, sendStatus = true): void {
+    if (route !== 'auto' && route !== 'owner' && route !== 'partner') {
+      this.sendApp({
+        type: 'error',
+        message: 'Invalid single mic route. Expected auto, owner, or partner.'
+      });
+      return;
+    }
+    this.singleMicRoute = route;
+    if (sendStatus) {
+      this.sendStatus();
+    }
   }
 
   private routeAudio(speaker: InPersonSpeaker, audio: string): void {
@@ -319,9 +358,10 @@ export class InPersonSession {
         },
         onInputTranscriptDelta: (delta) => {
           const decision = this.languageGates.owner.observe(delta);
-          if (this.shouldEmitTranscriptForDecision(decision)) {
+          if (this.shouldEmitTranscriptForDecision('owner', decision)) {
             this.emitTranscript('owner', 'source', 'partner', delta);
           }
+          this.sendRouteStatusIfChanged();
         },
         onOutputTranscriptDelta: (delta) => {
           if (this.shouldEmitTranslatedOutput('owner')) {
@@ -355,9 +395,10 @@ export class InPersonSession {
         },
         onInputTranscriptDelta: (delta) => {
           const decision = this.languageGates.partner.observe(delta);
-          if (this.shouldEmitTranscriptForDecision(decision)) {
+          if (this.shouldEmitTranscriptForDecision('partner', decision)) {
             this.emitTranscript('partner', 'source', 'user', delta);
           }
+          this.sendRouteStatusIfChanged();
         },
         onOutputTranscriptDelta: (delta) => {
           if (this.shouldEmitTranslatedOutput('partner')) {
@@ -380,13 +421,22 @@ export class InPersonSession {
     this.sendApp({ type: 'transcript_delta', speaker, target, transcriptKind: kind, delta });
   }
 
-  private shouldEmitTranscriptForDecision(decision: LanguageGateDecision): boolean {
-    return this.record.inputMode !== 'single_mic_auto' || decision === 'pass';
+  private shouldEmitTranscriptForDecision(speaker: InPersonSpeaker, decision: LanguageGateDecision): boolean {
+    if (this.record.inputMode !== 'single_mic_auto') {
+      return true;
+    }
+    if (this.singleMicRoute !== 'auto') {
+      return this.singleMicRoute === speaker;
+    }
+    return decision === 'pass';
   }
 
   private shouldEmitTranslatedOutput(speaker: InPersonSpeaker): boolean {
     const gate = this.languageGates[speaker];
     if (this.record.inputMode === 'single_mic_auto') {
+      if (this.singleMicRoute !== 'auto') {
+        return this.singleMicRoute === speaker;
+      }
       return gate.shouldPassOutput();
     }
     return !gate.shouldSuppressOutput();
@@ -402,14 +452,29 @@ export class InPersonSession {
   }
 
   private sendStatus(): void {
+    this.lastSentActiveSingleMicRoute = this.activeSingleMicRoute();
     this.sendApp({
       type: 'status',
       sessionId: this.sessionId,
       state: this.record.state,
       appConnected: Boolean(this.appWs),
       sessionA: this.ownerToPartner?.status ?? 'idle',
-      sessionB: this.partnerToOwner?.status ?? 'idle'
+      sessionB: this.partnerToOwner?.status ?? 'idle',
+      singleMicRoute: this.singleMicRoute,
+      activeSingleMicRoute: this.lastSentActiveSingleMicRoute,
+      routeOverride: this.singleMicRoute !== 'auto'
     });
+  }
+
+  private sendRouteStatusIfChanged(): void {
+    if (this.record.inputMode !== 'single_mic_auto') {
+      return;
+    }
+    const activeRoute = this.activeSingleMicRoute();
+    if (activeRoute === this.lastSentActiveSingleMicRoute) {
+      return;
+    }
+    this.sendStatus();
   }
 
   private sendApp(message: InPersonServerMessage): void {
@@ -448,6 +513,24 @@ export class InPersonSession {
       return 'Experimental phone-only automatic mode: the client sends one microphone stream as single_audio and the server feeds both translation directions while transcript language gates suppress confident wrong-language output.';
     }
     return 'Dual-channel mode: physical channel identity determines routing. owner/user audio translates to partner output; partner audio translates to user/private output.';
+  }
+
+  private activeSingleMicRoute(): SingleMicRoute {
+    if (this.record.inputMode !== 'single_mic_auto') {
+      return 'auto';
+    }
+    if (this.singleMicRoute !== 'auto') {
+      return this.singleMicRoute;
+    }
+    const ownerDiagnostics = this.languageGates.owner.diagnostics();
+    const partnerDiagnostics = this.languageGates.partner.diagnostics();
+    if (ownerDiagnostics.passFresh && !partnerDiagnostics.passFresh) {
+      return 'owner';
+    }
+    if (partnerDiagnostics.passFresh && !ownerDiagnostics.passFresh) {
+      return 'partner';
+    }
+    return 'auto';
   }
 
   private inPersonStreamBaseUrl(): string {

@@ -240,6 +240,43 @@ The server feeds both translation sessions and uses transcript language gates to
 suppress output after confident wrong-language evidence. This can reduce
 cross-language pickup, but it is not as reliable as physical channel separation.
 
+The client can keep Auto Detect available while offering a manual route
+override. Use this when the UI user taps the English/owner or Spanish/partner
+mic button because the automatic detector has not switched quickly enough:
+
+```json
+{
+  "type": "set_single_mic_route",
+  "route": "owner"
+}
+```
+
+Valid routes are:
+
+- `auto`: one mic stream is sent to both sessions and language gates choose the
+  emitted output.
+- `owner`: one mic stream is sent only to the owner-language session, translating
+  owner language into partner language.
+- `partner`: one mic stream is sent only to the partner-language session,
+  translating partner language into owner language.
+
+For low-latency clients, the same route can also be sent on an audio frame:
+
+```json
+{
+  "type": "single_audio",
+  "route": "partner",
+  "sampleRate": 24000,
+  "encoding": "pcm16",
+  "audio": "base64-pcm16-from-phone-mic"
+}
+```
+
+Status messages include `singleMicRoute`, `activeSingleMicRoute`, and
+`routeOverride` so the UI can light the current listening side. In automatic
+mode, `activeSingleMicRoute` reflects the current gate inference when available;
+in override mode it mirrors the selected route.
+
 `POST /calls`
 
 If `BRIDGE_MEDIA_API_KEY` is configured, include `Authorization: Bearer YOUR_SERVICE_API_KEY`.

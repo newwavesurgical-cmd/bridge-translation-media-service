@@ -115,6 +115,42 @@ describe('InPersonRegistry', () => {
       }
     });
   });
+
+  it('allows phone-only auto sessions to be manually routed to one language side', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_auto_override_test',
+      inputMode: 'single_mic_auto'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'auto',
+      activeSingleMicRoute: 'auto',
+      routeOverride: false
+    });
+
+    (session as unknown as { handleAppMessage(raw: string): void }).handleAppMessage(
+      JSON.stringify({ type: 'set_single_mic_route', route: 'partner' })
+    );
+
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'partner',
+      activeSingleMicRoute: 'partner',
+      routeOverride: true
+    });
+
+    (session as unknown as { handleAppMessage(raw: string): void }).handleAppMessage(
+      JSON.stringify({ type: 'set_single_mic_route', route: 'auto' })
+    );
+
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'auto',
+      activeSingleMicRoute: 'auto',
+      routeOverride: false
+    });
+  });
 });
 
 describe('in-person HTTP endpoint', () => {
