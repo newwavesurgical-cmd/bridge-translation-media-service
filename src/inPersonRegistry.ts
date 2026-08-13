@@ -12,6 +12,8 @@ import type {
 } from './types/messages.js';
 
 const MAX_TRANSCRIPT_DIAGNOSTIC_DELTAS = 300;
+const SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS = 0.012;
+const SINGLE_MIC_ROUTE_PRIME_MS = 1200;
 
 type InPersonSpeaker = 'owner' | 'partner';
 type InPersonTarget = 'user' | 'partner';
@@ -65,6 +67,8 @@ type InPersonServerMessage =
       singleMicRoute?: SingleMicRoute;
       activeSingleMicRoute?: SingleMicRoute;
       routeOverride?: boolean;
+      routeOverrideAgeMs?: number | null;
+      routeOverrideSpeechAgeMs?: number | null;
     }
   | {
       type: 'translated_audio';
@@ -168,6 +172,8 @@ export class InPersonSession {
   private partnerToOwner?: OpenAiTranslationSession;
   private readonly languageGates: Record<InPersonSpeaker, TranscriptLanguageGate>;
   private singleMicRoute: SingleMicRoute = 'auto';
+  private singleMicRouteSetAt = 0;
+  private singleMicRouteSpeechStartedAt = 0;
   private lastSentActiveSingleMicRoute: SingleMicRoute | null = null;
 
   constructor(
@@ -232,6 +238,8 @@ export class InPersonSession {
       singleMicRoute: this.singleMicRoute,
       activeSingleMicRoute: this.activeSingleMicRoute(),
       routeOverride: this.singleMicRoute !== 'auto',
+      routeOverrideAgeMs: this.singleMicRouteSetAt ? Date.now() - this.singleMicRouteSetAt : null,
+      routeOverrideSpeechAgeMs: this.singleMicRouteSpeechStartedAt ? Date.now() - this.singleMicRouteSpeechStartedAt : null,
       languageGateMode: this.record.languageGateMode,
       languageGateNote:
         'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
@@ -300,9 +308,15 @@ export class InPersonSession {
       });
       return;
     }
-    if (route) {
-      this.setSingleMicRoute(route, false);
+    const frameRoute = this.validateSingleMicRoute(route);
+    if (route && !frameRoute) {
+      return;
     }
+    if (frameRoute && frameRoute !== 'auto') {
+      this.routeAudio(frameRoute, audio);
+      return;
+    }
+    this.updateTemporarySingleMicRoute(audio);
     if (this.singleMicRoute === 'owner' || this.singleMicRoute === 'partner') {
       this.routeAudio(this.singleMicRoute, audio);
       return;
@@ -312,15 +326,45 @@ export class InPersonSession {
   }
 
   private setSingleMicRoute(route: SingleMicRoute, sendStatus = true): void {
-    if (route !== 'auto' && route !== 'owner' && route !== 'partner') {
-      this.sendApp({
-        type: 'error',
-        message: 'Invalid single mic route. Expected auto, owner, or partner.'
-      });
+    const validated = this.validateSingleMicRoute(route);
+    if (!validated) {
       return;
     }
-    this.singleMicRoute = route;
+    this.singleMicRoute = validated;
+    this.singleMicRouteSetAt = validated === 'auto' ? 0 : Date.now();
+    this.singleMicRouteSpeechStartedAt = 0;
     if (sendStatus) {
+      this.sendStatus();
+    }
+  }
+
+  private validateSingleMicRoute(route: SingleMicRoute | undefined): SingleMicRoute | null {
+    if (!route) {
+      return null;
+    }
+    if (route === 'auto' || route === 'owner' || route === 'partner') {
+      return route;
+    }
+    this.sendApp({
+      type: 'error',
+      message: 'Invalid single mic route. Expected auto, owner, or partner.'
+    });
+    return null;
+  }
+
+  private updateTemporarySingleMicRoute(audio: string): void {
+    if (this.singleMicRoute !== 'owner' && this.singleMicRoute !== 'partner') {
+      return;
+    }
+    const now = Date.now();
+    const rms = pcm16RmsForInPersonDiagnostics(audio);
+    if (!this.singleMicRouteSpeechStartedAt && rms >= SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS) {
+      this.singleMicRouteSpeechStartedAt = now;
+    }
+    if (this.singleMicRouteSpeechStartedAt && now - this.singleMicRouteSpeechStartedAt >= SINGLE_MIC_ROUTE_PRIME_MS) {
+      this.singleMicRoute = 'auto';
+      this.singleMicRouteSetAt = 0;
+      this.singleMicRouteSpeechStartedAt = 0;
       this.sendStatus();
     }
   }
@@ -462,7 +506,9 @@ export class InPersonSession {
       sessionB: this.partnerToOwner?.status ?? 'idle',
       singleMicRoute: this.singleMicRoute,
       activeSingleMicRoute: this.lastSentActiveSingleMicRoute,
-      routeOverride: this.singleMicRoute !== 'auto'
+      routeOverride: this.singleMicRoute !== 'auto',
+      routeOverrideAgeMs: this.singleMicRouteSetAt ? Date.now() - this.singleMicRouteSetAt : null,
+      routeOverrideSpeechAgeMs: this.singleMicRouteSpeechStartedAt ? Date.now() - this.singleMicRouteSpeechStartedAt : null
     });
   }
 

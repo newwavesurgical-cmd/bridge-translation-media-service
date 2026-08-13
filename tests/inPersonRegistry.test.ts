@@ -1,6 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createBridgeMediaServer } from '../src/http.js';
 import { InPersonRegistry } from '../src/inPersonRegistry.js';
+import { pcm16ToBase64 } from '../src/audio/codec.js';
 import type { AppConfig } from '../src/config.js';
 
 const config: AppConfig = {
@@ -24,7 +25,15 @@ const config: AppConfig = {
   DRY_RUN_CALLS: true
 };
 
+function pcmChunk(amplitude: number): string {
+  return pcm16ToBase64(new Int16Array(480).fill(amplitude));
+}
+
 describe('InPersonRegistry', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('creates a native dual-channel session with an in-person websocket URL', () => {
     const registry = new InPersonRegistry(config);
     const session = registry.create({
@@ -149,6 +158,52 @@ describe('InPersonRegistry', () => {
       singleMicRoute: 'auto',
       activeSingleMicRoute: 'auto',
       routeOverride: false
+    });
+  });
+
+  it('returns a manual single-mic route to auto after speech has started', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_auto_temporary_override_test',
+      inputMode: 'single_mic_auto'
+    });
+    const handle = (session as unknown as { handleAppMessage(raw: string): void }).handleAppMessage.bind(session);
+    const updateTemporaryRoute = (
+      session as unknown as { updateTemporarySingleMicRoute(audio: string): void }
+    ).updateTemporarySingleMicRoute.bind(session);
+
+    handle(JSON.stringify({ type: 'set_single_mic_route', route: 'partner' }));
+    updateTemporaryRoute(pcmChunk(0));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'partner',
+      routeOverride: true,
+      routeOverrideSpeechAgeMs: null
+    });
+
+    updateTemporaryRoute(pcmChunk(6000));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'partner',
+      routeOverride: true
+    });
+
+    vi.advanceTimersByTime(1199);
+    updateTemporaryRoute(pcmChunk(6000));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'partner',
+      routeOverride: true
+    });
+
+    vi.advanceTimersByTime(2);
+    updateTemporaryRoute(pcmChunk(6000));
+    expect(session.diagnostics()).toMatchObject({
+      singleMicRoute: 'auto',
+      activeSingleMicRoute: 'auto',
+      routeOverride: false,
+      routeOverrideSpeechAgeMs: null
     });
   });
 });
