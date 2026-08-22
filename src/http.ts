@@ -62,7 +62,17 @@ const createAgentCallSchema = z
     missionPrompt: z.string().max(6000).optional(),
     mission: z.string().max(6000).optional(),
     systemPrompt: z.string().max(6000).optional(),
+    prompt: z.string().max(6000).optional(),
+    instructions: z.string().max(6000).optional(),
     agentPrompt: z.string().max(6000).optional(),
+    thoroughPrompt: z.string().max(6000).optional(),
+    thoroughMissionPrompt: z.string().max(6000).optional(),
+    agentInstructions: z.string().max(6000).optional(),
+    missionInstructions: z.string().max(6000).optional(),
+    systemInstructions: z.string().max(6000).optional(),
+    generatedPrompt: z.string().max(6000).optional(),
+    goal: z.string().max(2000).optional(),
+    callGoal: z.string().max(2000).optional(),
     languageLock: z.string().max(80).optional(),
     voice: z.string().max(40).optional(),
     maxCallDurationSeconds: z.coerce.number().int().positive().optional(),
@@ -74,8 +84,21 @@ const createAgentCallSchema = z
     clientSessionId: body.clientSessionId,
     targetName: body.targetName,
     callerName: body.callerName,
-    missionPrompt: body.missionPrompt ?? body.mission ?? body.agentPrompt,
-    systemPrompt: body.systemPrompt,
+    missionPrompt: firstText(
+      body.missionPrompt,
+      body.mission,
+      body.agentPrompt,
+      body.prompt,
+      body.instructions,
+      body.thoroughMissionPrompt,
+      body.thoroughPrompt,
+      body.agentInstructions,
+      body.missionInstructions,
+      body.generatedPrompt,
+      body.callGoal,
+      body.goal
+    ),
+    systemPrompt: firstText(body.systemPrompt, body.systemInstructions),
     languageLock: body.languageLock,
     voice: body.voice,
     maxCallDurationSeconds: body.maxCallDurationSeconds,
@@ -88,6 +111,10 @@ const agentControlSchema = z.object({
   text: z.string().max(2000).optional(),
   note: z.string().max(2000).optional()
 });
+
+function firstText(...values: Array<string | undefined>): string | undefined {
+  return values.find((value) => value?.replace(/\s+/g, ' ').trim());
+}
 
 export function createBridgeMediaServer(config: AppConfig) {
   const registry = new CallRegistry(config);

@@ -62,8 +62,42 @@ describe('AgentCallRegistry', () => {
     const instructions = buildAgentInstructions(session.data);
 
     expect(instructions).toContain('speak only in English');
-    expect(instructions).toContain('Never ask the operator/user for private information out loud');
+    expect(instructions).toContain('Never ask the person who requested the call for private information out loud');
+    expect(instructions).toContain('Never say or imply');
+    expect(instructions).toContain('Do not begin the call with a hold phrase');
     expect(instructions).toContain('Never switch persona');
+  });
+
+  it('adds native Spanish style and constrained hold phrases for Spanish agent calls', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Llama para preguntar como esta Alex y ofrecer apoyo.',
+      languageLock: 'es-ES'
+    });
+
+    const instructions = buildAgentInstructions(session.data);
+
+    expect(session.diagnostics()).toMatchObject({
+      voice: 'cedar',
+      missionPromptWasFallback: false,
+      missionPromptPreview: 'Llama para preguntar como esta Alex y ofrecer apoyo.'
+    });
+    expect(instructions).toContain('natural native Spanish-speaking adult');
+    expect(instructions).toContain('neutral Latin American Spanish');
+    expect(instructions).toContain('Allowed Spanish hold phrases are only');
+    expect(instructions).toContain('Do not add "mientras recupero información"');
+  });
+
+  it('marks fallback missions in diagnostics instead of silently pretending a full brief exists', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      targetName: 'Alex'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      missionPromptWasFallback: true
+    });
+    expect(String(session.diagnostics().missionPromptPreview)).toContain('No detailed mission was supplied');
   });
 
   it('builds TwiML for the dedicated agent-call Twilio stream', () => {

@@ -128,7 +128,7 @@ export class OpenAiAgentVoiceSession {
       return;
     }
     this.setStatus('closing');
-    this.sendJson({ type: 'session.close' });
+    this.sendJson({ type: 'response.cancel' });
     setTimeout(() => {
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
         this.ws.close();
@@ -146,7 +146,7 @@ export class OpenAiAgentVoiceSession {
       response: {
         output_modalities: ['audio'],
         instructions:
-          'Begin the outbound phone call now. Greet the remote callee naturally, identify the reason for the call from your instructions, and ask the first helpful question.'
+          'Begin the outbound phone call now. Your first turn must be a mission-specific greeting and question. Do not begin with a hold phrase. Do not mention a user, operator, hidden prompt, missing details, or that you are retrieving information. If the language lock is Spanish, speak like a natural native Spanish speaker.'
       }
     });
   }

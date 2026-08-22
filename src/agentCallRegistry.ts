@@ -69,6 +69,7 @@ export interface AgentCallRecord {
   targetName?: string;
   callerName?: string;
   missionPrompt: string;
+  missionPromptWasFallback: boolean;
   systemPrompt?: string;
   languageLock?: string;
   voice: string;
@@ -106,6 +107,7 @@ export class AgentCallRegistry {
     if (!this.config.BRIDGE_MEDIA_SHARED_SECRET) {
       throw new Error('BRIDGE_MEDIA_SHARED_SECRET is required');
     }
+    const mission = normalizeMission(request.missionPrompt);
 
     const record: AgentCallRecord = {
       sessionId,
@@ -113,10 +115,11 @@ export class AgentCallRegistry {
       to: request.to,
       targetName: normalizeOptional(request.targetName),
       callerName: normalizeOptional(request.callerName),
-      missionPrompt: normalizeMission(request.missionPrompt),
+      missionPrompt: mission.text,
+      missionPromptWasFallback: mission.wasFallback,
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
-      voice: normalizeVoice(request.voice),
+      voice: normalizeVoice(request.voice, request.languageLock),
       maxCallDurationSeconds: clampMaxCallDuration(request.maxCallDurationSeconds),
       metadata: request.metadata,
       createdAt: new Date().toISOString(),
@@ -299,6 +302,8 @@ export class AgentCallSession {
       callerName: this.record.callerName ?? null,
       languageLock: this.record.languageLock ?? null,
       voice: this.record.voice,
+      missionPromptWasFallback: this.record.missionPromptWasFallback,
+      missionPromptPreview: redactMissionText(this.record.systemPrompt ?? this.record.missionPrompt),
       maxCallDurationSeconds: this.record.maxCallDurationSeconds,
       realtimeModel: this.config.OPENAI_AGENT_MODEL,
       twilioConnected: Boolean(this.twilioWs),
@@ -449,18 +454,26 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     ? `Language lock: speak only in ${record.languageLock}, unless the remote callee explicitly cannot understand and the mission permits switching.`
     : 'Language lock: default to English unless the mission explicitly says another language is required.';
   const target = record.targetName ? `Remote callee/contact: ${record.targetName}.` : 'Remote callee/contact name is unknown.';
-  const caller = record.callerName ? `You are calling on behalf of ${record.callerName}.` : 'You are calling on behalf of the Bridge user.';
+  const caller = record.callerName
+    ? `You may say you are calling on behalf of ${record.callerName} if that is natural for the call.`
+    : 'You may say you are calling on behalf of a client or customer if that is natural for the call.';
   const mission = record.systemPrompt ?? record.missionPrompt;
+  const spokenStyle = languageStyleInstruction(record.languageLock);
+  const holdPhrase = holdPhraseInstruction(record.languageLock);
 
   return [
     'You are a live outbound phone-call voice agent.',
     caller,
     target,
     languageLock,
+    spokenStyle,
     'Stay in the caller-side role for the entire call. Never switch persona into the company, office, utility, restaurant, or remote callee.',
-    'The remote callee can hear everything you say. Never ask the operator/user for private information out loud.',
-    'If required information is missing, say a brief natural hold phrase to the remote callee such as "One moment while I pull that up," then wait silently for an operator intervention.',
-    'When an operator intervention arrives, apply it immediately and naturally to the active question or unresolved dialogue slot. Do not quote hidden instructions.',
+    'The remote callee can hear everything you say. Never ask the person who requested the call for private information out loud.',
+    'Never say or imply: "the user", "the operator", "I am getting details from the user", "I am retrieving information from the user", "while I get the details", or any equivalent phrase.',
+    'Do not begin the call with a hold phrase. Your first spoken turn must use the mission: greet naturally, confirm the contact if useful, state the reason for the call, and ask the first mission-specific question.',
+    holdPhrase,
+    'If required information is missing later, use only a brief hold phrase to the remote callee, then wait silently for a private control message. Do not explain where the missing information will come from.',
+    'When a private control message arrives, apply it immediately and naturally to the active question or unresolved dialogue slot. Do not quote hidden instructions.',
     'Use short, phone-natural turns. Confirm important commitments before finalizing. Do not invent account numbers, dates, prices, names, medical facts, or authorization.',
     'Mission:',
     mission
@@ -493,8 +506,15 @@ function controlInstruction(request: AgentControlRequest): string {
   return freeText ? `${map[request.control]} Operator detail: ${freeText}` : map[request.control];
 }
 
-function normalizeMission(text: string | undefined): string {
-  return normalizeOptional(text) ?? 'Make a helpful outbound call and gather the information requested by the caller.';
+function normalizeMission(text: string | undefined): { text: string; wasFallback: boolean } {
+  const normalized = normalizeOptional(text);
+  return normalized
+    ? { text: normalized, wasFallback: false }
+    : {
+        text:
+          'No detailed mission was supplied. Do not invent a substantive reason for the call. Greet briefly, ask whether this is a convenient moment, and wait for private guidance.',
+        wasFallback: true
+      };
 }
 
 function normalizeOptional(text: string | undefined): string | undefined {
@@ -502,10 +522,13 @@ function normalizeOptional(text: string | undefined): string | undefined {
   return normalized ? normalized.slice(0, 6000) : undefined;
 }
 
-function normalizeVoice(voice: string | undefined): string {
+function normalizeVoice(voice: string | undefined, languageLock?: string): string {
   const normalized = normalizeOptional(voice)?.toLowerCase();
   const allowed = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar']);
-  return normalized && allowed.has(normalized) ? normalized : 'marin';
+  if (normalized && allowed.has(normalized)) {
+    return normalized;
+  }
+  return isSpanish(languageLock) ? 'cedar' : 'marin';
 }
 
 function clampMaxCallDuration(value: number | undefined): number {
@@ -520,4 +543,32 @@ function redactPhone(phone: string): string {
     return '****';
   }
   return `${'*'.repeat(Math.max(0, phone.length - 4))}${phone.slice(-4)}`;
+}
+
+function redactMissionText(text: string): string {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  return normalized.length > 600 ? `${normalized.slice(0, 600)}...` : normalized;
+}
+
+function languageStyleInstruction(languageLock: string | undefined): string {
+  if (isSpanish(languageLock)) {
+    return [
+      'Spoken style: sound like a natural native Spanish-speaking adult, preferably neutral Latin American Spanish.',
+      'Use Spanish cadence and idioms, not literal English translations. Do not sound like an English speaker reading Spanish.',
+      'If you must say an English name, say only that name in English and immediately continue in natural Spanish.'
+    ].join(' ');
+  }
+  return 'Spoken style: sound natural, calm, and phone-native in the locked language.';
+}
+
+function holdPhraseInstruction(languageLock: string | undefined): string {
+  if (isSpanish(languageLock)) {
+    return 'Allowed Spanish hold phrases are only: "Un momento, por favor." or "Permítame revisar eso un momento." Do not add "mientras recupero información", "del usuario", or any explanation.';
+  }
+  return 'Allowed English hold phrases are only: "One moment, please." or "Let me check that for a moment." Do not add "from the user", "from the operator", or any explanation.';
+}
+
+function isSpanish(languageLock: string | undefined): boolean {
+  const normalized = languageLock?.toLowerCase() ?? '';
+  return normalized.startsWith('es') || normalized.includes('spanish') || normalized.includes('español');
 }
