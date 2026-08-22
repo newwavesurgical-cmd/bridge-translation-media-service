@@ -5,10 +5,11 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import { mediaRouterConfigured, openAiConfigured, twilioConfigured } from './config.js';
 import { CallRegistry } from './callRegistry.js';
+import { AgentCallRegistry, contextualMicroInterventions } from './agentCallRegistry.js';
 import { InPersonRegistry, type InPersonDisplayView } from './inPersonRegistry.js';
 import { AppToAppRegistry, type AppToAppParticipant } from './appToAppRegistry.js';
-import { originateTranslatedCall } from './twilio/client.js';
-import { buildTranslatedCallTwiMl } from './twilio/twiml.js';
+import { originateAgentCall, originateTranslatedCall } from './twilio/client.js';
+import { buildAgentCallTwiMl, buildTranslatedCallTwiMl } from './twilio/twiml.js';
 
 const createCallSchema = z.object({
   to: z.string().min(7),
@@ -51,12 +52,51 @@ const createAppToAppSessionSchema = z.object({
   )
 });
 
+const createAgentCallSchema = z
+  .object({
+    to: z.string().min(7).optional(),
+    phoneNumber: z.string().min(7).optional(),
+    clientSessionId: z.string().optional(),
+    targetName: z.string().max(200).optional(),
+    callerName: z.string().max(200).optional(),
+    missionPrompt: z.string().max(6000).optional(),
+    mission: z.string().max(6000).optional(),
+    systemPrompt: z.string().max(6000).optional(),
+    agentPrompt: z.string().max(6000).optional(),
+    languageLock: z.string().max(80).optional(),
+    voice: z.string().max(40).optional(),
+    maxCallDurationSeconds: z.coerce.number().int().positive().optional(),
+    metadata: z.record(z.unknown()).optional()
+  })
+  .passthrough()
+  .transform((body) => ({
+    to: body.to ?? body.phoneNumber ?? '',
+    clientSessionId: body.clientSessionId,
+    targetName: body.targetName,
+    callerName: body.callerName,
+    missionPrompt: body.missionPrompt ?? body.mission ?? body.agentPrompt,
+    systemPrompt: body.systemPrompt,
+    languageLock: body.languageLock,
+    voice: body.voice,
+    maxCallDurationSeconds: body.maxCallDurationSeconds,
+    metadata: body.metadata
+  }))
+  .refine((body) => body.to.length >= 7, { message: 'to or phoneNumber is required' });
+
+const agentControlSchema = z.object({
+  control: z.enum(contextualMicroInterventions).optional(),
+  text: z.string().max(2000).optional(),
+  note: z.string().max(2000).optional()
+});
+
 export function createBridgeMediaServer(config: AppConfig) {
   const registry = new CallRegistry(config);
+  const agentCallRegistry = new AgentCallRegistry(config);
   const inPersonRegistry = new InPersonRegistry(config);
   const appToAppRegistry = new AppToAppRegistry(config);
   const appWss = new WebSocketServer({ noServer: true });
   const twilioWss = new WebSocketServer({ noServer: true });
+  const agentCallTwilioWss = new WebSocketServer({ noServer: true });
   const inPersonWss = new WebSocketServer({ noServer: true });
   const appToAppWss = new WebSocketServer({ noServer: true });
 
@@ -74,14 +114,86 @@ export function createBridgeMediaServer(config: AppConfig) {
           twilioConfigured: twilioConfigured(config),
           openAiConfigured: openAiConfigured(config),
           mediaRouterConfigured: mediaRouterConfigured(config),
+          agentCallSupported: true,
+          agentRealtimeVoiceBridgeSupported: true,
+          monitorStreamSupported: false,
           dryRunCalls: config.DRY_RUN_CALLS,
           activeCalls: registry.listDiagnostics(),
           recentCalls: registry.listRecentDiagnostics(),
+          activeAgentCalls: agentCallRegistry.listDiagnostics(),
+          recentAgentCalls: agentCallRegistry.listRecentDiagnostics(),
           activeInPersonSessions: inPersonRegistry.listDiagnostics(),
           recentInPersonSessions: inPersonRegistry.listRecentDiagnostics(),
           activeAppToAppSessions: appToAppRegistry.listDiagnostics(),
           recentAppToAppSessions: appToAppRegistry.listRecentDiagnostics()
         });
+      }
+
+      if (req.method === 'GET' && url.pathname === '/agent-call/health') {
+        return sendJson(res, 200, agentCallHealth(config, agentCallRegistry));
+      }
+
+      if (req.method === 'GET' && url.pathname === '/agent-call/capabilities') {
+        return sendJson(res, 200, agentCallCapabilities(config, agentCallRegistry));
+      }
+
+      if (req.method === 'POST' && url.pathname === '/agent-call/start') {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const body = createAgentCallSchema.parse(await readJson(req));
+        const session = agentCallRegistry.create(body);
+        const callSid = await originateAgentCall(config, session);
+        session.setCallSid(callSid);
+        session.markCalling();
+        return sendJson(res, 201, {
+          sessionId: session.sessionId,
+          callId: session.sessionId,
+          callSid,
+          status: config.DRY_RUN_CALLS ? 'dry_run' : 'calling',
+          monitorStreamSupported: false,
+          monitorStreamUrl: session.monitorStreamUrl(),
+          diagnostics: session.diagnostics()
+        });
+      }
+
+      if (req.method === 'GET' && url.pathname.startsWith('/agent-call/')) {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionId = decodeURIComponent(url.pathname.replace('/agent-call/', ''));
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendJson(res, 404, { error: 'agent call not found' });
+        }
+        return sendJson(res, 200, { ok: true, diagnostics: session.diagnostics() });
+      }
+
+      if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/control')) {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendJson(res, 404, { error: 'agent call not found' });
+        }
+        const body = agentControlSchema.parse(await readJson(req));
+        const control = session.receiveControl(body);
+        return sendJson(res, 200, { ok: true, control, diagnostics: session.diagnostics() });
+      }
+
+      if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/end')) {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendJson(res, 200, { ok: true, alreadyEnded: true });
+        }
+        await session.end('requested');
+        return sendJson(res, 200, { ok: true });
       }
 
       if (req.method === 'POST' && url.pathname === '/calls') {
@@ -192,6 +304,16 @@ export function createBridgeMediaServer(config: AppConfig) {
           introMessageText: session.data.introMessageText,
           introDisclaimerText: session.data.introDisclaimerText
         });
+        return sendXml(res, 200, xml);
+      }
+
+      if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/twiml/agent-call') {
+        const sessionId = url.searchParams.get('sessionId') ?? '';
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendXml(res, 404, '<Response><Reject /></Response>');
+        }
+        const xml = buildAgentCallTwiMl({ config, sessionId });
         return sendXml(res, 200, xml);
       }
 
@@ -306,10 +428,76 @@ export function createBridgeMediaServer(config: AppConfig) {
       return;
     }
 
+    if (url.pathname === '/agent-call/twilio/stream') {
+      agentCallTwilioWss.handleUpgrade(req, socket, head, (ws) => {
+        const preStartHandler = (raw: Buffer | ArrayBuffer | Buffer[]) => {
+          let parsedSessionId: string | undefined;
+          try {
+            const message = JSON.parse(raw.toString()) as {
+              event?: string;
+              start?: { customParameters?: Record<string, string> };
+            };
+            parsedSessionId = message.start?.customParameters?.sessionId;
+          } catch {
+            ws.close();
+            return;
+          }
+          if (!parsedSessionId) {
+            return;
+          }
+          const session = agentCallRegistry.get(parsedSessionId);
+          if (!session) {
+            ws.close();
+            return;
+          }
+          if (session.handleTwilioPreStart(ws, raw.toString())) {
+            ws.off('message', preStartHandler);
+          }
+        };
+        ws.on('message', preStartHandler);
+      });
+      return;
+    }
+
     socket.destroy();
   });
 
-  return { server, registry, inPersonRegistry, appToAppRegistry };
+  return { server, registry, agentCallRegistry, inPersonRegistry, appToAppRegistry };
+}
+
+function agentCallHealth(config: AppConfig, agentCallRegistry: AgentCallRegistry): Record<string, unknown> {
+  return {
+    ok: true,
+    service: 'bridge-translation-media-service',
+    agentCallSupported: true,
+    agentRealtimeVoiceBridgeSupported: true,
+    monitorStreamSupported: false,
+    twilioConfigured: twilioConfigured(config),
+    openAiConfigured: openAiConfigured(config),
+    mediaRouterConfigured: mediaRouterConfigured(config),
+    dryRunCalls: config.DRY_RUN_CALLS,
+    activeAgentCalls: agentCallRegistry.listDiagnostics(),
+    recentAgentCalls: agentCallRegistry.listRecentDiagnostics()
+  };
+}
+
+function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRegistry): Record<string, unknown> {
+  return {
+    ...agentCallHealth(config, agentCallRegistry),
+    realtimeModel: config.OPENAI_AGENT_MODEL,
+    defaultVoice: 'marin',
+    maxCallDurationSecondsDefault: 1800,
+    languageLockSupported: true,
+    contextualMicroInterventionControls: contextualMicroInterventions,
+    endpoints: {
+      start: 'POST /agent-call/start',
+      status: 'GET /agent-call/:sessionId',
+      control: 'POST /agent-call/:sessionId/control',
+      end: 'POST /agent-call/:sessionId/end',
+      twiml: 'GET|POST /twiml/agent-call',
+      twilioMediaStream: 'WS /agent-call/twilio/stream'
+    }
+  };
 }
 
 async function readJson(req: http.IncomingMessage): Promise<unknown> {

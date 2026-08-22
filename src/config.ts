@@ -8,6 +8,7 @@ const envSchema = z.object({
   APP_STREAM_PUBLIC_WSS_URL: z.string().url().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_TRANSLATION_MODEL: z.string().default('gpt-realtime-translate'),
+  OPENAI_AGENT_MODEL: z.string().default('gpt-realtime-2.1'),
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
   OPENAI_TTS_VOICE: z.string().default('cedar'),
   OPENAI_FILLER_TTS_VOICE: z.string().default('onyx'),

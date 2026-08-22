@@ -14,6 +14,11 @@ interface BuildTwiMlOptions {
   introDisclaimerText?: string;
 }
 
+interface BuildAgentCallTwiMlOptions {
+  config: AppConfig;
+  sessionId: string;
+}
+
 export function buildTranslatedCallTwiMl(options: BuildTwiMlOptions): string {
   if (!options.config.TRANSLATION_MEDIA_PUBLIC_WSS_URL || !options.config.BRIDGE_MEDIA_SHARED_SECRET) {
     throw new Error('TRANSLATION_MEDIA_PUBLIC_WSS_URL and BRIDGE_MEDIA_SHARED_SECRET are required');
@@ -38,6 +43,34 @@ export function buildTranslatedCallTwiMl(options: BuildTwiMlOptions): string {
   stream.parameter({ name: 'remoteLanguage', value: options.remoteLanguage });
 
   return response.toString();
+}
+
+export function buildAgentCallTwiMl(options: BuildAgentCallTwiMlOptions): string {
+  if (!options.config.BRIDGE_MEDIA_SHARED_SECRET) {
+    throw new Error('BRIDGE_MEDIA_SHARED_SECRET is required');
+  }
+
+  const response = new twiml.VoiceResponse();
+  const connect = response.connect();
+  const stream = connect.stream({
+    url: agentCallTwilioStreamUrl(options.config)
+  });
+  stream.parameter({ name: 'sessionId', value: options.sessionId });
+  stream.parameter({ name: 'streamToken', value: makeStreamToken(options.config.BRIDGE_MEDIA_SHARED_SECRET, options.sessionId) });
+
+  return response.toString();
+}
+
+export function agentCallTwilioStreamUrl(config: AppConfig): string {
+  if (config.TRANSLATION_MEDIA_PUBLIC_WSS_URL) {
+    return config.TRANSLATION_MEDIA_PUBLIC_WSS_URL.replace(/\/twilio\/stream\/?$/, '/agent-call/twilio/stream');
+  }
+  if (!config.PUBLIC_BASE_URL) {
+    throw new Error('PUBLIC_BASE_URL or TRANSLATION_MEDIA_PUBLIC_WSS_URL is required');
+  }
+  const url = new URL('/agent-call/twilio/stream', config.PUBLIC_BASE_URL);
+  url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+  return url.toString();
 }
 
 function twilioSayLanguage(language: string): string {

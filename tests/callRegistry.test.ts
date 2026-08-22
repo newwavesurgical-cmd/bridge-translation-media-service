@@ -11,6 +11,7 @@ const config: AppConfig = {
   APP_STREAM_PUBLIC_WSS_URL: 'wss://bridge-media.example.com/app/stream',
   OPENAI_API_KEY: '',
   OPENAI_TRANSLATION_MODEL: 'gpt-realtime-translate',
+  OPENAI_AGENT_MODEL: 'gpt-realtime-2.1',
   OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
   OPENAI_TTS_VOICE: 'cedar',
   OPENAI_FILLER_TTS_VOICE: 'onyx',
