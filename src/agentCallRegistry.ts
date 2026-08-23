@@ -96,7 +96,6 @@ export interface AgentCallRecord {
     agentTranscriptDeltas: number;
     controlsReceived: number;
     controlsDelivered: number;
-    bargeInClears: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   lastActivityAt?: string;
@@ -145,8 +144,7 @@ export class AgentCallRegistry {
         remoteTranscriptDeltas: 0,
         agentTranscriptDeltas: 0,
         controlsReceived: 0,
-        controlsDelivered: 0,
-        bargeInClears: 0
+        controlsDelivered: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -414,7 +412,6 @@ export class AgentCallSession {
       firstUtterance: this.record.firstUtterance,
       voice: this.record.voice,
       onAudioDelta: (pcmu) => this.sendTwilioMedia(pcmu, `agent-${Date.now()}`),
-      onBargeIn: () => this.clearTwilioPlayback(),
       onRemoteTranscriptDelta: (delta) => {
         this.record.counters.remoteTranscriptDeltas += 1;
         this.emitTranscript('remote', delta);
@@ -457,20 +454,6 @@ export class AgentCallSession {
         mark: { name: markName }
       })
     );
-  }
-
-  private clearTwilioPlayback(): void {
-    if (!this.twilioWs || !this.record.twilioStreamSid) {
-      return;
-    }
-    this.record.counters.bargeInClears += 1;
-    this.twilioWs.send(
-      JSON.stringify({
-        event: 'clear',
-        streamSid: this.record.twilioStreamSid
-      })
-    );
-    this.touch();
   }
 
   private emitTranscript(speaker: 'agent' | 'remote' | 'operator', delta: string): void {

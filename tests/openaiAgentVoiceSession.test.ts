@@ -55,7 +55,7 @@ function makeLiveSession() {
 }
 
 describe('OpenAI agent voice session startup gate', () => {
-  it('uses fast server VAD while disabling auto-response until the first utterance is delivered', () => {
+  it('disables VAD auto-response until the first utterance is explicitly delivered', () => {
     expect(buildAgentSessionUpdate('gpt-realtime-2.1', 'Mission instructions', 'marin')).toMatchObject({
       type: 'realtime',
       model: 'gpt-realtime-2.1',
@@ -66,10 +66,7 @@ describe('OpenAI agent voice session startup gate', () => {
           format: { type: 'audio/pcmu' },
           transcription: { model: 'gpt-realtime-whisper' },
           turn_detection: {
-            type: 'server_vad',
-            threshold: 0.45,
-            prefix_padding_ms: 250,
-            silence_duration_ms: 450,
+            type: 'semantic_vad',
             create_response: false,
             interrupt_response: true
           }
@@ -80,91 +77,6 @@ describe('OpenAI agent voice session startup gate', () => {
         }
       }
     });
-  });
-
-  it('cancels active agent speech and emits barge-in when caller speech starts', () => {
-    const sent: Array<Record<string, unknown>> = [];
-    let bargeIns = 0;
-    const session = new OpenAiAgentVoiceSession({
-      config,
-      instructions: 'Mission instructions',
-      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
-      voice: 'marin',
-      onAudioDelta: () => undefined,
-      onBargeIn: () => {
-        bargeIns += 1;
-      },
-      onRemoteTranscriptDelta: () => undefined,
-      onAgentTranscriptDelta: () => undefined,
-      onStatus: () => undefined,
-      onError: () => undefined
-    });
-    const mutable = session as unknown as {
-      ws: { readyState: number; send: (payload: string) => void };
-      statusValue: string;
-      firstUtteranceDelivered: boolean;
-      responseActive: boolean;
-      handleMessage: (message: string) => void;
-    };
-    mutable.ws = {
-      readyState: 1,
-      send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
-    };
-    mutable.statusValue = 'live';
-    mutable.firstUtteranceDelivered = true;
-    mutable.responseActive = true;
-
-    mutable.handleMessage(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
-
-    expect(bargeIns).toBe(1);
-    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel']);
-  });
-
-  it('cancels active agent speech from sustained caller audio even before speech_started arrives', () => {
-    const sent: Array<Record<string, unknown>> = [];
-    let bargeIns = 0;
-    const session = new OpenAiAgentVoiceSession({
-      config,
-      instructions: 'Mission instructions',
-      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
-      voice: 'marin',
-      onAudioDelta: () => undefined,
-      onBargeIn: () => {
-        bargeIns += 1;
-      },
-      onRemoteTranscriptDelta: () => undefined,
-      onAgentTranscriptDelta: () => undefined,
-      onStatus: () => undefined,
-      onError: () => undefined
-    });
-    const mutable = session as unknown as {
-      ws: { readyState: number; send: (payload: string) => void };
-      statusValue: string;
-      firstUtteranceDelivered: boolean;
-      responseActive: boolean;
-    };
-    mutable.ws = {
-      readyState: 1,
-      send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
-    };
-    mutable.statusValue = 'live';
-    mutable.firstUtteranceDelivered = true;
-    mutable.responseActive = true;
-
-    for (let index = 0; index < 6; index += 1) {
-      session.appendPcmuBase64('caller-audio');
-    }
-
-    expect(bargeIns).toBe(1);
-    expect(sent.map((payload) => payload.type)).toEqual([
-      'input_audio_buffer.append',
-      'input_audio_buffer.append',
-      'input_audio_buffer.append',
-      'input_audio_buffer.append',
-      'input_audio_buffer.append',
-      'response.cancel',
-      'input_audio_buffer.append'
-    ]);
   });
 
   it('probes cancellation before an operator intervention to avoid active-response races', () => {
@@ -234,10 +146,7 @@ describe('OpenAI agent voice session startup gate', () => {
         audio: {
           input: {
             turn_detection: {
-              type: 'server_vad',
-              threshold: 0.45,
-              prefix_padding_ms: 250,
-              silence_duration_ms: 450,
+              type: 'semantic_vad',
               create_response: true
             }
           }

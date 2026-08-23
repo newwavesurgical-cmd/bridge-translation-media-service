@@ -199,57 +199,6 @@ describe('AgentCallRegistry', () => {
     });
   });
 
-  it('sends Twilio clear on barge-in so buffered agent audio stops playing', () => {
-    const registry = new AgentCallRegistry(config);
-    const session = registry.create({
-      to: '+15551230000',
-      clientSessionId: 'agent_barge_in_test'
-    });
-    const sent: string[] = [];
-    const fakeWs = {
-      on: () => undefined,
-      close: () => undefined,
-      send: (payload: string) => sent.push(payload)
-    };
-
-    const startResult = session.handleTwilioPreStart(
-      fakeWs as never,
-      JSON.stringify({
-        event: 'start',
-        sequenceNumber: '1',
-        streamSid: 'MZBARGE',
-        start: {
-          streamSid: 'MZBARGE',
-          accountSid: 'AC123',
-          callSid: 'CABARGE',
-          tracks: ['inbound'],
-          mediaFormat: {
-            encoding: 'audio/x-mulaw',
-            sampleRate: 8000,
-            channels: 1
-          },
-          customParameters: {
-            sessionId: session.sessionId,
-            streamToken: makeStreamToken(config.BRIDGE_MEDIA_SHARED_SECRET, session.sessionId)
-          }
-        }
-      })
-    );
-
-    expect(startResult).toBe(true);
-    (session as unknown as { clearTwilioPlayback: () => void }).clearTwilioPlayback();
-
-    expect(sent.map((payload) => JSON.parse(payload) as Record<string, unknown>)).toContainEqual({
-      event: 'clear',
-      streamSid: 'MZBARGE'
-    });
-    expect(session.diagnostics()).toMatchObject({
-      counters: {
-        bargeInClears: 1
-      }
-    });
-  });
-
   it('retains explicit first utterance startup-gate options from the caller app', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
