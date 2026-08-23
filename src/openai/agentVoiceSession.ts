@@ -9,6 +9,7 @@ interface AgentVoiceSessionOptions {
   firstUtterance?: string;
   voice: string;
   onAudioDelta: (base64Pcmu: string) => void;
+  onBargeIn?: () => void;
   onRemoteTranscriptDelta: (delta: string) => void;
   onAgentTranscriptDelta: (delta: string) => void;
   onStatus: (status: AgentVoiceSessionStatus, detail?: string) => void;
@@ -41,6 +42,8 @@ export class OpenAiAgentVoiceSession {
   private firstUtteranceTranscript = '';
   private preArmedAudio = 0;
   private responseActive = false;
+  private responseInterrupted = false;
+  private inboundAudioDuringResponse = 0;
   private pendingIntervention?: { text: string; semanticControl?: string };
 
   constructor(private readonly options: AgentVoiceSessionOptions) {
@@ -105,6 +108,12 @@ export class OpenAiAgentVoiceSession {
         this.publishStartupDiagnostics();
       }
       return;
+    }
+    if (this.responseActive) {
+      this.inboundAudioDuringResponse += 1;
+      if (!this.responseInterrupted && this.inboundAudioDuringResponse >= 6) {
+        this.interruptAgentResponse();
+      }
     }
     this.sendJson({
       type: 'input_audio_buffer.append',
@@ -213,6 +222,14 @@ export class OpenAiAgentVoiceSession {
 
     if (event.type === 'response.created') {
       this.responseActive = true;
+      this.responseInterrupted = false;
+      this.inboundAudioDuringResponse = 0;
+      return;
+    }
+    if (event.type === 'input_audio_buffer.speech_started') {
+      if (this.responseActive) {
+        this.interruptAgentResponse();
+      }
       return;
     }
     if (event.type === 'response.output_audio.delta' && event.delta) {
@@ -251,6 +268,8 @@ export class OpenAiAgentVoiceSession {
     }
     if (event.type === 'response.done') {
       this.responseActive = false;
+      this.responseInterrupted = false;
+      this.inboundAudioDuringResponse = 0;
       if (this.firstUtteranceArmed && !this.firstUtteranceDelivered) {
         if (!isCompleteFirstUtterance(this.firstUtteranceTranscript, this.firstUtterance)) {
           this.restartFirstUtterance();
@@ -283,6 +302,8 @@ export class OpenAiAgentVoiceSession {
     }
     if (event.type === 'response.cancelled') {
       this.responseActive = false;
+      this.responseInterrupted = false;
+      this.inboundAudioDuringResponse = 0;
       this.flushPendingIntervention();
       return;
     }
@@ -335,6 +356,12 @@ export class OpenAiAgentVoiceSession {
     this.sendJson({ type: 'response.cancel' });
   }
 
+  private interruptAgentResponse(): void {
+    this.responseInterrupted = true;
+    this.options.onBargeIn?.();
+    this.cancelActiveResponse();
+  }
+
   private setStatus(status: AgentVoiceSessionStatus, detail?: string): void {
     this.statusValue = status;
     this.options.onStatus(status, detail);
@@ -373,7 +400,10 @@ export function buildAgentSessionUpdate(model: string, instructions: string, voi
 
 function realtimeTurnDetectionConfig(createResponse: boolean): Record<string, unknown> {
   return {
-    type: 'semantic_vad',
+    type: 'server_vad',
+    threshold: 0.45,
+    prefix_padding_ms: 250,
+    silence_duration_ms: 450,
     create_response: createResponse,
     interrupt_response: true
   };
