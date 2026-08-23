@@ -203,7 +203,6 @@ export class OpenAiAgentVoiceSession {
     this.firstUtteranceTranscript = '';
     this.guardedFirstAudio.splice(0);
     this.cancelActiveResponse();
-    this.sendJson({ type: 'output_audio_buffer.clear' });
     this.startCall();
     this.publishStartupDiagnostics();
   }
@@ -398,11 +397,29 @@ function normalizeTranscript(text: string): string {
 function isAllowedFirstUtterancePrefix(actual: string, expected: string): boolean {
   const normalizedActual = normalizeTranscript(actual).toLowerCase();
   const normalizedExpected = normalizeTranscript(expected).toLowerCase();
-  return normalizedExpected.startsWith(normalizedActual) || normalizedActual.startsWith(normalizedExpected);
+  const compactActual = compactTranscript(actual);
+  const compactExpected = compactTranscript(expected);
+  return (
+    normalizedExpected.startsWith(normalizedActual) ||
+    normalizedActual.startsWith(normalizedExpected) ||
+    compactExpected.startsWith(compactActual) ||
+    compactActual.startsWith(compactExpected)
+  );
 }
 
 function isCompleteFirstUtterance(actual: string, expected: string): boolean {
-  return normalizeTranscript(actual).toLowerCase().startsWith(normalizeTranscript(expected).toLowerCase());
+  return (
+    normalizeTranscript(actual).toLowerCase().startsWith(normalizeTranscript(expected).toLowerCase()) ||
+    compactTranscript(actual).startsWith(compactTranscript(expected))
+  );
+}
+
+function compactTranscript(text: string): string {
+  return normalizeTranscript(text)
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/g, '');
 }
 
 function isNoActiveResponseCancelError(message: string | undefined): boolean {

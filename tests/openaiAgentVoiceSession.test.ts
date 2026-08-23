@@ -30,6 +30,7 @@ function makeLiveSession() {
   const session = new OpenAiAgentVoiceSession({
     config,
     instructions: 'Mission instructions',
+    firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
     voice: 'marin',
     onAudioDelta: () => undefined,
     onRemoteTranscriptDelta: () => undefined,
@@ -41,6 +42,8 @@ function makeLiveSession() {
     ws: { readyState: number; send: (payload: string) => void };
     statusValue: string;
     responseActive: boolean;
+    firstUtteranceArmed: boolean;
+    firstUtteranceTranscript: string;
     handleMessage: (message: string) => void;
   };
   mutable.ws = {
@@ -132,5 +135,49 @@ describe('OpenAI agent voice session startup gate', () => {
     });
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Mission instructions');
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Do not repeat it');
+  });
+
+  it('does not restart the first utterance when Spanish transcript chunks split inside a word', () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const session = new OpenAiAgentVoiceSession({
+      config,
+      instructions: 'Mission instructions',
+      firstUtterance: 'Hola, solo para que sepa: soy una persona real, pero estoy usando un traductor de IA.',
+      voice: 'cedar',
+      onAudioDelta: () => undefined,
+      onRemoteTranscriptDelta: () => undefined,
+      onAgentTranscriptDelta: () => undefined,
+      onStatus: () => undefined,
+      onError: () => undefined
+    });
+    const mutable = session as unknown as {
+      ws: { readyState: number; send: (payload: string) => void };
+      statusValue: string;
+      firstUtteranceArmed: boolean;
+      handleMessage: (message: string) => void;
+    };
+    mutable.ws = {
+      readyState: 1,
+      send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
+    };
+    mutable.statusValue = 'live';
+    mutable.firstUtteranceArmed = true;
+
+    for (const delta of ['Hola', ', solo para que se', 'pa: soy una persona real, pero estoy usando un traductor de IA.']) {
+      mutable.handleMessage(JSON.stringify({ type: 'response.output_audio_transcript.delta', delta }));
+    }
+
+    expect(sent).toEqual([]);
+  });
+
+  it('does not send unsupported output buffer clear events during first-utterance correction', () => {
+    const { mutable, sent } = makeLiveSession();
+    mutable.responseActive = true;
+    mutable.firstUtteranceArmed = true;
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio_transcript.delta', delta: 'Wrong opener' }));
+
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'response.create']);
+    expect(sent.some((payload) => payload.type === 'output_audio_buffer.clear')).toBe(false);
   });
 });
