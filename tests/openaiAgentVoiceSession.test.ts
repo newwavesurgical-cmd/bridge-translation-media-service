@@ -101,4 +101,36 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(errors).toEqual([]);
     expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
   });
+
+  it('reenables VAD with a complete session update and continues into the mission after the first utterance', () => {
+    const { mutable, sent } = makeLiveSession();
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toMatchObject({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        audio: {
+          input: {
+            turn_detection: {
+              type: 'semantic_vad',
+              create_response: true
+            }
+          }
+        }
+      }
+    });
+    expect(sent[1]).toMatchObject({
+      type: 'response.create',
+      response: {
+        output_modalities: ['audio']
+      }
+    });
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Mission instructions');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Do not repeat it');
+  });
 });

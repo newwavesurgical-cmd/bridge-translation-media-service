@@ -31,6 +31,7 @@ export class OpenAiAgentVoiceSession {
   private statusValue: AgentVoiceSessionStatus = 'idle';
   private readonly queuedAudio: string[] = [];
   private readonly guardedFirstAudio: string[] = [];
+  private readonly instructions: string;
   private readonly firstUtterance: string;
   private hasStartedCall = false;
   private sessionUpdateAcked = false;
@@ -43,6 +44,7 @@ export class OpenAiAgentVoiceSession {
   private pendingIntervention?: { text: string; semanticControl?: string };
 
   constructor(private readonly options: AgentVoiceSessionOptions) {
+    this.instructions = options.instructions;
     this.firstUtterance = normalizeFirstUtterance(options.firstUtterance ?? extractFirstUtterance(options.instructions));
   }
 
@@ -266,6 +268,7 @@ export class OpenAiAgentVoiceSession {
         this.sendJson({
           type: 'session.update',
           session: {
+            type: 'realtime',
             audio: {
               input: {
                 turn_detection: realtimeTurnDetectionConfig(true)
@@ -277,6 +280,7 @@ export class OpenAiAgentVoiceSession {
           this.appendPcmuBase64(audio);
         }
         this.publishStartupDiagnostics();
+        this.startMissionOpening();
         return;
       }
       this.flushPendingIntervention();
@@ -307,6 +311,24 @@ export class OpenAiAgentVoiceSession {
       this.responseActive = true;
     }
     this.ws.send(JSON.stringify(payload));
+  }
+
+  private startMissionOpening(): void {
+    this.sendJson({
+      type: 'response.create',
+      response: {
+        output_modalities: ['audio'],
+        instructions: [
+          'The literal disclosure has already been spoken. Do not repeat it.',
+          'Continue the outbound phone call now using the mission and standing instructions below.',
+          'Greet naturally if needed, state the specific reason for the call, and ask the first mission-specific question.',
+          'Do not say a generic placeholder like "quick matter" if the mission contains a real purpose.',
+          'Say only words intended for the remote callee.',
+          '',
+          this.instructions
+        ].join('\n')
+      }
+    });
   }
 
   private cancelActiveResponse(): void {
