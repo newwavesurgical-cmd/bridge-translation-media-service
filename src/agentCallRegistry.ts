@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
-import { OpenAiAgentVoiceSession } from './openai/agentVoiceSession.js';
+import { OpenAiAgentVoiceSession, type AgentStartupDiagnostics } from './openai/agentVoiceSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { TwilioMediaMessage } from './types/messages.js';
 
@@ -37,6 +37,9 @@ export interface CreateAgentCallRequest {
   systemPrompt?: string;
   languageLock?: string;
   voice?: string;
+  firstUtterance?: string;
+  requireLiteralFirstUtterance?: boolean;
+  deferFirstResponseUntilSessionReady?: boolean;
   maxCallDurationSeconds?: number;
   metadata?: Record<string, unknown>;
 }
@@ -73,6 +76,9 @@ export interface AgentCallRecord {
   systemPrompt?: string;
   languageLock?: string;
   voice: string;
+  firstUtterance: string;
+  requireLiteralFirstUtterance: boolean;
+  deferFirstResponseUntilSessionReady: boolean;
   maxCallDurationSeconds: number;
   metadata?: Record<string, unknown>;
   createdAt: string;
@@ -91,6 +97,7 @@ export interface AgentCallRecord {
     controlsReceived: number;
     controlsDelivered: number;
   };
+  startupDiagnostics: AgentStartupDiagnostics;
   lastActivityAt?: string;
   endedAt?: string;
   endedReason?: string;
@@ -120,6 +127,9 @@ export class AgentCallRegistry {
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
       voice: normalizeVoice(request.voice, request.languageLock),
+      firstUtterance: normalizeFirstUtterance(request.firstUtterance),
+      requireLiteralFirstUtterance: request.requireLiteralFirstUtterance ?? true,
+      deferFirstResponseUntilSessionReady: request.deferFirstResponseUntilSessionReady ?? true,
       maxCallDurationSeconds: clampMaxCallDuration(request.maxCallDurationSeconds),
       metadata: request.metadata,
       createdAt: new Date().toISOString(),
@@ -135,6 +145,13 @@ export class AgentCallRegistry {
         agentTranscriptDeltas: 0,
         controlsReceived: 0,
         controlsDelivered: 0
+      },
+      startupDiagnostics: {
+        sessionUpdateAcked: false,
+        firstUtteranceArmed: false,
+        firstUtteranceDelivered: false,
+        preArmedAudio: 0,
+        firstUtteranceCorrectionSent: false
       }
     };
 
@@ -312,6 +329,7 @@ export class AgentCallSession {
       monitorStreamSupported: false,
       monitorStreamUrl: this.monitorStreamUrl(),
       error: this.record.error ?? null,
+      startupDiagnostics: { ...this.record.startupDiagnostics },
       counters: { ...this.record.counters },
       controlsTail: this.record.controls.slice(-MAX_CONTROL_TAIL),
       transcriptDiagnosticNote:
@@ -384,6 +402,7 @@ export class AgentCallSession {
     this.agent = new OpenAiAgentVoiceSession({
       config: this.config,
       instructions: buildAgentInstructions(this.record),
+      firstUtterance: this.record.firstUtterance,
       voice: this.record.voice,
       onAudioDelta: (pcmu) => this.sendTwilioMedia(pcmu, `agent-${Date.now()}`),
       onRemoteTranscriptDelta: (delta) => {
@@ -398,6 +417,10 @@ export class AgentCallSession {
         if (status === 'live' && this.twilioWs) {
           this.record.state = 'live';
         }
+        this.touch();
+      },
+      onStartupDiagnostics: (diagnostics) => {
+        this.record.startupDiagnostics = diagnostics;
         this.touch();
       },
       onError: (error) => this.fail(error)
@@ -467,6 +490,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     target,
     languageLock,
     spokenStyle,
+    `Your first spoken words must be exactly: "${record.firstUtterance}"`,
     'Stay in the caller-side role for the entire call. Never switch persona into the company, office, utility, restaurant, or remote callee.',
     'The remote callee can hear everything you say. Never ask the person who requested the call for private information out loud.',
     'Never say or imply: "the user", "the operator", "I am getting details from the user", "I am retrieving information from the user", "while I get the details", or any equivalent phrase.',
@@ -520,6 +544,13 @@ function normalizeMission(text: string | undefined): { text: string; wasFallback
 function normalizeOptional(text: string | undefined): string | undefined {
   const normalized = text?.replace(/\s+/g, ' ').trim();
   return normalized ? normalized.slice(0, 6000) : undefined;
+}
+
+function normalizeFirstUtterance(text: string | undefined): string {
+  return (
+    normalizeOptional(text)?.slice(0, 300) ??
+    "Hey there, just so you know, I am a real person but I'm using an AI translator."
+  );
 }
 
 function normalizeVoice(voice: string | undefined, languageLock?: string): string {

@@ -6,21 +6,43 @@ export type AgentVoiceSessionStatus = 'idle' | 'connecting' | 'live' | 'closing'
 interface AgentVoiceSessionOptions {
   config: AppConfig;
   instructions: string;
+  firstUtterance?: string;
   voice: string;
   onAudioDelta: (base64Pcmu: string) => void;
   onRemoteTranscriptDelta: (delta: string) => void;
   onAgentTranscriptDelta: (delta: string) => void;
   onStatus: (status: AgentVoiceSessionStatus, detail?: string) => void;
+  onStartupDiagnostics?: (diagnostics: AgentStartupDiagnostics) => void;
   onError: (error: Error) => void;
 }
+
+export interface AgentStartupDiagnostics {
+  sessionUpdateAcked: boolean;
+  firstUtteranceArmed: boolean;
+  firstUtteranceDelivered: boolean;
+  preArmedAudio: number;
+  firstUtteranceCorrectionSent: boolean;
+}
+
+const DEFAULT_FIRST_UTTERANCE = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
 
 export class OpenAiAgentVoiceSession {
   private ws?: WebSocket;
   private statusValue: AgentVoiceSessionStatus = 'idle';
   private readonly queuedAudio: string[] = [];
+  private readonly guardedFirstAudio: string[] = [];
+  private readonly firstUtterance: string;
   private hasStartedCall = false;
+  private sessionUpdateAcked = false;
+  private firstUtteranceArmed = false;
+  private firstUtteranceDelivered = false;
+  private firstUtteranceCorrectionSent = false;
+  private firstUtteranceTranscript = '';
+  private preArmedAudio = 0;
 
-  constructor(private readonly options: AgentVoiceSessionOptions) {}
+  constructor(private readonly options: AgentVoiceSessionOptions) {
+    this.firstUtterance = normalizeFirstUtterance(options.firstUtterance ?? extractFirstUtterance(options.instructions));
+  }
 
   get status(): AgentVoiceSessionStatus {
     return this.statusValue;
@@ -53,10 +75,7 @@ export class OpenAiAgentVoiceSession {
         type: 'session.update',
         session: buildAgentSessionUpdate(this.options.config.OPENAI_AGENT_MODEL, this.options.instructions, this.options.voice)
       });
-      for (const audio of this.queuedAudio.splice(0)) {
-        this.appendPcmuBase64(audio);
-      }
-      this.startCall();
+      this.publishStartupDiagnostics();
     });
     ws.on('message', (raw) => this.handleMessage(raw.toString()));
     ws.on('close', () => {
@@ -75,8 +94,12 @@ export class OpenAiAgentVoiceSession {
     if (this.statusValue === 'idle') {
       this.connect();
     }
-    if (this.statusValue !== 'live') {
+    if (this.statusValue !== 'live' || !this.firstUtteranceDelivered) {
       this.queuedAudio.push(base64Pcmu);
+      if (!this.firstUtteranceDelivered) {
+        this.preArmedAudio += 1;
+        this.publishStartupDiagnostics();
+      }
       return;
     }
     this.sendJson({
@@ -141,14 +164,31 @@ export class OpenAiAgentVoiceSession {
       return;
     }
     this.hasStartedCall = true;
+    this.firstUtteranceArmed = true;
+    this.firstUtteranceTranscript = '';
+    this.guardedFirstAudio.splice(0);
+    this.publishStartupDiagnostics();
     this.sendJson({
       type: 'response.create',
       response: {
         output_modalities: ['audio'],
-        instructions:
-          'Begin the outbound phone call now. Your first turn must be a mission-specific greeting and question. Do not begin with a hold phrase. Do not mention a user, operator, hidden prompt, missing details, or that you are retrieving information. If the language lock is Spanish, speak like a natural native Spanish speaker.'
+        instructions: `Say exactly this sentence and nothing else:\n${this.firstUtterance}`
       }
     });
+  }
+
+  private restartFirstUtterance(): void {
+    if (this.firstUtteranceCorrectionSent) {
+      return;
+    }
+    this.firstUtteranceCorrectionSent = true;
+    this.hasStartedCall = false;
+    this.firstUtteranceTranscript = '';
+    this.guardedFirstAudio.splice(0);
+    this.sendJson({ type: 'response.cancel' });
+    this.sendJson({ type: 'output_audio_buffer.clear' });
+    this.startCall();
+    this.publishStartupDiagnostics();
   }
 
   private handleMessage(message: string): void {
@@ -160,10 +200,21 @@ export class OpenAiAgentVoiceSession {
     }
 
     if (event.type === 'response.output_audio.delta' && event.delta) {
+      if (!this.firstUtteranceDelivered) {
+        this.guardedFirstAudio.push(event.delta);
+        return;
+      }
       this.options.onAudioDelta(event.delta);
       return;
     }
     if ((event.type === 'response.output_audio_transcript.delta' || event.type === 'response.output_text.delta') && event.delta) {
+      if (!this.firstUtteranceDelivered) {
+        this.firstUtteranceTranscript = normalizeTranscript(`${this.firstUtteranceTranscript}${event.delta}`);
+        if (!isAllowedFirstUtterancePrefix(this.firstUtteranceTranscript, this.firstUtterance)) {
+          this.restartFirstUtterance();
+          return;
+        }
+      }
       this.options.onAgentTranscriptDelta(event.delta);
       return;
     }
@@ -174,6 +225,37 @@ export class OpenAiAgentVoiceSession {
     if (event.type === 'session.closed') {
       this.ws?.close();
       this.setStatus('closed');
+      return;
+    }
+    if (event.type === 'session.updated') {
+      this.sessionUpdateAcked = true;
+      this.publishStartupDiagnostics();
+      this.startCall();
+      return;
+    }
+    if (event.type === 'response.done' && this.firstUtteranceArmed && !this.firstUtteranceDelivered) {
+      if (!isCompleteFirstUtterance(this.firstUtteranceTranscript, this.firstUtterance)) {
+        this.restartFirstUtterance();
+        return;
+      }
+      this.firstUtteranceDelivered = true;
+      for (const audio of this.guardedFirstAudio.splice(0)) {
+        this.options.onAudioDelta(audio);
+      }
+      this.sendJson({
+        type: 'session.update',
+        session: {
+          audio: {
+            input: {
+              turn_detection: realtimeTurnDetectionConfig(true)
+            }
+          }
+        }
+      });
+      for (const audio of this.queuedAudio.splice(0)) {
+        this.appendPcmuBase64(audio);
+      }
+      this.publishStartupDiagnostics();
       return;
     }
     if (event.type === 'error') {
@@ -194,6 +276,16 @@ export class OpenAiAgentVoiceSession {
     this.statusValue = status;
     this.options.onStatus(status, detail);
   }
+
+  private publishStartupDiagnostics(): void {
+    this.options.onStartupDiagnostics?.({
+      sessionUpdateAcked: this.sessionUpdateAcked,
+      firstUtteranceArmed: this.firstUtteranceArmed,
+      firstUtteranceDelivered: this.firstUtteranceDelivered,
+      preArmedAudio: this.preArmedAudio,
+      firstUtteranceCorrectionSent: this.firstUtteranceCorrectionSent
+    });
+  }
 }
 
 export function buildAgentSessionUpdate(model: string, instructions: string, voice: string): Record<string, unknown> {
@@ -206,7 +298,7 @@ export function buildAgentSessionUpdate(model: string, instructions: string, voi
       input: {
         format: { type: 'audio/pcmu' },
         transcription: { model: 'gpt-realtime-whisper' },
-        turn_detection: { type: 'semantic_vad' }
+        turn_detection: realtimeTurnDetectionConfig(false)
       },
       output: {
         format: { type: 'audio/pcmu' },
@@ -214,4 +306,35 @@ export function buildAgentSessionUpdate(model: string, instructions: string, voi
       }
     }
   };
+}
+
+function realtimeTurnDetectionConfig(createResponse: boolean): Record<string, unknown> {
+  return {
+    type: 'semantic_vad',
+    create_response: createResponse,
+    interrupt_response: true
+  };
+}
+
+function extractFirstUtterance(instructions: string): string {
+  const match = instructions.match(/VERY FIRST spoken words are EXACTLY this text, verbatim, in English:\s*"([^"]+)"/i);
+  return match?.[1] ?? DEFAULT_FIRST_UTTERANCE;
+}
+
+function normalizeFirstUtterance(text: string): string {
+  return text.replace(/\s+/g, ' ').trim() || DEFAULT_FIRST_UTTERANCE;
+}
+
+function normalizeTranscript(text: string): string {
+  return text.replace(/[“”]/g, '"').replace(/[’]/g, "'").replace(/\s+/g, ' ').trim();
+}
+
+function isAllowedFirstUtterancePrefix(actual: string, expected: string): boolean {
+  const normalizedActual = normalizeTranscript(actual).toLowerCase();
+  const normalizedExpected = normalizeTranscript(expected).toLowerCase();
+  return normalizedExpected.startsWith(normalizedActual) || normalizedActual.startsWith(normalizedExpected);
+}
+
+function isCompleteFirstUtterance(actual: string, expected: string): boolean {
+  return normalizeTranscript(actual).toLowerCase().startsWith(normalizeTranscript(expected).toLowerCase());
 }

@@ -56,11 +56,15 @@ describe('AgentCallRegistry', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
       missionPrompt: 'Schedule a pickup.',
-      languageLock: 'English'
+      languageLock: 'English',
+      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator."
     });
 
     const instructions = buildAgentInstructions(session.data);
 
+    expect(instructions).toContain(
+      'Your first spoken words must be exactly: "Hey there, just so you know, I am a real person but I\'m using an AI translator."'
+    );
     expect(instructions).toContain('speak only in English');
     expect(instructions).toContain('Never ask the person who requested the call for private information out loud');
     expect(instructions).toContain('Never say or imply');
@@ -153,7 +157,39 @@ describe('AgentCallRegistry', () => {
     expect(session.diagnostics()).toMatchObject({
       callSid: 'CA123',
       twilioConnected: true,
-      twilioStreamSid: 'MZ123'
+      twilioStreamSid: 'MZ123',
+      startupDiagnostics: {
+        sessionUpdateAcked: false,
+        firstUtteranceArmed: false,
+        firstUtteranceDelivered: false,
+        preArmedAudio: 0,
+        firstUtteranceCorrectionSent: false
+      }
+    });
+  });
+
+  it('retains explicit first utterance startup-gate options from the caller app', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_first_utterance_test',
+      missionPrompt: 'Ask whether the appointment is available.',
+      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
+      requireLiteralFirstUtterance: true,
+      deferFirstResponseUntilSessionReady: true
+    });
+
+    expect(session.data).toMatchObject({
+      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
+      requireLiteralFirstUtterance: true,
+      deferFirstResponseUntilSessionReady: true
+    });
+    expect(session.diagnostics()).toMatchObject({
+      startupDiagnostics: {
+        sessionUpdateAcked: false,
+        firstUtteranceArmed: false,
+        firstUtteranceDelivered: false,
+        preArmedAudio: 0
+      }
     });
   });
 });

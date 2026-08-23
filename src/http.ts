@@ -75,6 +75,9 @@ const createAgentCallSchema = z
     callGoal: z.string().max(2000).optional(),
     languageLock: z.string().max(80).optional(),
     voice: z.string().max(40).optional(),
+    firstUtterance: z.string().max(300).optional(),
+    requireLiteralFirstUtterance: z.boolean().optional(),
+    deferFirstResponseUntilSessionReady: z.boolean().optional(),
     maxCallDurationSeconds: z.coerce.number().int().positive().optional(),
     metadata: z.record(z.unknown()).optional()
   })
@@ -101,6 +104,9 @@ const createAgentCallSchema = z
     systemPrompt: firstText(body.systemPrompt, body.systemInstructions),
     languageLock: body.languageLock,
     voice: body.voice,
+    firstUtterance: body.firstUtterance,
+    requireLiteralFirstUtterance: body.requireLiteralFirstUtterance,
+    deferFirstResponseUntilSessionReady: body.deferFirstResponseUntilSessionReady,
     maxCallDurationSeconds: body.maxCallDurationSeconds,
     metadata: body.metadata
   }))
