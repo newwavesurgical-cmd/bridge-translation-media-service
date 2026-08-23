@@ -79,12 +79,21 @@ describe('OpenAI agent voice session startup gate', () => {
     });
   });
 
-  it('does not cancel before an idle operator intervention', () => {
-    const { session, sent } = makeLiveSession();
+  it('probes cancellation before an operator intervention to avoid active-response races', () => {
+    const { session, mutable, sent } = makeLiveSession();
 
     session.injectInstruction('chapel hill');
 
-    expect(sent.map((payload) => payload.type)).toEqual(['conversation.item.create', 'response.create']);
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel']);
+
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: { message: 'Cancellation failed: no active response found' }
+      })
+    );
+
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
   });
 
   it('keeps the session alive when a stale cancel reports no active response', () => {
@@ -103,6 +112,23 @@ describe('OpenAI agent voice session startup gate', () => {
 
     expect(errors).toEqual([]);
     expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
+  });
+
+  it('keeps the session alive and retries cancellation when a response create races an active response', () => {
+    const { mutable, sent, errors } = makeLiveSession();
+
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: {
+          message:
+            'Conversation already has an active response in progress: resp_test. Wait until the response is finished before creating a new one.'
+        }
+      })
+    );
+
+    expect(errors).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel']);
   });
 
   it('reenables VAD with a complete session update and continues into the mission after the first utterance', () => {

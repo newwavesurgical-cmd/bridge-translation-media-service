@@ -125,11 +125,7 @@ export class OpenAiAgentVoiceSession {
     }
 
     this.pendingIntervention = { text: normalized, semanticControl };
-    if (this.responseActive) {
-      this.cancelActiveResponse();
-      return;
-    }
-    this.flushPendingIntervention();
+    this.cancelActiveResponse();
   }
 
   private flushPendingIntervention(): void {
@@ -296,6 +292,11 @@ export class OpenAiAgentVoiceSession {
         this.flushPendingIntervention();
         return;
       }
+      if (isActiveResponseInProgressError(event.error?.message)) {
+        this.responseActive = true;
+        this.cancelActiveResponse();
+        return;
+      }
       const error = new Error(event.error?.message ?? 'OpenAI realtime agent error');
       this.setStatus('error', error.message);
       this.options.onError(error);
@@ -331,9 +332,6 @@ export class OpenAiAgentVoiceSession {
   }
 
   private cancelActiveResponse(): void {
-    if (!this.responseActive) {
-      return;
-    }
     this.sendJson({ type: 'response.cancel' });
   }
 
@@ -424,6 +422,10 @@ function compactTranscript(text: string): string {
 
 function isNoActiveResponseCancelError(message: string | undefined): boolean {
   return (message ?? '').toLowerCase().includes('cancellation failed: no active response found');
+}
+
+function isActiveResponseInProgressError(message: string | undefined): boolean {
+  return (message ?? '').toLowerCase().includes('active response in progress');
 }
 
 function isResponseCreate(payload: unknown): payload is { type: 'response.create' } {

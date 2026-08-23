@@ -72,6 +72,37 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Never switch persona');
   });
 
+  it('ignores duplicate first-utterance enforcement controls from the caller app', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask whether the car is still available.',
+      languageLock: 'English'
+    });
+
+    const control = session.receiveControl({
+      text:
+        'FIRST UTTERANCE CONTRACT ENFORCEMENT. Your previous response was off-script; say the exact first words again.'
+    });
+
+    expect(control).toMatchObject({
+      delivered: false,
+      text: 'Ignored duplicate first-utterance contract enforcement; startup is enforced by the media bridge.'
+    });
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        controlsReceived: 1,
+        controlsDelivered: 0
+      },
+      controlsTail: [
+        {
+          delivered: false,
+          text: 'Ignored duplicate first-utterance contract enforcement; startup is enforced by the media bridge.'
+        }
+      ],
+      transcriptTail: []
+    });
+  });
+
   it('adds native Spanish style and constrained hold phrases for Spanish agent calls', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

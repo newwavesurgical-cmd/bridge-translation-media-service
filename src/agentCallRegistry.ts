@@ -268,6 +268,13 @@ export class AgentCallSession {
     this.record.controls.push(entry);
     this.record.controls.splice(0, Math.max(0, this.record.controls.length - MAX_CONTROL_TAIL));
     this.record.counters.controlsReceived += 1;
+
+    if (isFirstUtteranceContractEnforcement(text)) {
+      entry.text = 'Ignored duplicate first-utterance contract enforcement; startup is enforced by the media bridge.';
+      this.touch();
+      return entry;
+    }
+
     this.emitTranscript('operator', text);
 
     if (request.control === 'end_politely') {
@@ -470,6 +477,10 @@ export class AgentCallSession {
     this.record.updatedAt = now;
     this.record.lastActivityAt = now;
   }
+}
+
+function isFirstUtteranceContractEnforcement(text: string): boolean {
+  return text.trim().toUpperCase().startsWith('FIRST UTTERANCE CONTRACT ENFORCEMENT');
 }
 
 export function buildAgentInstructions(record: AgentCallRecord): string {
