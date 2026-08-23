@@ -39,6 +39,8 @@ export class OpenAiAgentVoiceSession {
   private firstUtteranceCorrectionSent = false;
   private firstUtteranceTranscript = '';
   private preArmedAudio = 0;
+  private responseActive = false;
+  private pendingIntervention?: { text: string; semanticControl?: string };
 
   constructor(private readonly options: AgentVoiceSessionOptions) {
     this.firstUtterance = normalizeFirstUtterance(options.firstUtterance ?? extractFirstUtterance(options.instructions));
@@ -120,10 +122,23 @@ export class OpenAiAgentVoiceSession {
       return;
     }
 
-    this.sendJson({ type: 'response.cancel' });
+    this.pendingIntervention = { text: normalized, semanticControl };
+    if (this.responseActive) {
+      this.cancelActiveResponse();
+      return;
+    }
+    this.flushPendingIntervention();
+  }
+
+  private flushPendingIntervention(): void {
+    if (!this.pendingIntervention || this.statusValue !== 'live') {
+      return;
+    }
+    const { text, semanticControl } = this.pendingIntervention;
+    this.pendingIntervention = undefined;
     const interventionText = semanticControl
-      ? `Operator contextual micro-intervention: ${semanticControl}. ${normalized}`
-      : `Operator intervention: ${normalized}`;
+      ? `Operator contextual micro-intervention: ${semanticControl}. ${text}`
+      : `Operator intervention: ${text}`;
     this.sendJson({
       type: 'conversation.item.create',
       item: {
@@ -151,7 +166,7 @@ export class OpenAiAgentVoiceSession {
       return;
     }
     this.setStatus('closing');
-    this.sendJson({ type: 'response.cancel' });
+    this.cancelActiveResponse();
     setTimeout(() => {
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
         this.ws.close();
@@ -185,7 +200,7 @@ export class OpenAiAgentVoiceSession {
     this.hasStartedCall = false;
     this.firstUtteranceTranscript = '';
     this.guardedFirstAudio.splice(0);
-    this.sendJson({ type: 'response.cancel' });
+    this.cancelActiveResponse();
     this.sendJson({ type: 'output_audio_buffer.clear' });
     this.startCall();
     this.publishStartupDiagnostics();
@@ -199,6 +214,10 @@ export class OpenAiAgentVoiceSession {
       return;
     }
 
+    if (event.type === 'response.created') {
+      this.responseActive = true;
+      return;
+    }
     if (event.type === 'response.output_audio.delta' && event.delta) {
       if (!this.firstUtteranceDelivered) {
         this.guardedFirstAudio.push(event.delta);
@@ -233,32 +252,47 @@ export class OpenAiAgentVoiceSession {
       this.startCall();
       return;
     }
-    if (event.type === 'response.done' && this.firstUtteranceArmed && !this.firstUtteranceDelivered) {
-      if (!isCompleteFirstUtterance(this.firstUtteranceTranscript, this.firstUtterance)) {
-        this.restartFirstUtterance();
-        return;
-      }
-      this.firstUtteranceDelivered = true;
-      for (const audio of this.guardedFirstAudio.splice(0)) {
-        this.options.onAudioDelta(audio);
-      }
-      this.sendJson({
-        type: 'session.update',
-        session: {
-          audio: {
-            input: {
-              turn_detection: realtimeTurnDetectionConfig(true)
+    if (event.type === 'response.done') {
+      this.responseActive = false;
+      if (this.firstUtteranceArmed && !this.firstUtteranceDelivered) {
+        if (!isCompleteFirstUtterance(this.firstUtteranceTranscript, this.firstUtterance)) {
+          this.restartFirstUtterance();
+          return;
+        }
+        this.firstUtteranceDelivered = true;
+        for (const audio of this.guardedFirstAudio.splice(0)) {
+          this.options.onAudioDelta(audio);
+        }
+        this.sendJson({
+          type: 'session.update',
+          session: {
+            audio: {
+              input: {
+                turn_detection: realtimeTurnDetectionConfig(true)
+              }
             }
           }
+        });
+        for (const audio of this.queuedAudio.splice(0)) {
+          this.appendPcmuBase64(audio);
         }
-      });
-      for (const audio of this.queuedAudio.splice(0)) {
-        this.appendPcmuBase64(audio);
+        this.publishStartupDiagnostics();
+        return;
       }
-      this.publishStartupDiagnostics();
+      this.flushPendingIntervention();
+      return;
+    }
+    if (event.type === 'response.cancelled') {
+      this.responseActive = false;
+      this.flushPendingIntervention();
       return;
     }
     if (event.type === 'error') {
+      if (isNoActiveResponseCancelError(event.error?.message)) {
+        this.responseActive = false;
+        this.flushPendingIntervention();
+        return;
+      }
       const error = new Error(event.error?.message ?? 'OpenAI realtime agent error');
       this.setStatus('error', error.message);
       this.options.onError(error);
@@ -269,7 +303,17 @@ export class OpenAiAgentVoiceSession {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (isResponseCreate(payload)) {
+      this.responseActive = true;
+    }
     this.ws.send(JSON.stringify(payload));
+  }
+
+  private cancelActiveResponse(): void {
+    if (!this.responseActive) {
+      return;
+    }
+    this.sendJson({ type: 'response.cancel' });
   }
 
   private setStatus(status: AgentVoiceSessionStatus, detail?: string): void {
@@ -337,4 +381,12 @@ function isAllowedFirstUtterancePrefix(actual: string, expected: string): boolea
 
 function isCompleteFirstUtterance(actual: string, expected: string): boolean {
   return normalizeTranscript(actual).toLowerCase().startsWith(normalizeTranscript(expected).toLowerCase());
+}
+
+function isNoActiveResponseCancelError(message: string | undefined): boolean {
+  return (message ?? '').toLowerCase().includes('cancellation failed: no active response found');
+}
+
+function isResponseCreate(payload: unknown): payload is { type: 'response.create' } {
+  return typeof payload === 'object' && payload !== null && 'type' in payload && payload.type === 'response.create';
 }

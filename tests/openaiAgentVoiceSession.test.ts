@@ -1,5 +1,55 @@
 import { describe, expect, it } from 'vitest';
-import { buildAgentSessionUpdate } from '../src/openai/agentVoiceSession.js';
+import type { AppConfig } from '../src/config.js';
+import { OpenAiAgentVoiceSession, buildAgentSessionUpdate } from '../src/openai/agentVoiceSession.js';
+
+const config: AppConfig = {
+  PORT: 8787,
+  PUBLIC_BASE_URL: 'https://bridge-media.example.com',
+  TRANSLATION_MEDIA_PUBLIC_WSS_URL: 'wss://bridge-media.example.com/twilio/stream',
+  APP_STREAM_PUBLIC_WSS_URL: 'wss://bridge-media.example.com/app/stream',
+  OPENAI_API_KEY: 'test-openai-key',
+  OPENAI_TRANSLATION_MODEL: 'gpt-realtime-translate',
+  OPENAI_AGENT_MODEL: 'gpt-realtime-2.1',
+  OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
+  OPENAI_TTS_VOICE: 'cedar',
+  OPENAI_FILLER_TTS_VOICE: 'onyx',
+  OPENAI_FILLER_TTS_VOICE_MALE: 'onyx',
+  OPENAI_FILLER_TTS_VOICE_FEMALE: 'nova',
+  OPENAI_SAFETY_IDENTIFIER: 'test-user',
+  TWILIO_ACCOUNT_SID: 'AC123',
+  TWILIO_AUTH_TOKEN: 'auth',
+  TWILIO_PHONE_NUMBER: '+15551234567',
+  BRIDGE_MEDIA_SHARED_SECRET: 'test-secret-long-enough',
+  BRIDGE_MEDIA_API_KEY: 'test-service-api-key-long-enough',
+  DRY_RUN_CALLS: true
+};
+
+function makeLiveSession() {
+  const sent: Array<Record<string, unknown>> = [];
+  const errors: Error[] = [];
+  const session = new OpenAiAgentVoiceSession({
+    config,
+    instructions: 'Mission instructions',
+    voice: 'marin',
+    onAudioDelta: () => undefined,
+    onRemoteTranscriptDelta: () => undefined,
+    onAgentTranscriptDelta: () => undefined,
+    onStatus: () => undefined,
+    onError: (error) => errors.push(error)
+  });
+  const mutable = session as unknown as {
+    ws: { readyState: number; send: (payload: string) => void };
+    statusValue: string;
+    responseActive: boolean;
+    handleMessage: (message: string) => void;
+  };
+  mutable.ws = {
+    readyState: 1,
+    send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
+  };
+  mutable.statusValue = 'live';
+  return { session, mutable, sent, errors };
+}
 
 describe('OpenAI agent voice session startup gate', () => {
   it('disables VAD auto-response until the first utterance is explicitly delivered', () => {
@@ -24,5 +74,31 @@ describe('OpenAI agent voice session startup gate', () => {
         }
       }
     });
+  });
+
+  it('does not cancel before an idle operator intervention', () => {
+    const { session, sent } = makeLiveSession();
+
+    session.injectInstruction('chapel hill');
+
+    expect(sent.map((payload) => payload.type)).toEqual(['conversation.item.create', 'response.create']);
+  });
+
+  it('keeps the session alive when a stale cancel reports no active response', () => {
+    const { session, mutable, sent, errors } = makeLiveSession();
+    mutable.responseActive = true;
+
+    session.injectInstruction('yes', 'yes');
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel']);
+
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: { message: 'Cancellation failed: no active response found' }
+      })
+    );
+
+    expect(errors).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
   });
 });
