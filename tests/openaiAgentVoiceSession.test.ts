@@ -27,6 +27,7 @@ const config: AppConfig = {
 function makeLiveSession() {
   const sent: Array<Record<string, unknown>> = [];
   const errors: Error[] = [];
+  const startupDiagnostics: unknown[] = [];
   const session = new OpenAiAgentVoiceSession({
     config,
     instructions: 'Mission instructions',
@@ -35,6 +36,7 @@ function makeLiveSession() {
     onAudioDelta: () => undefined,
     onRemoteTranscriptDelta: () => undefined,
     onAgentTranscriptDelta: () => undefined,
+    onStartupDiagnostics: (diagnostics) => startupDiagnostics.push(diagnostics),
     onStatus: () => undefined,
     onError: (error) => errors.push(error)
   });
@@ -51,7 +53,7 @@ function makeLiveSession() {
     send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
   };
   mutable.statusValue = 'live';
-  return { session, mutable, sent, errors };
+  return { session, mutable, sent, errors, startupDiagnostics };
 }
 
 describe('OpenAI agent voice session startup gate', () => {
@@ -161,6 +163,29 @@ describe('OpenAI agent voice session startup gate', () => {
     });
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Mission instructions');
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Do not repeat it');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
+      'Ignore any repeated first-utterance, disclosure, or "same message" requirement'
+    );
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('ask exactly one mission-specific question');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Translate the purpose into the locked spoken language');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Do not list multiple wants');
+  });
+
+  it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {
+    const { session, mutable, sent, startupDiagnostics } = makeLiveSession();
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+
+    session.appendPcmuBase64('pre-first-audio-1');
+    session.appendPcmuBase64('pre-first-audio-2');
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create']);
+    expect(sent.some((payload) => payload.type === 'input_audio_buffer.append')).toBe(false);
+    expect(startupDiagnostics.at(-1)).toMatchObject({
+      preArmedAudio: 2,
+      firstUtteranceDelivered: true
+    });
   });
 
   it('does not restart the first utterance when Spanish transcript chunks split inside a word', () => {

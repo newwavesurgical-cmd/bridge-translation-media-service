@@ -98,12 +98,16 @@ export class OpenAiAgentVoiceSession {
     if (this.statusValue === 'idle') {
       this.connect();
     }
-    if (this.statusValue !== 'live' || !this.firstUtteranceDelivered) {
-      this.queuedAudio.push(base64Pcmu);
+    if (this.statusValue !== 'live') {
       if (!this.firstUtteranceDelivered) {
         this.preArmedAudio += 1;
         this.publishStartupDiagnostics();
       }
+      return;
+    }
+    if (!this.firstUtteranceDelivered) {
+      this.preArmedAudio += 1;
+      this.publishStartupDiagnostics();
       return;
     }
     this.sendJson({
@@ -271,9 +275,7 @@ export class OpenAiAgentVoiceSession {
             }
           }
         });
-        for (const audio of this.queuedAudio.splice(0)) {
-          this.appendPcmuBase64(audio);
-        }
+        this.queuedAudio.splice(0);
         this.publishStartupDiagnostics();
         this.startMissionOpening();
         return;
@@ -320,9 +322,12 @@ export class OpenAiAgentVoiceSession {
         output_modalities: ['audio'],
         instructions: [
           'The literal disclosure has already been spoken. Do not repeat it.',
-          'Continue the outbound phone call now using the mission and standing instructions below.',
-          'Greet naturally if needed, state the specific reason for the call, and ask the first mission-specific question.',
+          'Ignore any repeated first-utterance, disclosure, or "same message" requirement in the mission text below; that startup contract is already complete.',
+          'Continue the outbound phone call now using the mission and standing instructions below, but do not read or summarize the whole mission.',
+          'Say exactly one short conversational turn: state the specific reason for the call in the language lock, then ask exactly one mission-specific question.',
+          'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
           'Do not say a generic placeholder like "quick matter" if the mission contains a real purpose.',
+          'Do not list multiple wants, constraints, or background details. Save those for later only if the callee asks.',
           'Say only words intended for the remote callee.',
           '',
           this.instructions
