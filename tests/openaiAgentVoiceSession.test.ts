@@ -37,7 +37,7 @@ function makeLiveSession(instructions = 'Mission instructions') {
   const session = new OpenAiAgentVoiceSession({
     config,
     instructions,
-    firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
+    firstUtterance: "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.",
     voice: 'marin',
     onAudioDelta: (delta) => audioDeltas.push(delta),
     onRemoteTranscriptDelta: () => undefined,
@@ -195,7 +195,7 @@ describe('OpenAI agent voice session startup gate', () => {
   it('reenables VAD with a complete session update and continues into the mission after the first utterance', () => {
     const { mutable, sent } = makeLiveSession();
     mutable.firstUtteranceArmed = true;
-    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+    mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
@@ -252,7 +252,7 @@ describe('OpenAI agent voice session startup gate', () => {
     ].join('\n');
     const { mutable, sent } = makeLiveSession(rawInstructions);
     mutable.firstUtteranceArmed = true;
-    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+    mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
@@ -272,7 +272,7 @@ describe('OpenAI agent voice session startup gate', () => {
     ].join('\n');
     const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
     mutable.firstUtteranceArmed = true;
-    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+    mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
     mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
@@ -305,7 +305,7 @@ describe('OpenAI agent voice session startup gate', () => {
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {
     const { session, mutable, sent, startupDiagnostics } = makeLiveSession();
     mutable.firstUtteranceArmed = true;
-    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+    mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 
     session.appendPcmuBase64('pre-first-audio-1');
     session.appendPcmuBase64('pre-first-audio-2');

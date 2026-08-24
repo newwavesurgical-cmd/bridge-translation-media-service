@@ -26,6 +26,8 @@ export interface AgentStartupDiagnostics {
 
 const DEFAULT_FIRST_UTTERANCE =
   "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+const LEGACY_FIRST_UTTERANCE =
+  "Hey there, just so you know, I am a real person but I'm using an AI translator.";
 const POST_INTERVENTION_FOLLOWUP_MS = 3200;
 
 export class OpenAiAgentVoiceSession {
@@ -586,11 +588,19 @@ function realtimeTurnDetectionConfig(createResponse: boolean): Record<string, un
 
 function extractFirstUtterance(instructions: string): string {
   const match = instructions.match(/VERY FIRST spoken words are EXACTLY this text, verbatim, in English:\s*"([^"]+)"/i);
-  return match?.[1] ?? DEFAULT_FIRST_UTTERANCE;
+  return normalizeFirstUtterance(match?.[1] ?? DEFAULT_FIRST_UTTERANCE);
 }
 
 function normalizeFirstUtterance(text: string): string {
-  return text.replace(/\s+/g, ' ').trim() || DEFAULT_FIRST_UTTERANCE;
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (!normalized || isLegacyFirstUtterance(normalized)) {
+    return DEFAULT_FIRST_UTTERANCE;
+  }
+  return normalized;
+}
+
+function isLegacyFirstUtterance(text: string): boolean {
+  return compactTranscript(text) === compactTranscript(LEGACY_FIRST_UTTERANCE);
 }
 
 function normalizeTranscript(text: string): string {

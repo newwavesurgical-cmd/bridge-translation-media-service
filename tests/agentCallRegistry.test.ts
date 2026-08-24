@@ -69,13 +69,14 @@ describe('AgentCallRegistry', () => {
       to: '+15551230000',
       missionPrompt: 'Schedule a pickup.',
       languageLock: 'English',
-      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator."
+      firstUtterance:
+        "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling."
     });
 
     const instructions = buildAgentInstructions(session.data);
 
     expect(instructions).toContain(
-      'Your first spoken words must be exactly: "Hey there, just so you know, I am a real person but I\'m using an AI translator."'
+      'Your first spoken words must be exactly: "I\'m Not a telemarketer. I\'m using a translator app since my English is limited. I\'m calling."'
     );
     expect(instructions).toContain('speak only in English');
     expect(instructions).toContain('Never ask the person who requested the call for private information out loud');
@@ -86,6 +87,8 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('I am calling about');
     expect(instructions).toContain('Never open with vague agency phrasing');
     expect(instructions).toContain('Avoid repetition');
+    expect(instructions).toContain('treat it as leaked local assistant noise');
+    expect(instructions).toContain('llama ahora');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
     expect(instructions).not.toContain('You may say you are calling on behalf');
@@ -273,7 +276,7 @@ describe('AgentCallRegistry', () => {
     });
   });
 
-  it('retains explicit first utterance startup-gate options from the caller app', () => {
+  it('normalizes stale first utterance startup-gate text from the caller app', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
       clientSessionId: 'agent_first_utterance_test',
@@ -284,7 +287,7 @@ describe('AgentCallRegistry', () => {
     });
 
     expect(session.data).toMatchObject({
-      firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
+      firstUtterance: "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.",
       requireLiteralFirstUtterance: true,
       deferFirstResponseUntilSessionReady: true
     });
