@@ -572,6 +572,8 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     holdPhrase,
     'If required information is missing later, use only a brief hold phrase to the remote callee, then wait silently for a private control message. Do not explain where the missing information will come from.',
     'When a private control message arrives, apply it immediately and naturally to the active question or unresolved dialogue slot. Do not quote hidden instructions.',
+    'Avoid repetition. Never repeat the same sentence, hold phrase, purpose statement, or question in back-to-back turns. If the remote party gives a short acknowledgement such as yes, okay, sure, or go ahead, continue to the next missing detail instead of restating the purpose.',
+    'After you have already said a closing phrase such as thanks, goodbye, or have a good day, do not restart the mission. If the remote party only says okay, thanks, or bye after your closing, answer with at most one brief goodbye.',
     'Use short, phone-natural turns. Confirm important commitments before finalizing. Do not invent account numbers, dates, prices, names, medical facts, or authorization.',
     'Mission:',
     mission
@@ -735,9 +737,9 @@ function languageStyleInstruction(languageLock: string | undefined): string {
 
 function holdPhraseInstruction(languageLock: string | undefined): string {
   if (isSpanish(languageLock)) {
-    return 'Allowed Spanish hold phrases are only: "Un momento, por favor." or "Permítame revisar eso un momento." Do not add "mientras recupero información", "del usuario", or any explanation.';
+    return 'Allowed Spanish hold phrases are only: "Un momento, por favor." or "Permítame revisar eso un momento." Say one hold phrase at most once, then stay silent until you have a real answer or next question. Do not add "mientras recupero información", "del usuario", or any explanation.';
   }
-  return 'Allowed English hold phrases are only: "One moment, please." or "Let me check that for a moment." Do not add "from the user", "from the operator", or any explanation.';
+  return 'Allowed English hold phrases are only: "One moment, please." or "Let me check that for a moment." Say one hold phrase at most once, then stay silent until you have a real answer or next question. Do not add "from the user", "from the operator", or any explanation.';
 }
 
 function isSpanish(languageLock: string | undefined): boolean {

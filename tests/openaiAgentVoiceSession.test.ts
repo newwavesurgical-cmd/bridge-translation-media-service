@@ -144,6 +144,9 @@ describe('OpenAI agent voice session startup gate', () => {
       'response.create'
     ]);
     expect(String((sent.at(-1)?.response as { instructions?: string }).instructions)).toContain('Retake command');
+    expect(String((sent.at(-1)?.response as { instructions?: string }).instructions)).toContain(
+      'do not restate it now'
+    );
   });
 
   it('does not retake the call after an operator intervention when the callee responds first', () => {
@@ -220,6 +223,13 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('ask exactly one mission-specific question');
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Translate the purpose into the locked spoken language');
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Do not list multiple wants');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
+      'Do not ask whether you are speaking with the named contact before stating the concrete purpose'
+    );
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Never say a generic placeholder');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
+      'Do not repeat the purpose in a second sentence'
+    );
   });
 
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {

@@ -85,6 +85,8 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('get directly to the concrete purpose of the call');
     expect(instructions).toContain('I am calling about');
     expect(instructions).toContain('Never open with vague agency phrasing');
+    expect(instructions).toContain('Avoid repetition');
+    expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
     expect(instructions).not.toContain('You may say you are calling on behalf');
   });

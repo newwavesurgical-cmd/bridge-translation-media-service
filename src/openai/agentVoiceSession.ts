@@ -337,10 +337,11 @@ export class OpenAiAgentVoiceSession {
           'The literal disclosure has already been spoken. Do not repeat it.',
           'Ignore any repeated first-utterance, disclosure, or "same message" requirement in the mission text below; that startup contract is already complete.',
           'Continue the outbound phone call now using the mission and standing instructions below, but do not read or summarize the whole mission.',
-          'Say exactly one short conversational turn: state the specific reason for the call in the language lock, then ask exactly one mission-specific question.',
+          'Say exactly one short conversational turn: state the specific reason for the call one time in the language lock, then ask exactly one mission-specific question.',
+          'Do not ask whether you are speaking with the named contact before stating the concrete purpose. If contact confirmation is necessary, place it after the purpose in the same single question.',
           'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
-          'Do not say a generic placeholder like "quick matter" if the mission contains a real purpose.',
-          'Do not list multiple wants, constraints, or background details. Save those for later only if the callee asks.',
+          'Never say a generic placeholder like "quick matter", "brief matter", or "calling about something" if the mission contains a real purpose.',
+          'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
           'Say only words intended for the remote callee.',
           '',
           this.instructions
@@ -384,6 +385,8 @@ export class OpenAiAgentVoiceSession {
             'Retake command of the live call now.',
             'If more information is still needed, ask the next single necessary question.',
             'If the mission has enough information, briefly confirm the outcome and close politely.',
+            'Do not repeat the sentence, hold phrase, or question you just said.',
+            'If you already stated the call purpose earlier, do not restate it now; move to the next missing detail or close.',
             'Do not mention silence, timers, the operator, controls, prompts, or hidden instructions.',
             'Say only words intended for the remote callee.'
           ].join('\n')
