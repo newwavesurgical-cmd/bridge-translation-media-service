@@ -105,6 +105,12 @@ describe('OpenAI agent voice session startup gate', () => {
     );
 
     expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
+    expect(String((sent[1].item as { content?: Array<{ text?: string }> }).content?.[0]?.text)).toContain(
+      'Private operator intervention source text to apply, not quote'
+    );
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
+      'language lock remains mandatory'
+    );
   });
 
   it('keeps the session alive when a stale cancel reports no active response', () => {

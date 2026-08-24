@@ -138,6 +138,32 @@ describe('AgentCallRegistry', () => {
     });
   });
 
+  it('ignores identical operator controls that arrive twice in the debounce window', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-24T04:55:30.000Z'));
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask whether the car is still available.',
+      languageLock: 'English'
+    });
+
+    const first = session.receiveControl({ text: 'Pause briefly and continue naturally.' });
+    const duplicate = session.receiveControl({ text: 'Pause briefly and continue naturally.' });
+    vi.advanceTimersByTime(1501);
+    const later = session.receiveControl({ text: 'Pause briefly and continue naturally.' });
+
+    expect(first.text).toBe('Pause briefly and continue naturally.');
+    expect(duplicate.text).toBe('Ignored duplicate operator control: Pause briefly and continue naturally.');
+    expect(later.text).toBe('Pause briefly and continue naturally.');
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        controlsReceived: 3,
+        controlsDelivered: 0
+      },
+      transcriptDeltaRetainedCount: 2
+    });
+  });
+
   it('adds native Spanish style and constrained hold phrases for Spanish agent calls', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

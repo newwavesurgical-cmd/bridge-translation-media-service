@@ -16,6 +16,7 @@ const AGENT_ECHO_MAX_FRAMES = 400;
 const AGENT_ECHO_MIN_SAMPLES = 80;
 const AGENT_ECHO_MIN_RMS = 350;
 const AGENT_ECHO_CORRELATION = 0.88;
+const DUPLICATE_CONTROL_WINDOW_MS = 1500;
 
 export const contextualMicroInterventions = [
   'yes',
@@ -197,6 +198,7 @@ export class AgentCallSession {
   private timeout?: NodeJS.Timeout;
   private readonly recentAgentOutputFrames: Array<{ at: number; pcm: Int16Array }> = [];
   private lastAgentAudioAt = 0;
+  private lastControlSignature?: { value: string; at: number };
 
   constructor(
     private readonly config: AppConfig,
@@ -271,6 +273,7 @@ export class AgentCallSession {
 
   receiveControl(request: AgentControlRequest): AgentControlEntry {
     const text = controlInstruction(request);
+    const duplicate = this.isDuplicateControl(request.control, text);
     const entry: AgentControlEntry = {
       at: new Date().toISOString(),
       control: request.control,
@@ -280,6 +283,13 @@ export class AgentCallSession {
     this.record.controls.push(entry);
     this.record.controls.splice(0, Math.max(0, this.record.controls.length - MAX_CONTROL_TAIL));
     this.record.counters.controlsReceived += 1;
+
+    if (duplicate) {
+      entry.text = `Ignored duplicate operator control: ${text}`;
+      this.touch();
+      return entry;
+    }
+    this.lastControlSignature = { value: controlSignature(request.control, text), at: Date.now() };
 
     if (isFirstUtteranceContractEnforcement(text)) {
       entry.text = 'Ignored duplicate first-utterance contract enforcement; startup is enforced by the media bridge.';
@@ -306,6 +316,12 @@ export class AgentCallSession {
     }
     this.touch();
     return entry;
+  }
+
+  private isDuplicateControl(control: ContextualMicroIntervention | undefined, text: string): boolean {
+    const signature = controlSignature(control, text);
+    const last = this.lastControlSignature;
+    return Boolean(last && last.value === signature && Date.now() - last.at <= DUPLICATE_CONTROL_WINDOW_MS);
   }
 
   async end(reason = 'requested'): Promise<void> {
@@ -604,6 +620,10 @@ function controlInstruction(request: AgentControlRequest): string {
   };
 
   return freeText ? `${map[request.control]} Operator detail: ${freeText}` : map[request.control];
+}
+
+function controlSignature(control: ContextualMicroIntervention | undefined, text: string): string {
+  return `${control ?? 'free_text'}:${text.toLowerCase().replace(/\s+/g, ' ').trim()}`;
 }
 
 function normalizeMission(text: string | undefined): { text: string; wasFallback: boolean } {
