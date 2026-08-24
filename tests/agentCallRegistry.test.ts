@@ -156,6 +156,19 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Do not add "mientras recupero información"');
   });
 
+  it('uses a Spanish-safe voice when the caller app sends an English-biased voice for Spanish', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Llama para confirmar la cita.',
+      languageLock: 'es-ES',
+      voice: 'echo'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      voice: 'cedar'
+    });
+  });
+
   it('marks fallback missions in diagnostics instead of silently pretending a full brief exists', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

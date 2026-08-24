@@ -693,10 +693,14 @@ function normalizeFirstUtterance(text: string | undefined): string {
 function normalizeVoice(voice: string | undefined, languageLock?: string): string {
   const normalized = normalizeOptional(voice)?.toLowerCase();
   const allowed = new Set(['alloy', 'ash', 'ballad', 'coral', 'echo', 'sage', 'shimmer', 'verse', 'marin', 'cedar']);
+  if (isSpanish(languageLock)) {
+    const spanishSafeVoices = new Set(['cedar', 'marin']);
+    return normalized && spanishSafeVoices.has(normalized) ? normalized : 'cedar';
+  }
   if (normalized && allowed.has(normalized)) {
     return normalized;
   }
-  return isSpanish(languageLock) ? 'cedar' : 'marin';
+  return 'marin';
 }
 
 function clampMaxCallDuration(value: number | undefined): number {
