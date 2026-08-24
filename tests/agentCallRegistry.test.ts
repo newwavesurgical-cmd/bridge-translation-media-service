@@ -70,6 +70,27 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Never say or imply');
     expect(instructions).toContain('Do not begin the call with a hold phrase');
     expect(instructions).toContain('Never switch persona');
+    expect(instructions).toContain('get directly to the concrete purpose of the call');
+    expect(instructions).toContain('I am calling about');
+    expect(instructions).toContain('Never open with vague agency phrasing');
+    expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
+    expect(instructions).not.toContain('You may say you are calling on behalf');
+  });
+
+  it('does not invite customer/client framing even when caller identity is supplied', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask whether the car is still available.',
+      languageLock: 'English',
+      callerName: 'Alex'
+    });
+
+    const instructions = buildAgentInstructions(session.data);
+
+    expect(instructions).toContain('Caller identity: Alex');
+    expect(instructions).toContain('Use this only if the remote party asks who is calling');
+    expect(instructions).toContain('Never open with vague agency phrasing');
+    expect(instructions).not.toContain('calling on behalf of Alex');
   });
 
   it('ignores duplicate first-utterance enforcement controls from the caller app', () => {
