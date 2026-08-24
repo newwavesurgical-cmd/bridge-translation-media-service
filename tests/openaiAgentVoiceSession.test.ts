@@ -28,18 +28,20 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function makeLiveSession() {
+function makeLiveSession(instructions = 'Mission instructions') {
   const sent: Array<Record<string, unknown>> = [];
   const errors: Error[] = [];
   const startupDiagnostics: unknown[] = [];
+  const audioDeltas: string[] = [];
+  const agentTranscriptDeltas: string[] = [];
   const session = new OpenAiAgentVoiceSession({
     config,
-    instructions: 'Mission instructions',
+    instructions,
     firstUtterance: "Hey there, just so you know, I am a real person but I'm using an AI translator.",
     voice: 'marin',
-    onAudioDelta: () => undefined,
+    onAudioDelta: (delta) => audioDeltas.push(delta),
     onRemoteTranscriptDelta: () => undefined,
-    onAgentTranscriptDelta: () => undefined,
+    onAgentTranscriptDelta: (delta) => agentTranscriptDeltas.push(delta),
     onStartupDiagnostics: (diagnostics) => startupDiagnostics.push(diagnostics),
     onStatus: () => undefined,
     onError: (error) => errors.push(error)
@@ -57,7 +59,7 @@ function makeLiveSession() {
     send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
   };
   mutable.statusValue = 'live';
-  return { session, mutable, sent, errors, startupDiagnostics };
+  return { session, mutable, sent, errors, startupDiagnostics, audioDeltas, agentTranscriptDeltas };
 }
 
 describe('OpenAI agent voice session startup gate', () => {
@@ -230,6 +232,68 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
       'Do not repeat the purpose in a second sentence'
     );
+  });
+
+  it('does not pass raw startup scaffolding or Spanish source text into the mission opener prompt', () => {
+    const rawInstructions = [
+      'You are a live outbound phone-call voice agent.',
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Mission:',
+      'LANGUAGE LOCK: Speak only English unless the callee or operator asks.',
+      '=== OPERATOR LANGUAGE CONTEXT (HARD) === The operator speaks Spanish; address only the callee, in the locked language. === END OPERATOR LANGUAGE CONTEXT ===',
+      '=== FIRST UTTERANCE DISCLOSURE (HARD) === LITERAL FIRST UTTERANCE CONTRACT: your VERY FIRST spoken words are EXACTLY this text, verbatim, in English: "Hey there, just so you know, I am a real person but I am using an AI translator." PURPOSE-SECOND RULE: immediately after the exact text, in the SAME message, state the call purpose.',
+      'Objetivo: pedir una cita urgente con el doctor que operó a su hijo.'
+    ].join('\n');
+    const { mutable, sent } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    const instructions = String((sent[1].response as { instructions?: string }).instructions);
+    expect(instructions).toContain('Clean mission opening brief');
+    expect(instructions).toContain('translated into natural English');
+    expect(instructions).not.toContain('PURPOSE-SECOND RULE');
+    expect(instructions).not.toContain('LITERAL FIRST UTTERANCE CONTRACT');
+    expect(instructions).not.toContain('pedir una cita urgente');
+  });
+
+  it('buffers and retries an English mission opener that leaks Spanish source text', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Mission:',
+      'Objetivo: pedir una cita urgente con el doctor que operó a su hijo.'
+    ].join('\n');
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'I am calling about pedir una cita urgente con el doctor.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create', 'response.create']);
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain('previous draft opener');
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'good-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'I am calling to request an urgent appointment for your child.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['good-audio']);
+    expect(agentTranscriptDeltas).toEqual(['I am calling to request an urgent appointment for your child.']);
   });
 
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {

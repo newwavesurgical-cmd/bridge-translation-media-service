@@ -32,6 +32,8 @@ export class OpenAiAgentVoiceSession {
   private statusValue: AgentVoiceSessionStatus = 'idle';
   private readonly queuedAudio: string[] = [];
   private readonly guardedFirstAudio: string[] = [];
+  private readonly guardedMissionAudio: string[] = [];
+  private readonly guardedMissionTranscriptDeltas: string[] = [];
   private readonly instructions: string;
   private readonly firstUtterance: string;
   private hasStartedCall = false;
@@ -40,6 +42,8 @@ export class OpenAiAgentVoiceSession {
   private firstUtteranceDelivered = false;
   private firstUtteranceCorrectionSent = false;
   private firstUtteranceTranscript = '';
+  private missionOpeningCorrectionSent = false;
+  private missionOpeningTranscript = '';
   private preArmedAudio = 0;
   private responseActive = false;
   private pendingIntervention?: { text: string; semanticControl?: string };
@@ -231,6 +235,10 @@ export class OpenAiAgentVoiceSession {
         this.guardedFirstAudio.push(event.delta);
         return;
       }
+      if (this.currentResponseKind === 'mission_opening') {
+        this.guardedMissionAudio.push(event.delta);
+        return;
+      }
       this.options.onAudioDelta(event.delta);
       return;
     }
@@ -241,6 +249,11 @@ export class OpenAiAgentVoiceSession {
           this.restartFirstUtterance();
           return;
         }
+      }
+      if (this.currentResponseKind === 'mission_opening') {
+        this.missionOpeningTranscript = normalizeTranscript(`${this.missionOpeningTranscript}${event.delta}`);
+        this.guardedMissionTranscriptDeltas.push(event.delta);
+        return;
       }
       this.options.onAgentTranscriptDelta(event.delta);
       return;
@@ -289,6 +302,19 @@ export class OpenAiAgentVoiceSession {
         this.startMissionOpening();
         return;
       }
+      if (this.currentResponseKind === 'mission_opening') {
+        if (!this.isMissionOpeningAllowed()) {
+          this.restartMissionOpening();
+          return;
+        }
+        for (const delta of this.guardedMissionTranscriptDeltas.splice(0)) {
+          this.options.onAgentTranscriptDelta(delta);
+        }
+        for (const audio of this.guardedMissionAudio.splice(0)) {
+          this.options.onAudioDelta(audio);
+        }
+        this.missionOpeningTranscript = '';
+      }
       this.flushPendingIntervention();
       if (this.currentResponseKind === 'intervention') {
         this.schedulePostInterventionFollowup();
@@ -298,6 +324,9 @@ export class OpenAiAgentVoiceSession {
     }
     if (event.type === 'response.cancelled') {
       this.responseActive = false;
+      this.guardedMissionAudio.splice(0);
+      this.guardedMissionTranscriptDeltas.splice(0);
+      this.missionOpeningTranscript = '';
       this.flushPendingIntervention();
       this.currentResponseKind = 'normal';
       return;
@@ -333,22 +362,37 @@ export class OpenAiAgentVoiceSession {
     this.createResponse(
       {
         output_modalities: ['audio'],
-        instructions: [
-          'The literal disclosure has already been spoken. Do not repeat it.',
-          'Ignore any repeated first-utterance, disclosure, or "same message" requirement in the mission text below; that startup contract is already complete.',
-          'Continue the outbound phone call now using the mission and standing instructions below, but do not read or summarize the whole mission.',
-          'Say exactly one short conversational turn: state the specific reason for the call one time in the language lock, then ask exactly one mission-specific question.',
-          'Do not ask whether you are speaking with the named contact before stating the concrete purpose. If contact confirmation is necessary, place it after the purpose in the same single question.',
-          'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
-          'Never say a generic placeholder like "quick matter", "brief matter", or "calling about something" if the mission contains a real purpose.',
-          'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
-          'Say only words intended for the remote callee.',
-          '',
-          this.instructions
-        ].join('\n')
+        instructions: buildMissionOpeningInstructions(this.instructions)
       },
       'mission_opening'
     );
+  }
+
+  private restartMissionOpening(): void {
+    if (this.missionOpeningCorrectionSent) {
+      this.guardedMissionAudio.splice(0);
+      this.guardedMissionTranscriptDeltas.splice(0);
+      this.missionOpeningTranscript = '';
+      return;
+    }
+    this.missionOpeningCorrectionSent = true;
+    this.guardedMissionAudio.splice(0);
+    this.guardedMissionTranscriptDeltas.splice(0);
+    this.missionOpeningTranscript = '';
+    this.createResponse(
+      {
+        output_modalities: ['audio'],
+        instructions: buildMissionOpeningInstructions(this.instructions, true)
+      },
+      'mission_opening'
+    );
+  }
+
+  private isMissionOpeningAllowed(): boolean {
+    if (isEnglishLanguageLock(this.instructions) && containsSpanishSourceLeak(this.missionOpeningTranscript)) {
+      return false;
+    }
+    return !containsGenericPlaceholder(this.missionOpeningTranscript);
   }
 
   private cancelActiveResponse(): void {
@@ -419,6 +463,89 @@ export class OpenAiAgentVoiceSession {
       firstUtteranceCorrectionSent: this.firstUtteranceCorrectionSent
     });
   }
+}
+
+function buildMissionOpeningInstructions(instructions: string, correction = false): string {
+  const missionBrief = buildMissionOpeningBrief(instructions);
+  return [
+    correction
+      ? 'Your previous draft opener included source-language or placeholder text and was discarded before the callee heard it.'
+      : 'The literal disclosure has already been spoken. Do not repeat it.',
+    'Ignore any repeated first-utterance, disclosure, or "same message" requirement in the mission text; that startup contract is already complete.',
+    'Use the already-loaded session mission for facts, but do not read, quote, or summarize the raw mission prompt.',
+    'Say exactly one short conversational turn: state the specific reason for the call one time in the language lock, then ask exactly one mission-specific question.',
+    'Do not ask whether you are speaking with the named contact before stating the concrete purpose. If contact confirmation is necessary, place it after the purpose in the same single question.',
+    'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
+    'Never say a generic placeholder like "quick matter", "brief matter", or "calling about something" if the mission contains a real purpose.',
+    'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
+    'Say only words intended for the remote callee.',
+    '',
+    'Clean mission opening brief:',
+    missionBrief
+  ].join('\n');
+}
+
+function buildMissionOpeningBrief(instructions: string): string {
+  const mission = extractMissionText(instructions);
+  const cleaned = removeMissionScaffolding(mission);
+  if (isEnglishLanguageLock(instructions) && containsSpanishSourceLeak(cleaned)) {
+    return [
+      'The source mission contains non-English purpose text.',
+      'Use the concrete purpose from the already-loaded session mission, translated into natural English.',
+      'Do not speak any source-language words or labels from the mission.'
+    ].join(' ');
+  }
+  return cleaned || 'Use the concrete purpose from the already-loaded session mission and ask the next mission-specific question.';
+}
+
+function extractMissionText(instructions: string): string {
+  const parts = instructions.split(/\nMission:\n/i);
+  return normalizeTranscript(parts.length > 1 ? parts.at(-1) ?? instructions : instructions);
+}
+
+function removeMissionScaffolding(text: string): string {
+  const withoutBlocks = text
+    .replace(/===\s*OPERATOR LANGUAGE CONTEXT[\s\S]*?===\s*END OPERATOR LANGUAGE CONTEXT\s*===/gi, ' ')
+    .replace(/===\s*FIRST UTTERANCE DISCLOSURE[\s\S]*?(?=(?:Goal|Objective|Purpose|Context|Mission|Task|Call|Objetivo|Propósito|Necesito|Quiero)\s*:|$)/gi, ' ');
+  const cleaned = withoutBlocks
+    .replace(/\bLANGUAGE LOCK\s*:[^.=]*(?:\.|$)/gi, ' ')
+    .replace(/\bLITERAL FIRST UTTERANCE CONTRACT\s*:[^.]*(?:\.|$)/gi, ' ')
+    .replace(/\bPURPOSE-SECOND RULE\s*:[^.]*(?:\.|$)/gi, ' ')
+    .replace(/\bFIRST UTTERANCE\b[^.]*(?:\.|$)/gi, ' ')
+    .replace(/\bYour VERY FIRST spoken words\b[^.]*(?:\.|$)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.slice(0, 700);
+}
+
+function isEnglishLanguageLock(instructions: string): boolean {
+  return /\b(language lock:\s*speaks? only in\s*(?:en|english)|speak only english|first utterance must be in english)\b/i.test(
+    instructions
+  );
+}
+
+function containsSpanishSourceLeak(text: string): boolean {
+  const normalized = compactLanguageText(text);
+  return (
+    /\bpedir\s+una\s+cita\b/.test(normalized) ||
+    /\bcita\s+urgente\b/.test(normalized) ||
+    /\bque\s+opero\b/.test(normalized) ||
+    /\ba\s+su\s+hijo\b/.test(normalized) ||
+    /\bhablar\s+con\b/.test(normalized) ||
+    /\bpara\s+(?:pedir|hablar|llamar)\b/.test(normalized) ||
+    /\b(?:necesito|quiero|usted|puede|podria|permiteme|gracias)\b/.test(normalized)
+  );
+}
+
+function containsGenericPlaceholder(text: string): boolean {
+  return /\b(?:quick matter|brief matter|calling about something)\b/i.test(text);
+}
+
+function compactLanguageText(text: string): string {
+  return normalizeTranscript(text)
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '');
 }
 
 export function buildAgentSessionUpdate(model: string, instructions: string, voice: string): Record<string, unknown> {
