@@ -708,7 +708,7 @@ function correlationAt(short: Int16Array, long: Int16Array, offset: number): num
 function normalizeFirstUtterance(text: string | undefined): string {
   return (
     normalizeOptional(text)?.slice(0, 300) ??
-    "Hey there, just so you know, I am a real person but I'm using an AI translator."
+    "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling."
   );
 }
 

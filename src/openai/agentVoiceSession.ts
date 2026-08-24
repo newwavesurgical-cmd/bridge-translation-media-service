@@ -24,7 +24,8 @@ export interface AgentStartupDiagnostics {
   firstUtteranceCorrectionSent: boolean;
 }
 
-const DEFAULT_FIRST_UTTERANCE = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+const DEFAULT_FIRST_UTTERANCE =
+  "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 const POST_INTERVENTION_FOLLOWUP_MS = 3200;
 
 export class OpenAiAgentVoiceSession {
