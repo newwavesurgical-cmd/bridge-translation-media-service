@@ -144,6 +144,7 @@ export function createBridgeMediaServer(config: AppConfig) {
         return sendJson(res, 200, {
           ok: true,
           service: 'bridge-translation-media-service',
+          gitCommit: serviceGitCommit(),
           twilioConfigured: twilioConfigured(config),
           openAiConfigured: openAiConfigured(config),
           mediaRouterConfigured: mediaRouterConfigured(config),
@@ -502,6 +503,7 @@ function agentCallHealth(config: AppConfig, agentCallRegistry: AgentCallRegistry
   return {
     ok: true,
     service: 'bridge-translation-media-service',
+    gitCommit: serviceGitCommit(),
     agentCallSupported: true,
     agentRealtimeVoiceBridgeSupported: true,
     monitorStreamSupported: false,
@@ -512,6 +514,10 @@ function agentCallHealth(config: AppConfig, agentCallRegistry: AgentCallRegistry
     activeAgentCalls: agentCallRegistry.listDiagnostics(),
     recentAgentCalls: agentCallRegistry.listRecentDiagnostics()
   };
+}
+
+function serviceGitCommit(): string | null {
+  return process.env.RENDER_GIT_COMMIT ?? process.env.GIT_COMMIT ?? process.env.COMMIT_SHA ?? null;
 }
 
 function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRegistry): Record<string, unknown> {
