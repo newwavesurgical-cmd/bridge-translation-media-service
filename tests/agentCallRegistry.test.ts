@@ -1,5 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { makeStreamToken } from '../src/auth.js';
+import { bytesToBase64 } from '../src/audio/codec.js';
+import { encodeMuLaw } from '../src/audio/mulaw.js';
 import { AgentCallRegistry, buildAgentInstructions } from '../src/agentCallRegistry.js';
 import type { AppConfig } from '../src/config.js';
 import { createBridgeMediaServer } from '../src/http.js';
@@ -26,6 +28,16 @@ const config: AppConfig = {
   BRIDGE_MEDIA_API_KEY: 'test-service-api-key-long-enough',
   DRY_RUN_CALLS: true
 };
+
+function makeSpeechPayload(frequency = 440): string {
+  const sampleRate = 8000;
+  const pcm = new Int16Array(160);
+  for (let i = 0; i < pcm.length; i += 1) {
+    const t = i / sampleRate;
+    pcm[i] = Math.round(Math.sin(2 * Math.PI * frequency * t) * 12000);
+  }
+  return bytesToBase64(encodeMuLaw(pcm));
+}
 
 describe('AgentCallRegistry', () => {
   it('creates agent-call sessions with language lock and control diagnostics', () => {
@@ -241,6 +253,85 @@ describe('AgentCallRegistry', () => {
         firstUtteranceArmed: false,
         firstUtteranceDelivered: false,
         preArmedAudio: 0
+      }
+    });
+  });
+
+  it('suppresses reflected agent audio before forwarding Twilio media to OpenAI', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_echo_test'
+    });
+    const sentToTwilio: string[] = [];
+    const appendPcmuBase64 = vi.fn();
+    const mutable = session as unknown as {
+      twilioWs: { send: (payload: string) => void; close: () => void };
+      agent: { status: string; appendPcmuBase64: (payload: string) => void };
+      sendTwilioMedia: (payload: string, markName: string) => void;
+      handleTwilioMessage: (raw: string) => void;
+    };
+    mutable.twilioWs = {
+      send: (payload: string) => sentToTwilio.push(payload),
+      close: () => undefined
+    };
+    mutable.agent = { status: 'live', appendPcmuBase64 };
+    session.data.twilioStreamSid = 'MZ123';
+
+    const reflectedPayload = makeSpeechPayload(440);
+    mutable.sendTwilioMedia(reflectedPayload, 'agent-test');
+    mutable.handleTwilioMessage(
+      JSON.stringify({
+        event: 'media',
+        sequenceNumber: '2',
+        media: { track: 'inbound', payload: reflectedPayload }
+      })
+    );
+
+    expect(sentToTwilio).toHaveLength(2);
+    expect(appendPcmuBase64).not.toHaveBeenCalled();
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        agentAudioChunks: 1,
+        agentEchoAudioSuppressed: 1,
+        twilioMediaChunks: 0
+      }
+    });
+  });
+
+  it('keeps different inbound audio available for barge-in while echo suppression is armed', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_barge_in_test'
+    });
+    const appendPcmuBase64 = vi.fn();
+    const mutable = session as unknown as {
+      twilioWs: { send: () => void; close: () => void };
+      agent: { status: string; appendPcmuBase64: (payload: string) => void };
+      sendTwilioMedia: (payload: string, markName: string) => void;
+      handleTwilioMessage: (raw: string) => void;
+    };
+    mutable.twilioWs = {
+      send: () => undefined,
+      close: () => undefined
+    };
+    mutable.agent = { status: 'live', appendPcmuBase64 };
+    session.data.twilioStreamSid = 'MZ123';
+
+    mutable.sendTwilioMedia(makeSpeechPayload(440), 'agent-test');
+    const remotePayload = makeSpeechPayload(880);
+    mutable.handleTwilioMessage(
+      JSON.stringify({
+        event: 'media',
+        sequenceNumber: '2',
+        media: { track: 'inbound', payload: remotePayload }
+      })
+    );
+
+    expect(appendPcmuBase64).toHaveBeenCalledWith(remotePayload);
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        agentEchoAudioSuppressed: 0,
+        twilioMediaChunks: 1
       }
     });
   });

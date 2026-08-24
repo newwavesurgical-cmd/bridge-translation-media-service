@@ -378,7 +378,10 @@ export function buildAgentSessionUpdate(model: string, instructions: string, voi
 
 function realtimeTurnDetectionConfig(createResponse: boolean): Record<string, unknown> {
   return {
-    type: 'semantic_vad',
+    type: 'server_vad',
+    threshold: 0.45,
+    prefix_padding_ms: 250,
+    silence_duration_ms: 350,
     create_response: createResponse,
     interrupt_response: true
   };

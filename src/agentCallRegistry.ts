@@ -1,6 +1,8 @@
 import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
+import { base64ToBytes } from './audio/codec.js';
+import { decodeMuLaw } from './audio/mulaw.js';
 import { OpenAiAgentVoiceSession, type AgentStartupDiagnostics } from './openai/agentVoiceSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { TwilioMediaMessage } from './types/messages.js';
@@ -8,6 +10,12 @@ import type { TwilioMediaMessage } from './types/messages.js';
 const MAX_TRANSCRIPT_TAIL = 240;
 const MAX_CONTROL_TAIL = 80;
 const DEFAULT_MAX_CALL_DURATION_SECONDS = 1800;
+const AGENT_ECHO_MEMORY_MS = 7000;
+const AGENT_ECHO_RECENT_MS = 6500;
+const AGENT_ECHO_MAX_FRAMES = 400;
+const AGENT_ECHO_MIN_SAMPLES = 80;
+const AGENT_ECHO_MIN_RMS = 350;
+const AGENT_ECHO_CORRELATION = 0.88;
 
 export const contextualMicroInterventions = [
   'yes',
@@ -96,6 +104,7 @@ export interface AgentCallRecord {
     agentTranscriptDeltas: number;
     controlsReceived: number;
     controlsDelivered: number;
+    agentEchoAudioSuppressed: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   lastActivityAt?: string;
@@ -144,7 +153,8 @@ export class AgentCallRegistry {
         remoteTranscriptDeltas: 0,
         agentTranscriptDeltas: 0,
         controlsReceived: 0,
-        controlsDelivered: 0
+        controlsDelivered: 0,
+        agentEchoAudioSuppressed: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -185,6 +195,8 @@ export class AgentCallSession {
   private twilioWs?: WebSocket;
   private agent?: OpenAiAgentVoiceSession;
   private timeout?: NodeJS.Timeout;
+  private readonly recentAgentOutputFrames: Array<{ at: number; pcm: Int16Array }> = [];
+  private lastAgentAudioAt = 0;
 
   constructor(
     private readonly config: AppConfig,
@@ -388,6 +400,10 @@ export class AgentCallSession {
       if (message.media.track === 'outbound') {
         return;
       }
+      if (this.isLikelyAgentEcho(message.media.payload)) {
+        this.record.counters.agentEchoAudioSuppressed += 1;
+        return;
+      }
       this.record.counters.twilioMediaChunks += 1;
       this.ensureAgentSession();
       this.agent?.appendPcmuBase64(message.media.payload);
@@ -454,6 +470,51 @@ export class AgentCallSession {
         mark: { name: markName }
       })
     );
+    this.rememberAgentOutput(payload);
+  }
+
+  private rememberAgentOutput(payload: string): void {
+    const pcm = decodePcmuPayload(payload);
+    if (!pcm || pcm.length < AGENT_ECHO_MIN_SAMPLES) {
+      return;
+    }
+    const now = Date.now();
+    this.lastAgentAudioAt = now;
+    this.recentAgentOutputFrames.push({ at: now, pcm });
+    this.pruneAgentOutputFrames(now);
+  }
+
+  private isLikelyAgentEcho(payload: string): boolean {
+    const now = Date.now();
+    if (now - this.lastAgentAudioAt > AGENT_ECHO_RECENT_MS || this.recentAgentOutputFrames.length === 0) {
+      return false;
+    }
+    this.pruneAgentOutputFrames(now);
+
+    const incoming = decodePcmuPayload(payload);
+    if (!incoming || incoming.length < AGENT_ECHO_MIN_SAMPLES || rms(incoming) < AGENT_ECHO_MIN_RMS) {
+      return false;
+    }
+
+    for (let i = this.recentAgentOutputFrames.length - 1; i >= 0; i -= 1) {
+      const frame = this.recentAgentOutputFrames[i]?.pcm;
+      if (!frame || frame.length < AGENT_ECHO_MIN_SAMPLES) {
+        continue;
+      }
+      if (maxCorrelation(incoming, frame) >= AGENT_ECHO_CORRELATION) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private pruneAgentOutputFrames(now: number): void {
+    while (
+      this.recentAgentOutputFrames.length > AGENT_ECHO_MAX_FRAMES ||
+      (this.recentAgentOutputFrames[0] && now - this.recentAgentOutputFrames[0].at > AGENT_ECHO_MEMORY_MS)
+    ) {
+      this.recentAgentOutputFrames.shift();
+    }
   }
 
   private emitTranscript(speaker: 'agent' | 'remote' | 'operator', delta: string): void {
@@ -557,6 +618,69 @@ function normalizeMission(text: string | undefined): { text: string; wasFallback
 function normalizeOptional(text: string | undefined): string | undefined {
   const normalized = text?.replace(/\s+/g, ' ').trim();
   return normalized ? normalized.slice(0, 6000) : undefined;
+}
+
+function decodePcmuPayload(payload: string): Int16Array | null {
+  try {
+    return decodeMuLaw(base64ToBytes(payload));
+  } catch {
+    return null;
+  }
+}
+
+function rms(samples: Int16Array): number {
+  let energy = 0;
+  for (const sample of samples) {
+    energy += sample * sample;
+  }
+  return Math.sqrt(energy / samples.length);
+}
+
+function maxCorrelation(a: Int16Array, b: Int16Array): number {
+  if (a.length < AGENT_ECHO_MIN_SAMPLES || b.length < AGENT_ECHO_MIN_SAMPLES) {
+    return 0;
+  }
+  const short = a.length <= b.length ? a : b;
+  const long = a.length <= b.length ? b : a;
+  if (long.length === short.length) {
+    return Math.abs(correlationAt(short, long, 0));
+  }
+
+  let best = 0;
+  const stride = Math.max(16, Math.floor(short.length / 4));
+  for (let offset = 0; offset <= long.length - short.length; offset += stride) {
+    best = Math.max(best, Math.abs(correlationAt(short, long, offset)));
+    if (best >= AGENT_ECHO_CORRELATION) {
+      return best;
+    }
+  }
+  return best;
+}
+
+function correlationAt(short: Int16Array, long: Int16Array, offset: number): number {
+  let meanA = 0;
+  let meanB = 0;
+  for (let i = 0; i < short.length; i += 1) {
+    meanA += short[i] ?? 0;
+    meanB += long[offset + i] ?? 0;
+  }
+  meanA /= short.length;
+  meanB /= short.length;
+
+  let dot = 0;
+  let energyA = 0;
+  let energyB = 0;
+  for (let i = 0; i < short.length; i += 1) {
+    const a = (short[i] ?? 0) - meanA;
+    const b = (long[offset + i] ?? 0) - meanB;
+    dot += a * b;
+    energyA += a * a;
+    energyB += b * b;
+  }
+  if (energyA === 0 || energyB === 0) {
+    return 0;
+  }
+  return dot / Math.sqrt(energyA * energyB);
 }
 
 function normalizeFirstUtterance(text: string | undefined): string {

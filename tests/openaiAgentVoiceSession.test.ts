@@ -68,7 +68,10 @@ describe('OpenAI agent voice session startup gate', () => {
           format: { type: 'audio/pcmu' },
           transcription: { model: 'gpt-realtime-whisper' },
           turn_detection: {
-            type: 'semantic_vad',
+            type: 'server_vad',
+            threshold: 0.45,
+            prefix_padding_ms: 250,
+            silence_duration_ms: 350,
             create_response: false,
             interrupt_response: true
           }
@@ -148,7 +151,10 @@ describe('OpenAI agent voice session startup gate', () => {
         audio: {
           input: {
             turn_detection: {
-              type: 'semantic_vad',
+              type: 'server_vad',
+              threshold: 0.45,
+              prefix_padding_ms: 250,
+              silence_duration_ms: 350,
               create_response: true
             }
           }
