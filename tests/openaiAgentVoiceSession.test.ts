@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/config.js';
 import { OpenAiAgentVoiceSession, buildAgentSessionUpdate } from '../src/openai/agentVoiceSession.js';
 
@@ -23,6 +23,10 @@ const config: AppConfig = {
   BRIDGE_MEDIA_API_KEY: 'test-service-api-key-long-enough',
   DRY_RUN_CALLS: true
 };
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 function makeLiveSession() {
   const sent: Array<Record<string, unknown>> = [];
@@ -116,6 +120,47 @@ describe('OpenAI agent voice session startup gate', () => {
     );
 
     expect(errors).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
+  });
+
+  it('retakes the call a few seconds after an operator intervention if the callee stays silent', () => {
+    vi.useFakeTimers();
+    const { session, mutable, sent } = makeLiveSession();
+
+    session.injectInstruction('yes', 'yes');
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: { message: 'Cancellation failed: no active response found' }
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    vi.advanceTimersByTime(3200);
+
+    expect(sent.map((payload) => payload.type)).toEqual([
+      'response.cancel',
+      'conversation.item.create',
+      'response.create',
+      'response.create'
+    ]);
+    expect(String((sent.at(-1)?.response as { instructions?: string }).instructions)).toContain('Retake command');
+  });
+
+  it('does not retake the call after an operator intervention when the callee responds first', () => {
+    vi.useFakeTimers();
+    const { session, mutable, sent } = makeLiveSession();
+
+    session.injectInstruction('yes', 'yes');
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: { message: 'Cancellation failed: no active response found' }
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    mutable.handleMessage(JSON.stringify({ type: 'conversation.item.input_audio_transcription.delta', delta: 'Okay' }));
+    vi.advanceTimersByTime(3200);
+
     expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
   });
 

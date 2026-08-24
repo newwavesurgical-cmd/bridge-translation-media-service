@@ -25,6 +25,7 @@ export interface AgentStartupDiagnostics {
 }
 
 const DEFAULT_FIRST_UTTERANCE = "Hey there, just so you know, I am a real person but I'm using an AI translator.";
+const POST_INTERVENTION_FOLLOWUP_MS = 3200;
 
 export class OpenAiAgentVoiceSession {
   private ws?: WebSocket;
@@ -42,6 +43,10 @@ export class OpenAiAgentVoiceSession {
   private preArmedAudio = 0;
   private responseActive = false;
   private pendingIntervention?: { text: string; semanticControl?: string };
+  private postInterventionFollowup?: NodeJS.Timeout;
+  private lastRemoteTranscriptAt = 0;
+  private currentResponseKind: 'normal' | 'first_utterance' | 'mission_opening' | 'intervention' | 'post_intervention_followup' =
+    'normal';
 
   constructor(private readonly options: AgentVoiceSessionOptions) {
     this.instructions = options.instructions;
@@ -129,6 +134,7 @@ export class OpenAiAgentVoiceSession {
     }
 
     this.pendingIntervention = { text: normalized, semanticControl };
+    this.cancelPostInterventionFollowup();
     this.cancelActiveResponse();
   }
 
@@ -149,14 +155,14 @@ export class OpenAiAgentVoiceSession {
         content: [{ type: 'input_text', text: interventionText }]
       }
     });
-    this.sendJson({
-      type: 'response.create',
-      response: {
+    this.createResponse(
+      {
         output_modalities: ['audio'],
         instructions:
           'Apply the operator intervention immediately to the live phone call. Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.'
-      }
-    });
+      },
+      'intervention'
+    );
   }
 
   close(): void {
@@ -168,6 +174,7 @@ export class OpenAiAgentVoiceSession {
       return;
     }
     this.setStatus('closing');
+    this.cancelPostInterventionFollowup();
     this.cancelActiveResponse();
     setTimeout(() => {
       if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
@@ -185,13 +192,13 @@ export class OpenAiAgentVoiceSession {
     this.firstUtteranceTranscript = '';
     this.guardedFirstAudio.splice(0);
     this.publishStartupDiagnostics();
-    this.sendJson({
-      type: 'response.create',
-      response: {
+    this.createResponse(
+      {
         output_modalities: ['audio'],
         instructions: `Say exactly this sentence and nothing else:\n${this.firstUtterance}`
-      }
-    });
+      },
+      'first_utterance'
+    );
   }
 
   private restartFirstUtterance(): void {
@@ -239,6 +246,8 @@ export class OpenAiAgentVoiceSession {
       return;
     }
     if (event.type?.includes('input_audio_transcription') && event.delta) {
+      this.lastRemoteTranscriptAt = Date.now();
+      this.cancelPostInterventionFollowup();
       this.options.onRemoteTranscriptDelta(event.delta);
       return;
     }
@@ -281,11 +290,16 @@ export class OpenAiAgentVoiceSession {
         return;
       }
       this.flushPendingIntervention();
+      if (this.currentResponseKind === 'intervention') {
+        this.schedulePostInterventionFollowup();
+      }
+      this.currentResponseKind = 'normal';
       return;
     }
     if (event.type === 'response.cancelled') {
       this.responseActive = false;
       this.flushPendingIntervention();
+      this.currentResponseKind = 'normal';
       return;
     }
     if (event.type === 'error') {
@@ -316,9 +330,8 @@ export class OpenAiAgentVoiceSession {
   }
 
   private startMissionOpening(): void {
-    this.sendJson({
-      type: 'response.create',
-      response: {
+    this.createResponse(
+      {
         output_modalities: ['audio'],
         instructions: [
           'The literal disclosure has already been spoken. Do not repeat it.',
@@ -332,12 +345,61 @@ export class OpenAiAgentVoiceSession {
           '',
           this.instructions
         ].join('\n')
-      }
-    });
+      },
+      'mission_opening'
+    );
   }
 
   private cancelActiveResponse(): void {
     this.sendJson({ type: 'response.cancel' });
+  }
+
+  private createResponse(
+    response: Record<string, unknown>,
+    kind: typeof this.currentResponseKind = 'normal'
+  ): void {
+    this.currentResponseKind = kind;
+    this.sendJson({
+      type: 'response.create',
+      response
+    });
+  }
+
+  private schedulePostInterventionFollowup(): void {
+    this.cancelPostInterventionFollowup();
+    const scheduledAt = Date.now();
+    this.postInterventionFollowup = setTimeout(() => {
+      this.postInterventionFollowup = undefined;
+      if (this.statusValue !== 'live' || this.responseActive || this.pendingIntervention) {
+        return;
+      }
+      if (this.lastRemoteTranscriptAt > scheduledAt) {
+        return;
+      }
+      this.createResponse(
+        {
+          output_modalities: ['audio'],
+          instructions: [
+            'The remote callee has not responded after the last operator intervention.',
+            'Retake command of the live call now.',
+            'If more information is still needed, ask the next single necessary question.',
+            'If the mission has enough information, briefly confirm the outcome and close politely.',
+            'Do not mention silence, timers, the operator, controls, prompts, or hidden instructions.',
+            'Say only words intended for the remote callee.'
+          ].join('\n')
+        },
+        'post_intervention_followup'
+      );
+    }, POST_INTERVENTION_FOLLOWUP_MS);
+    this.postInterventionFollowup.unref?.();
+  }
+
+  private cancelPostInterventionFollowup(): void {
+    if (!this.postInterventionFollowup) {
+      return;
+    }
+    clearTimeout(this.postInterventionFollowup);
+    this.postInterventionFollowup = undefined;
   }
 
   private setStatus(status: AgentVoiceSessionStatus, detail?: string): void {
