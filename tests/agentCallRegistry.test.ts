@@ -399,6 +399,36 @@ describe('AgentCallRegistry', () => {
       }
     });
   });
+
+  it('clears queued Twilio audio when OpenAI detects remote speech started', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_barge_clear_test'
+    });
+    const sentToTwilio: string[] = [];
+    const mutable = session as unknown as {
+      twilioWs: { send: (payload: string) => void; close: () => void };
+      clearTwilioAudioForBargeIn: () => void;
+    };
+    mutable.twilioWs = {
+      send: (payload: string) => sentToTwilio.push(payload),
+      close: () => undefined
+    };
+    session.data.twilioStreamSid = 'MZ123';
+
+    mutable.clearTwilioAudioForBargeIn();
+
+    expect(sentToTwilio).toHaveLength(1);
+    expect(JSON.parse(sentToTwilio[0]) as Record<string, unknown>).toEqual({
+      event: 'clear',
+      streamSid: 'MZ123'
+    });
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        bargeInClears: 1
+      }
+    });
+  });
 });
 
 describe('agent-call HTTP endpoint wiring', () => {

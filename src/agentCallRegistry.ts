@@ -110,6 +110,7 @@ export interface AgentCallRecord {
     controlsReceived: number;
     controlsDelivered: number;
     agentEchoAudioSuppressed: number;
+    bargeInClears: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   lastActivityAt?: string;
@@ -159,7 +160,8 @@ export class AgentCallRegistry {
         agentTranscriptDeltas: 0,
         controlsReceived: 0,
         controlsDelivered: 0,
-        agentEchoAudioSuppressed: 0
+        agentEchoAudioSuppressed: 0,
+        bargeInClears: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -456,6 +458,7 @@ export class AgentCallSession {
         this.record.counters.agentTranscriptDeltas += 1;
         this.emitTranscript('agent', delta);
       },
+      onUserSpeechStarted: () => this.clearTwilioAudioForBargeIn(),
       onStatus: (status) => {
         if (status === 'live' && this.twilioWs) {
           this.record.state = 'live';
@@ -491,6 +494,20 @@ export class AgentCallSession {
       })
     );
     this.rememberAgentOutput(payload);
+  }
+
+  private clearTwilioAudioForBargeIn(): void {
+    if (!this.twilioWs || !this.record.twilioStreamSid) {
+      return;
+    }
+    this.record.counters.bargeInClears += 1;
+    this.twilioWs.send(
+      JSON.stringify({
+        event: 'clear',
+        streamSid: this.record.twilioStreamSid
+      })
+    );
+    this.touch();
   }
 
   private rememberAgentOutput(payload: string): void {

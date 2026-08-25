@@ -34,6 +34,7 @@ function makeLiveSession(instructions = 'Mission instructions') {
   const startupDiagnostics: unknown[] = [];
   const audioDeltas: string[] = [];
   const agentTranscriptDeltas: string[] = [];
+  const speechStarted = vi.fn();
   const session = new OpenAiAgentVoiceSession({
     config,
     instructions,
@@ -42,6 +43,7 @@ function makeLiveSession(instructions = 'Mission instructions') {
     onAudioDelta: (delta) => audioDeltas.push(delta),
     onRemoteTranscriptDelta: () => undefined,
     onAgentTranscriptDelta: (delta) => agentTranscriptDeltas.push(delta),
+    onUserSpeechStarted: speechStarted,
     onStartupDiagnostics: (diagnostics) => startupDiagnostics.push(diagnostics),
     onStatus: () => undefined,
     onError: (error) => errors.push(error)
@@ -59,7 +61,7 @@ function makeLiveSession(instructions = 'Mission instructions') {
     send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
   };
   mutable.statusValue = 'live';
-  return { session, mutable, sent, errors, startupDiagnostics, audioDeltas, agentTranscriptDeltas };
+  return { session, mutable, sent, errors, startupDiagnostics, audioDeltas, agentTranscriptDeltas, speechStarted };
 }
 
 describe('OpenAI agent voice session startup gate', () => {
@@ -75,9 +77,9 @@ describe('OpenAI agent voice session startup gate', () => {
           transcription: { model: 'gpt-realtime-whisper' },
           turn_detection: {
             type: 'server_vad',
-            threshold: 0.45,
-            prefix_padding_ms: 250,
-            silence_duration_ms: 350,
+            threshold: 0.38,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 300,
             create_response: false,
             interrupt_response: true
           }
@@ -217,9 +219,9 @@ describe('OpenAI agent voice session startup gate', () => {
           input: {
             turn_detection: {
               type: 'server_vad',
-              threshold: 0.45,
-              prefix_padding_ms: 250,
-              silence_duration_ms: 350,
+              threshold: 0.38,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 300,
               create_response: true
             }
           }
@@ -250,6 +252,15 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
       'Do not repeat the purpose in a second sentence'
     );
+  });
+
+  it('notifies the bridge when remote speech starts so queued phone audio can be cleared', () => {
+    const { mutable, sent, speechStarted } = makeLiveSession();
+
+    mutable.handleMessage(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+
+    expect(speechStarted).toHaveBeenCalledTimes(1);
+    expect(sent).toEqual([]);
   });
 
   it('does not pass raw startup scaffolding or Spanish source text into the mission opener prompt', () => {

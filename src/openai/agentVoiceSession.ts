@@ -11,6 +11,7 @@ interface AgentVoiceSessionOptions {
   onAudioDelta: (base64Pcmu: string) => void;
   onRemoteTranscriptDelta: (delta: string) => void;
   onAgentTranscriptDelta: (delta: string) => void;
+  onUserSpeechStarted?: () => void;
   onStatus: (status: AgentVoiceSessionStatus, detail?: string) => void;
   onStartupDiagnostics?: (diagnostics: AgentStartupDiagnostics) => void;
   onError: (error: Error) => void;
@@ -272,6 +273,11 @@ export class OpenAiAgentVoiceSession {
       this.lastRemoteTranscriptAt = Date.now();
       this.cancelPostInterventionFollowup();
       this.options.onRemoteTranscriptDelta(event.delta);
+      return;
+    }
+    if (event.type === 'input_audio_buffer.speech_started') {
+      this.cancelPostInterventionFollowup();
+      this.options.onUserSpeechStarted?.();
       return;
     }
     if (event.type === 'session.closed') {
@@ -628,9 +634,9 @@ export function buildAgentSessionUpdate(model: string, instructions: string, voi
 function realtimeTurnDetectionConfig(createResponse: boolean): Record<string, unknown> {
   return {
     type: 'server_vad',
-    threshold: 0.45,
-    prefix_padding_ms: 250,
-    silence_duration_ms: 350,
+    threshold: 0.38,
+    prefix_padding_ms: 300,
+    silence_duration_ms: 300,
     create_response: createResponse,
     interrupt_response: true
   };
