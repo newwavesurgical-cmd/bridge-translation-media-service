@@ -118,6 +118,10 @@ const agentControlSchema = z.object({
   note: z.string().max(2000).optional()
 });
 
+const dtmfSchema = z.object({
+  digit: z.enum(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '#'])
+});
+
 function firstText(...values: Array<string | undefined>): string | undefined {
   return values.find((value) => value?.replace(/\s+/g, ' ').trim());
 }
@@ -217,6 +221,20 @@ export function createBridgeMediaServer(config: AppConfig) {
         return sendJson(res, 200, { ok: true, control, diagnostics: session.diagnostics() });
       }
 
+      if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/dtmf')) {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendJson(res, 404, { error: 'agent call not found' });
+        }
+        const body = dtmfSchema.parse(await readJson(req));
+        const dtmf = session.sendDtmf(body.digit);
+        return sendJson(res, 200, { ok: true, dtmf, diagnostics: session.diagnostics() });
+      }
+
       if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/end')) {
         if (!authorized(config, req)) {
           return sendJson(res, 401, { error: 'unauthorized' });
@@ -305,7 +323,7 @@ export function createBridgeMediaServer(config: AppConfig) {
         if (!session) {
           return sendJson(res, 404, { error: 'call not found' });
         }
-        const body = z.object({ digit: z.string().min(1).max(1) }).parse(await readJson(req));
+        const body = dtmfSchema.parse(await readJson(req));
         session.sendDtmf(body.digit);
         return sendJson(res, 200, { ok: true });
       }

@@ -99,6 +99,10 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('treat it as leaked local assistant noise');
     expect(instructions).toContain('If the operator intentionally supplies words to say now');
     expect(instructions).toContain('llama ahora');
+    expect(instructions).toContain('Automated phone menus / IVR');
+    expect(instructions).toContain('Option 1: billing');
+    expect(instructions).toContain('Wait briefly for private operator DTMF control');
+    expect(instructions).toContain('choose the best matching keypad option');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
     expect(instructions).not.toContain('You may say you are calling on behalf');
@@ -433,6 +437,66 @@ describe('AgentCallRegistry', () => {
       counters: {
         bargeInClears: 1
       }
+    });
+  });
+
+  it('sends DTMF over the agent-call Twilio media stream and records diagnostics', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_dtmf_test'
+    });
+    const sentToTwilio: string[] = [];
+    const mutable = session as unknown as {
+      twilioWs: { send: (payload: string) => void; close: () => void };
+    };
+    mutable.twilioWs = {
+      send: (payload: string) => sentToTwilio.push(payload),
+      close: () => undefined
+    };
+    session.data.twilioStreamSid = 'MZ123';
+
+    const dtmf = session.sendDtmf('3');
+
+    expect(dtmf).toMatchObject({ digit: '3', delivered: true });
+    expect(sentToTwilio).toHaveLength(2);
+    expect(JSON.parse(sentToTwilio[0]) as Record<string, unknown>).toMatchObject({
+      event: 'media',
+      streamSid: 'MZ123',
+      media: { payload: expect.any(String) }
+    });
+    expect(JSON.parse(sentToTwilio[1]) as Record<string, unknown>).toMatchObject({
+      event: 'mark',
+      streamSid: 'MZ123',
+      mark: { name: expect.stringContaining('dtmf-3-') }
+    });
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        dtmfSent: 1,
+        agentAudioChunks: 1
+      },
+      dtmfTail: [{ digit: '3', delivered: true }],
+      transcriptTail: [{ speaker: 'operator', delta: '[DTMF 3]' }]
+    });
+  });
+
+  it('records DTMF attempts before the agent-call Twilio stream is live', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_dtmf_not_live_test'
+    });
+
+    const dtmf = session.sendDtmf('1');
+
+    expect(dtmf).toMatchObject({
+      digit: '1',
+      delivered: false,
+      reason: 'Cannot send DTMF before Twilio media stream is live.'
+    });
+    expect(session.diagnostics()).toMatchObject({
+      counters: {
+        dtmfSent: 0
+      },
+      dtmfTail: [{ digit: '1', delivered: false }]
     });
   });
 });
