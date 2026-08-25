@@ -436,6 +436,26 @@ describe('OpenAI agent voice session startup gate', () => {
     ]);
   });
 
+  it('does not let generic daughter examples override a son mission in the deterministic opener', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Remote callee/contact: oficina del doctor Ramírez.',
+      'If the mission says the appointment is for my son, daughter, child, spouse, mother, father, patient, or another known relationship, answer with that known relationship.',
+      'Mission:',
+      'Objetivo: pedir una cita con la oficina del doctor Ramírez porque mi hijo tiene problemas después de cirugía y necesita verlo pronto.'
+    ].join('\n');
+    const { mutable, sent } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    const openerInstructions = String((sent[1].response as { instructions?: string }).instructions);
+    expect(openerInstructions).toContain('make an appointment with Dr. Ramirez for my son as soon as possible');
+    expect(openerInstructions).not.toContain('for my daughter');
+  });
+
   it('buffers and retries a mission opener that asks the callee to verify the call reason', () => {
     const rawInstructions = [
       'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',

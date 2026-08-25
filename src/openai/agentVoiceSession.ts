@@ -554,13 +554,14 @@ function buildDeterministicMissionOpening(instructions: string): string | null {
   if (!isEnglishLanguageLock(instructions)) {
     return null;
   }
-  const mission = compactLanguageText(`${extractMissionText(instructions)} ${instructions}`);
+  const missionOnly = compactLanguageText(extractMissionText(instructions));
+  const mission = compactLanguageText(`${missionOnly} ${instructions}`);
   const doctorName = inferDoctorName(instructions);
   if (/\b(?:doctor|dr|pediatric|pediatr|medical|medico|appointment|cita|surgery|operat|hospital)\b/.test(mission)) {
     const contact = doctorName ? ` with ${doctorName}` : ' with the doctor';
-    const relation = /\b(?:daughter|hija)\b/.test(mission)
+    const relation = /\b(?:daughter|hija)\b/.test(missionOnly)
       ? ' for my daughter'
-      : /\b(?:son|hijo|child|kid|patient|paciente)\b/.test(mission)
+      : /\b(?:son|hijo|child|kid|patient|paciente)\b/.test(missionOnly)
         ? ' for my son'
         : '';
     const urgency = /\b(?:urgent|urgente|soon|pronto|sick|enfermo|fever|fiebre|vomit|surgery|operat|pain|dolor)\b/.test(
