@@ -10,9 +10,10 @@ import { InPersonRegistry, type InPersonDisplayView } from './inPersonRegistry.j
 import { AppToAppRegistry, type AppToAppParticipant } from './appToAppRegistry.js';
 import { originateAgentCall, originateTranslatedCall } from './twilio/client.js';
 import { buildAgentCallTwiMl, buildTranslatedCallTwiMl } from './twilio/twiml.js';
+import { normalizeDialPhoneNumber } from './phone.js';
 
 const createCallSchema = z.object({
-  to: z.string().min(7),
+  to: z.string().min(7).transform(normalizeDialPhoneNumber),
   userLanguage: z.string().min(2),
   remoteLanguage: z.string().min(2),
   announceTranslationAtStart: z.boolean().optional(),
@@ -83,7 +84,7 @@ const createAgentCallSchema = z
   })
   .passthrough()
   .transform((body) => ({
-    to: body.to ?? body.phoneNumber ?? '',
+    to: normalizeDialPhoneNumber(body.to ?? body.phoneNumber ?? ''),
     clientSessionId: body.clientSessionId,
     targetName: body.targetName,
     callerName: body.callerName,
