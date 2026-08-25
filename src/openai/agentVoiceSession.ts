@@ -46,6 +46,7 @@ export class OpenAiAgentVoiceSession {
   private firstUtteranceCorrectionSent = false;
   private firstUtteranceTranscript = '';
   private missionOpeningCorrectionSent = false;
+  private missionOpeningRetryAfterCancel = false;
   private missionOpeningTranscript = '';
   private preArmedAudio = 0;
   private responseActive = false;
@@ -339,6 +340,11 @@ export class OpenAiAgentVoiceSession {
       this.guardedMissionAudio.splice(0);
       this.guardedMissionTranscriptDeltas.splice(0);
       this.missionOpeningTranscript = '';
+      if (this.missionOpeningRetryAfterCancel) {
+        this.missionOpeningRetryAfterCancel = false;
+        this.startMissionOpening();
+        return;
+      }
       this.flushPendingIntervention();
       this.currentResponseKind = 'normal';
       return;
@@ -351,6 +357,9 @@ export class OpenAiAgentVoiceSession {
       }
       if (isActiveResponseInProgressError(event.error?.message)) {
         this.responseActive = true;
+        if (this.currentResponseKind === 'mission_opening') {
+          this.missionOpeningRetryAfterCancel = true;
+        }
         this.cancelActiveResponse();
         return;
       }

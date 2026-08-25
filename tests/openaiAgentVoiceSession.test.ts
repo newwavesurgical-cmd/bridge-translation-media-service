@@ -245,6 +245,38 @@ describe('OpenAI agent voice session startup gate', () => {
     );
   });
 
+  it('retries the mission opener if Realtime still has an active response after the first utterance', () => {
+    const { mutable, sent, errors } = makeLiveSession();
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create']);
+
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: {
+          message:
+            'Conversation already has an active response in progress: resp_test. Wait until the response is finished before creating a new one.'
+        }
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.cancelled' }));
+
+    expect(errors).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual([
+      'session.update',
+      'response.create',
+      'response.cancel',
+      'response.create'
+    ]);
+    expect(String((sent[3].response as { instructions?: string }).instructions)).toContain('Do not repeat it');
+    expect(String((sent[3].response as { instructions?: string }).instructions)).toContain(
+      'ask exactly one mission-specific question'
+    );
+  });
+
   it('notifies the bridge when remote speech starts so queued phone audio can be cleared', () => {
     const { mutable, sent, speechStarted } = makeLiveSession();
 
