@@ -142,7 +142,7 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
   });
 
-  it('retakes the call a few seconds after an operator intervention if the callee stays silent', () => {
+  it('does not add an unsolicited follow-up after an operator intervention if the callee stays silent', () => {
     vi.useFakeTimers();
     const { session, mutable, sent } = makeLiveSession();
 
@@ -156,16 +156,7 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
     vi.advanceTimersByTime(3200);
 
-    expect(sent.map((payload) => payload.type)).toEqual([
-      'response.cancel',
-      'conversation.item.create',
-      'response.create',
-      'response.create'
-    ]);
-    expect(String((sent.at(-1)?.response as { instructions?: string }).instructions)).toContain('Retake command');
-    expect(String((sent.at(-1)?.response as { instructions?: string }).instructions)).toContain(
-      'do not restate it now'
-    );
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
   });
 
   it('does not retake the call after an operator intervention when the callee responds first', () => {

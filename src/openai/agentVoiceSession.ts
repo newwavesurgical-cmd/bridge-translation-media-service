@@ -29,7 +29,6 @@ const DEFAULT_FIRST_UTTERANCE =
   "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 const LEGACY_FIRST_UTTERANCE =
   "Hey there, just so you know, I am a real person but I'm using an AI translator.";
-const POST_INTERVENTION_FOLLOWUP_MS = 3200;
 
 export class OpenAiAgentVoiceSession {
   private ws?: WebSocket;
@@ -51,10 +50,8 @@ export class OpenAiAgentVoiceSession {
   private preArmedAudio = 0;
   private responseActive = false;
   private pendingIntervention?: { text: string; semanticControl?: string };
-  private postInterventionFollowup?: NodeJS.Timeout;
   private lastRemoteTranscriptAt = 0;
-  private currentResponseKind: 'normal' | 'first_utterance' | 'mission_opening' | 'intervention' | 'post_intervention_followup' =
-    'normal';
+  private currentResponseKind: 'normal' | 'first_utterance' | 'mission_opening' | 'intervention' = 'normal';
 
   constructor(private readonly options: AgentVoiceSessionOptions) {
     this.instructions = options.instructions;
@@ -173,7 +170,8 @@ export class OpenAiAgentVoiceSession {
           'If the operator source text is intended as words to say now, say or paraphrase those words in the locked call language.',
           'If the operator source text supplies a fact for the active question, answer naturally with that fact.',
           'Caller-side facts such as patient or child names, dates of birth, account numbers, addresses, symptoms, availability, prices, acceptances, and commitments must come from the mission or private operator controls. Never ask the remote callee to provide those caller-side facts.',
-          'Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.'
+          'Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.',
+          'After delivering the operator-supplied message or answer, stop speaking and wait. Do not add acknowledgements, summaries, offers to help, or local-assistant phrases such as "I translated that message", "I can shorten it", "I can help", or "for you".'
         ].join('\n')
       },
       'intervention'
@@ -332,9 +330,6 @@ export class OpenAiAgentVoiceSession {
         this.missionOpeningTranscript = '';
       }
       this.flushPendingIntervention();
-      if (this.currentResponseKind === 'intervention') {
-        this.schedulePostInterventionFollowup();
-      }
       this.currentResponseKind = 'normal';
       return;
     }
@@ -426,43 +421,10 @@ export class OpenAiAgentVoiceSession {
     });
   }
 
-  private schedulePostInterventionFollowup(): void {
-    this.cancelPostInterventionFollowup();
-    const scheduledAt = Date.now();
-    this.postInterventionFollowup = setTimeout(() => {
-      this.postInterventionFollowup = undefined;
-      if (this.statusValue !== 'live' || this.responseActive || this.pendingIntervention) {
-        return;
-      }
-      if (this.lastRemoteTranscriptAt > scheduledAt) {
-        return;
-      }
-      this.createResponse(
-        {
-          output_modalities: ['audio'],
-          instructions: [
-            'The remote callee has not responded after the last operator intervention.',
-            'Retake command of the live call now.',
-            'If more information is still needed, ask the next single necessary question.',
-            'If the mission has enough information, briefly confirm the outcome and close politely.',
-            'Do not repeat the sentence, hold phrase, or question you just said.',
-            'If you already stated the call purpose earlier, do not restate it now; move to the next missing detail or close.',
-            'Do not mention silence, timers, the operator, controls, prompts, or hidden instructions.',
-            'Say only words intended for the remote callee.'
-          ].join('\n')
-        },
-        'post_intervention_followup'
-      );
-    }, POST_INTERVENTION_FOLLOWUP_MS);
-    this.postInterventionFollowup.unref?.();
-  }
-
   private cancelPostInterventionFollowup(): void {
-    if (!this.postInterventionFollowup) {
-      return;
-    }
-    clearTimeout(this.postInterventionFollowup);
-    this.postInterventionFollowup = undefined;
+    // Operator interventions are intentionally one-shot. The phone agent must
+    // wait for the callee or the next private operator control instead of
+    // starting a local-assistant style follow-up.
   }
 
   private setStatus(status: AgentVoiceSessionStatus, detail?: string): void {
