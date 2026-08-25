@@ -37,6 +37,8 @@ export class OpenAiAgentVoiceSession {
   private readonly guardedFirstAudio: string[] = [];
   private readonly guardedMissionAudio: string[] = [];
   private readonly guardedMissionTranscriptDeltas: string[] = [];
+  private readonly guardedInterventionAudio: string[] = [];
+  private readonly guardedInterventionTranscriptDeltas: string[] = [];
   private readonly instructions: string;
   private readonly firstUtterance: string;
   private hasStartedCall = false;
@@ -51,6 +53,9 @@ export class OpenAiAgentVoiceSession {
   private preArmedAudio = 0;
   private responseActive = false;
   private pendingIntervention?: { text: string; semanticControl?: string };
+  private activeIntervention?: { text: string; semanticControl?: string };
+  private interventionCorrectionSent = false;
+  private interventionTranscript = '';
   private lastRemoteTranscriptAt = 0;
   private currentResponseKind: 'normal' | 'first_utterance' | 'mission_opening' | 'intervention' = 'normal';
 
@@ -150,6 +155,15 @@ export class OpenAiAgentVoiceSession {
     }
     const { text, semanticControl } = this.pendingIntervention;
     this.pendingIntervention = undefined;
+    this.activeIntervention = { text, semanticControl };
+    this.interventionCorrectionSent = false;
+    this.interventionTranscript = '';
+    this.guardedInterventionAudio.splice(0);
+    this.guardedInterventionTranscriptDeltas.splice(0);
+    this.createInterventionResponse(text, semanticControl);
+  }
+
+  private createInterventionResponse(text: string, semanticControl?: string, correction = false): void {
     const interventionText = semanticControl
       ? `Private operator contextual micro-intervention: ${semanticControl}. Source text to apply, not quote: ${text}`
       : `Private operator intervention source text to apply, not quote: ${text}`;
@@ -165,7 +179,9 @@ export class OpenAiAgentVoiceSession {
       {
         output_modalities: ['audio'],
         instructions: [
-          'Apply the private operator intervention immediately to the live phone call.',
+          correction
+            ? 'Your previous draft response included private planning/meta-commentary and was discarded before the callee heard it. Try again with only the callee-facing words.'
+            : 'Apply the private operator intervention immediately to the live phone call.',
           'The session language lock remains mandatory for every spoken word. If the operator source text is written in another language, translate the intended meaning into the locked spoken language.',
           'Do not quote the operator source text or preserve its source language.',
           'If the operator source text is intended as words to say now, say or paraphrase those words in the locked call language.',
@@ -174,6 +190,7 @@ export class OpenAiAgentVoiceSession {
           'The mission is working call memory. If the mission already contains relevant symptoms, recent procedures, urgency, relationship, appointment purpose, availability, or other caller-side facts, use those known details before pausing for more information.',
           'A known relationship is usable caller-side information. If the mission says the appointment or issue is for my son, daughter, child, spouse, parent, or another relationship, answer that relationship when asked who it is for; only pause for the specific missing name, date of birth, or identifier.',
           'Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.',
+          'Never preface with private planning or acknowledgements such as "Got it", "I will respond", "I will say", "let me translate", "let me handle that", "so we can keep moving", or any explanation of what you are about to do.',
           'After delivering the operator-supplied message or answer, stop speaking and wait. Do not add acknowledgements, summaries, offers to help, or local-assistant phrases such as "I translated that message", "I can shorten it", "I can help", or "for you".'
         ].join('\n')
       },
@@ -251,6 +268,10 @@ export class OpenAiAgentVoiceSession {
         this.guardedMissionAudio.push(event.delta);
         return;
       }
+      if (this.currentResponseKind === 'intervention') {
+        this.guardedInterventionAudio.push(event.delta);
+        return;
+      }
       this.options.onAudioDelta(event.delta);
       return;
     }
@@ -265,6 +286,11 @@ export class OpenAiAgentVoiceSession {
       if (this.currentResponseKind === 'mission_opening') {
         this.missionOpeningTranscript = normalizeTranscript(`${this.missionOpeningTranscript}${event.delta}`);
         this.guardedMissionTranscriptDeltas.push(event.delta);
+        return;
+      }
+      if (this.currentResponseKind === 'intervention') {
+        this.interventionTranscript = normalizeTranscript(`${this.interventionTranscript}${event.delta}`);
+        this.guardedInterventionTranscriptDeltas.push(event.delta);
         return;
       }
       this.options.onAgentTranscriptDelta(event.delta);
@@ -332,6 +358,20 @@ export class OpenAiAgentVoiceSession {
         }
         this.missionOpeningTranscript = '';
       }
+      if (this.currentResponseKind === 'intervention') {
+        if (!this.isInterventionAllowed()) {
+          this.restartIntervention();
+          return;
+        }
+        for (const delta of this.guardedInterventionTranscriptDeltas.splice(0)) {
+          this.options.onAgentTranscriptDelta(delta);
+        }
+        for (const audio of this.guardedInterventionAudio.splice(0)) {
+          this.options.onAudioDelta(audio);
+        }
+        this.interventionTranscript = '';
+        this.activeIntervention = undefined;
+      }
       this.flushPendingIntervention();
       this.currentResponseKind = 'normal';
       return;
@@ -340,7 +380,10 @@ export class OpenAiAgentVoiceSession {
       this.responseActive = false;
       this.guardedMissionAudio.splice(0);
       this.guardedMissionTranscriptDeltas.splice(0);
+      this.guardedInterventionAudio.splice(0);
+      this.guardedInterventionTranscriptDeltas.splice(0);
       this.missionOpeningTranscript = '';
+      this.interventionTranscript = '';
       if (this.missionOpeningRetryAfterCancel) {
         this.missionOpeningRetryAfterCancel = false;
         this.startMissionOpening();
@@ -417,6 +460,23 @@ export class OpenAiAgentVoiceSession {
     return !containsGenericPlaceholder(this.missionOpeningTranscript);
   }
 
+  private isInterventionAllowed(): boolean {
+    return !containsPrivateMetaCommentary(this.interventionTranscript);
+  }
+
+  private restartIntervention(): void {
+    const intervention = this.activeIntervention;
+    this.guardedInterventionAudio.splice(0);
+    this.guardedInterventionTranscriptDeltas.splice(0);
+    this.interventionTranscript = '';
+    if (!intervention || this.interventionCorrectionSent) {
+      this.activeIntervention = undefined;
+      return;
+    }
+    this.interventionCorrectionSent = true;
+    this.createInterventionResponse(intervention.text, intervention.semanticControl, true);
+  }
+
   private cancelActiveResponse(): void {
     this.sendJson({ type: 'response.cancel' });
   }
@@ -470,6 +530,7 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
     'Never open with vague alarm or placeholder phrasing like "I need to bring something to your attention", "I have an important matter", or "there is something I need to discuss" if the mission contains a concrete purpose.',
     'Never ask app-assistant questions such as "what would you like to do today", "how can I help you", or "what can I do for you". You are already on the phone with the remote callee.',
     'Never say you are calling for, handling, verifying, or doing anything for a client, customer, user, or request. Speak as the caller in first person and name the actual purpose.',
+    'Never say vague file/case placeholders such as "the matter on file", "the request on file", "the issue on file", or "the case on file". Name the actual purpose from the mission.',
     'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
     'Say only words intended for the remote callee.',
     '',
@@ -538,7 +599,7 @@ function containsSpanishSourceLeak(text: string): boolean {
 function containsGenericPlaceholder(text: string): boolean {
   const compact = compactTranscript(text);
   return (
-    /\b(?:quick matter|brief matter|quick outreach|outreach call|calling about something|bring something to your attention|important matter|something i need to discuss)\b/i.test(
+    /\b(?:quick matter|brief matter|quick outreach|outreach call|calling about something|bring something to your attention|important matter|something i need to discuss|matter on file|request on file|issue on file|case on file)\b/i.test(
       text
     ) ||
     /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+for\s+(?:this\s+)?call\b/i.test(text) ||
@@ -566,7 +627,35 @@ function containsGenericPlaceholder(text: string): boolean {
     compact.includes('matterfromaclient') ||
     compact.includes('matterfromacustomer') ||
     compact.includes('foraclient') ||
-    compact.includes('foracustomer')
+    compact.includes('foracustomer') ||
+    compact.includes('matteronfile') ||
+    compact.includes('requestonfile') ||
+    compact.includes('issueonfile') ||
+    compact.includes('caseonfile')
+  );
+}
+
+function containsPrivateMetaCommentary(text: string): boolean {
+  const compact = compactTranscript(text);
+  return (
+    /\b(?:got it|okay|sure|understood)[,.]?\s+(?:i['’]?ll|i will)\s+(?:respond|say|tell|translate|handle|explain|describe)\b/i.test(
+      text
+    ) ||
+    /\b(?:i['’]?ll|i will)\s+(?:respond|say|tell|translate|handle|explain|describe)\b/i.test(text) ||
+    /\blet me\s+(?:respond|say|tell|translate|handle|explain|describe)\b/i.test(text) ||
+    /\bso\s+we\s+can\s+keep\s+moving\b/i.test(text) ||
+    /\b(?:scheduling constraint|operator|intervention|control|source text|callee-facing|locked language)\b/i.test(text) ||
+    compact.startsWith('gotitill') ||
+    compact.startsWith('okayill') ||
+    compact.startsWith('sureill') ||
+    compact.startsWith('understoodill') ||
+    compact.includes('illrespondwith') ||
+    compact.includes('iwillrespondwith') ||
+    compact.includes('illtranslate') ||
+    compact.includes('iwilltranslate') ||
+    compact.includes('letmehandlethat') ||
+    compact.includes('sowecankeepmoving') ||
+    compact.includes('schedulingconstraint')
   );
 }
 

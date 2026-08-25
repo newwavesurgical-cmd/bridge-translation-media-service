@@ -53,6 +53,7 @@ function makeLiveSession(instructions = 'Mission instructions') {
     statusValue: string;
     responseActive: boolean;
     firstUtteranceArmed: boolean;
+    firstUtteranceDelivered: boolean;
     firstUtteranceTranscript: string;
     handleMessage: (message: string) => void;
   };
@@ -521,6 +522,101 @@ describe('OpenAI agent voice session startup gate', () => {
 
     expect(audioDeltas).toEqual(['good-audio']);
     expect(agentTranscriptDeltas).toEqual(['Because I would like to make an appointment with the doctor for my son.']);
+  });
+
+  it('buffers and retries a mission opener that invents a matter-on-file placeholder', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Mission:',
+      'Call the doctor to make an appointment for my son after surgery.'
+    ].join('\n');
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
+      'Never say vague file/case placeholders'
+    );
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'Because I need to continue the call about the matter on file, are you available to discuss it now?'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create', 'response.create']);
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'good-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'Because I would like to make an appointment with the doctor for my son.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['good-audio']);
+    expect(agentTranscriptDeltas).toEqual(['Because I would like to make an appointment with the doctor for my son.']);
+  });
+
+  it('buffers and retries operator interventions that leak private planning text', () => {
+    const { session, mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession();
+    mutable.firstUtteranceDelivered = true;
+
+    session.injectInstruction('No puedo el jueves, necesito hacerlo el viernes.');
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: { message: 'Cancellation failed: no active response found' }
+      })
+    );
+
+    expect(sent.map((payload) => payload.type)).toEqual(['response.cancel', 'conversation.item.create', 'response.create']);
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
+      'Never preface with private planning'
+    );
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta:
+          "Got it, I'll respond with that scheduling constraint clearly so we can keep moving. I can't do Thursday. I need to do it on Friday."
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual([
+      'response.cancel',
+      'conversation.item.create',
+      'response.create',
+      'conversation.item.create',
+      'response.create'
+    ]);
+    expect(String((sent[4].response as { instructions?: string }).instructions)).toContain(
+      'previous draft response included private planning'
+    );
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'good-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: "I can't do Thursday. I need to do it on Friday."
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['good-audio']);
+    expect(agentTranscriptDeltas).toEqual(["I can't do Thursday. I need to do it on Friday."]);
   });
 
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {
