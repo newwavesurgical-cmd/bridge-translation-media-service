@@ -111,6 +111,15 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
       'language lock remains mandatory'
     );
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
+      'decide whether the private source text actually answers'
+    );
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
+      'playful, affectionate, a test phrase'
+    );
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
+      'Never ask the remote callee to provide those caller-side facts'
+    );
   });
 
   it('keeps the session alive when a stale cancel reports no active response', () => {
@@ -300,6 +309,46 @@ describe('OpenAI agent voice session startup gate', () => {
 
     expect(audioDeltas).toEqual(['good-audio']);
     expect(agentTranscriptDeltas).toEqual(['I am calling to request an urgent appointment for your child.']);
+  });
+
+  it('buffers and retries a mission opener that uses vague alarm placeholder phrasing', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Mission:',
+      'Call the pediatric office to schedule an urgent appointment for my son after surgery.'
+    ].join('\n');
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'I need to bring something to your attention.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create', 'response.create']);
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain('previous draft opener');
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain('Never open with vague alarm');
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'good-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'I am calling to schedule an urgent appointment for my son.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['good-audio']);
+    expect(agentTranscriptDeltas).toEqual(['I am calling to schedule an urgent appointment for my son.']);
   });
 
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {

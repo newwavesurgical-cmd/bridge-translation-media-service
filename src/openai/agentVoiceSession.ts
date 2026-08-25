@@ -169,6 +169,10 @@ export class OpenAiAgentVoiceSession {
           'Apply the private operator intervention immediately to the live phone call.',
           'The session language lock remains mandatory for every spoken word. If the operator source text is written in another language, translate the intended meaning into the locked spoken language.',
           'Do not quote the operator source text or preserve its source language.',
+          'Before speaking, decide whether the private source text actually answers the remote callee\'s active question or unresolved slot.',
+          'If it is a complete answer, say only the natural caller-side answer to the callee.',
+          'If it is incomplete, irrelevant, playful, affectionate, a test phrase, or does not answer the active remote question, do not repeat it to the callee. Say at most one brief hold phrase if needed, then stop and wait for better private guidance.',
+          'Caller-side facts such as patient or child names, dates of birth, account numbers, addresses, symptoms, availability, prices, acceptances, and commitments must come from the mission or private operator controls. Never ask the remote callee to provide those caller-side facts.',
           'Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.'
         ].join('\n')
       },
@@ -484,6 +488,7 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
     'Do not ask whether you are speaking with the named contact before stating the concrete purpose. If contact confirmation is necessary, place it after the purpose in the same single question.',
     'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
     'Never say a generic placeholder like "quick matter", "brief matter", or "calling about something" if the mission contains a real purpose.',
+    'Never open with vague alarm or placeholder phrasing like "I need to bring something to your attention", "I have an important matter", or "there is something I need to discuss" if the mission contains a concrete purpose.',
     'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
     'Say only words intended for the remote callee.',
     '',
@@ -545,7 +550,9 @@ function containsSpanishSourceLeak(text: string): boolean {
 }
 
 function containsGenericPlaceholder(text: string): boolean {
-  return /\b(?:quick matter|brief matter|calling about something)\b/i.test(text);
+  return /\b(?:quick matter|brief matter|calling about something|bring something to your attention|important matter|something i need to discuss)\b/i.test(
+    text
+  );
 }
 
 function compactLanguageText(text: string): string {

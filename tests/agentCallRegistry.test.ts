@@ -80,6 +80,9 @@ describe('AgentCallRegistry', () => {
     );
     expect(instructions).toContain('speak only in English');
     expect(instructions).toContain('Never ask the person who requested the call for private information out loud');
+    expect(instructions).toContain('ABSOLUTE OPERATOR BOUNDARY');
+    expect(instructions).toContain('Caller-side facts include patient or child names');
+    expect(instructions).toContain('Never ask the remote callee to tell you the caller-side fact');
     expect(instructions).toContain('Never say or imply');
     expect(instructions).toContain('Do not begin the call with a hold phrase');
     expect(instructions).toContain('Never switch persona');
@@ -88,6 +91,7 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Never open with vague agency phrasing');
     expect(instructions).toContain('Avoid repetition');
     expect(instructions).toContain('treat it as leaked local assistant noise');
+    expect(instructions).toContain('If the private control is incomplete, irrelevant, playful, affectionate');
     expect(instructions).toContain('llama ahora');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
