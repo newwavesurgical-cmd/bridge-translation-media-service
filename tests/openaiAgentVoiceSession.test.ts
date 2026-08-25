@@ -241,9 +241,12 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Translate the purpose into the locked spoken language');
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Do not list multiple wants');
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
-      'Do not ask whether you are speaking with the named contact before stating the concrete purpose'
+      'Do not start with "Hello", "am I speaking with", "is this", contact confirmation'
     );
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain('Never say a generic placeholder');
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
+      'Never ask app-assistant questions'
+    );
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
       'Do not repeat the purpose in a second sentence'
     );
@@ -267,7 +270,7 @@ describe('OpenAI agent voice session startup gate', () => {
 
     const instructions = String((sent[1].response as { instructions?: string }).instructions);
     expect(instructions).toContain('Clean mission opening brief');
-    expect(instructions).toContain('translated into natural English');
+    expect(instructions).toContain('make an appointment');
     expect(instructions).not.toContain('PURPOSE-SECOND RULE');
     expect(instructions).not.toContain('LITERAL FIRST UTTERANCE CONTRACT');
     expect(instructions).not.toContain('pedir una cita urgente');
@@ -349,6 +352,53 @@ describe('OpenAI agent voice session startup gate', () => {
 
     expect(audioDeltas).toEqual(['good-audio']);
     expect(agentTranscriptDeltas).toEqual(['I am calling to schedule an urgent appointment for my son.']);
+  });
+
+  it('buffers and retries a mission opener that starts with contact confirmation and app-assistant phrasing', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Remote callee/contact: oficina del doctor Ramírez.',
+      'Mission:',
+      'Objetivo: pedir una cita con la oficina del doctor Ramírez porque mi hijo tiene problemas y necesita verlo pronto.'
+    ].join('\n');
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    const openerInstructions = String((sent[1].response as { instructions?: string }).instructions);
+    expect(openerInstructions).toContain('make an appointment with Dr. Ramirez');
+    expect(openerInstructions).toContain('child is having issues');
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta:
+          'Hello, am I speaking with oficina del doctor Ramírez? I am calling for a quick outreach call. What would you like to do today?'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create', 'response.create']);
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'good-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta:
+          'Because I would like to make an appointment with Dr. Ramirez for my son. He is having issues and needs to be seen as soon as possible. Do you have anything available soon?'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['good-audio']);
+    expect(agentTranscriptDeltas).toEqual([
+      'Because I would like to make an appointment with Dr. Ramirez for my son. He is having issues and needs to be seen as soon as possible. Do you have anything available soon?'
+    ]);
   });
 
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {

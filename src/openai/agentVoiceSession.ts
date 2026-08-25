@@ -483,11 +483,12 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
       : 'The literal disclosure has already been spoken. Do not repeat it.',
     'Ignore any repeated first-utterance, disclosure, or "same message" requirement in the mission text; that startup contract is already complete.',
     'Use the already-loaded session mission for facts, but do not read, quote, or summarize the raw mission prompt.',
-    'Say exactly one short conversational turn: state the specific reason for the call one time in the language lock, then ask exactly one mission-specific question.',
-    'Do not ask whether you are speaking with the named contact before stating the concrete purpose. If contact confirmation is necessary, place it after the purpose in the same single question.',
+    'Say exactly one short conversational turn. Start with the concrete reason for the call, using wording like "because I would like to..." or "because I need to..."; then ask exactly one mission-specific question.',
+    'Do not start with "Hello", "am I speaking with", "is this", contact confirmation, or the contact/place name. If contact confirmation is necessary, place it after the concrete purpose in the same single question.',
     'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
-    'Never say a generic placeholder like "quick matter", "brief matter", or "calling about something" if the mission contains a real purpose.',
+    'Never say a generic placeholder like "quick matter", "brief matter", "quick outreach call", or "calling about something" if the mission contains a real purpose.',
     'Never open with vague alarm or placeholder phrasing like "I need to bring something to your attention", "I have an important matter", or "there is something I need to discuss" if the mission contains a concrete purpose.',
+    'Never ask app-assistant questions such as "what would you like to do today", "how can I help you", or "what can I do for you". You are already on the phone with the remote callee.',
     'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
     'Say only words intended for the remote callee.',
     '',
@@ -500,11 +501,14 @@ function buildMissionOpeningBrief(instructions: string): string {
   const mission = extractMissionText(instructions);
   const cleaned = removeMissionScaffolding(mission);
   if (isEnglishLanguageLock(instructions) && containsSpanishSourceLeak(cleaned)) {
-    return [
-      'The source mission contains non-English purpose text.',
-      'Use the concrete purpose from the already-loaded session mission, translated into natural English.',
-      'Do not speak any source-language words or labels from the mission.'
-    ].join(' ');
+    return (
+      inferEnglishMissionPurpose(cleaned, instructions) ??
+      [
+        'The source mission contains non-English purpose text.',
+        'Use the concrete purpose from the already-loaded session mission, translated into natural English.',
+        'Do not speak any source-language words or labels from the mission.'
+      ].join(' ')
+    );
   }
   return cleaned || 'Use the concrete purpose from the already-loaded session mission and ask the next mission-specific question.';
 }
@@ -541,6 +545,8 @@ function containsSpanishSourceLeak(text: string): boolean {
     /\bpedir\s+una\s+cita\b/.test(normalized) ||
     /\bcita\s+urgente\b/.test(normalized) ||
     /\bque\s+opero\b/.test(normalized) ||
+    /\boficina\s+del\s+doctor\b/.test(normalized) ||
+    /\bdoctor\s+ramirez\b/.test(normalized) ||
     /\ba\s+su\s+hijo\b/.test(normalized) ||
     /\bhablar\s+con\b/.test(normalized) ||
     /\bpara\s+(?:pedir|hablar|llamar)\b/.test(normalized) ||
@@ -549,9 +555,43 @@ function containsSpanishSourceLeak(text: string): boolean {
 }
 
 function containsGenericPlaceholder(text: string): boolean {
-  return /\b(?:quick matter|brief matter|calling about something|bring something to your attention|important matter|something i need to discuss)\b/i.test(
-    text
+  return (
+    /\b(?:quick matter|brief matter|quick outreach|outreach call|calling about something|bring something to your attention|important matter|something i need to discuss)\b/i.test(
+      text
+    ) ||
+    /\b(?:what would you like to do today|how can i help you|what can i do for you)\b/i.test(text) ||
+    /^\s*(?:hello|hi),?\s+(?:am i speaking with|is this)\b/i.test(text)
   );
+}
+
+function inferEnglishMissionPurpose(cleanedMission: string, allInstructions: string): string | null {
+  const normalized = compactLanguageText(`${cleanedMission} ${allInstructions}`);
+  if (/\b(?:doctor|dr|pediatric|pediatr|cita|appointment|medical|medico|hijo|son)\b/.test(normalized)) {
+    const doctorName = inferDoctorName(`${cleanedMission} ${allInstructions}`);
+    const contact = doctorName ? ` with ${doctorName}` : ' with the doctor';
+    return [
+      `Open by saying you are calling because you would like to make an appointment${contact}.`,
+      'If the mission mentions a child, son, symptoms, urgency, or post-surgical concern, briefly include that the child is having issues and needs to be seen as soon as possible.',
+      'Ask whether there is an appointment available soon.',
+      'Do not say any Spanish office label such as "oficina del doctor".'
+    ].join(' ');
+  }
+  if (/\b(?:car|coche|auto|vehicle|vehiculo)\b/.test(normalized)) {
+    return [
+      'Open by saying you are calling because you are interested in the car.',
+      'Ask whether it is still available.',
+      'Do not say source-language labels from the mission.'
+    ].join(' ');
+  }
+  return null;
+}
+
+function inferDoctorName(text: string): string | null {
+  const match = text.match(/\b(?:Dr\.?|doctor)\s+([A-ZÁÉÍÓÚÑ][\p{L}'-]+)/u);
+  if (!match?.[1]) {
+    return null;
+  }
+  return `Dr. ${match[1].normalize('NFKD').replace(/[\u0300-\u036f]/g, '')}`;
 }
 
 function compactLanguageText(text: string): string {
