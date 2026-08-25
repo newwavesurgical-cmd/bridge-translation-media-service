@@ -170,6 +170,7 @@ export class OpenAiAgentVoiceSession {
           'If the operator source text is intended as words to say now, say or paraphrase those words in the locked call language.',
           'If the operator source text supplies a fact for the active question, answer naturally with that fact.',
           'Caller-side facts such as patient or child names, dates of birth, account numbers, addresses, symptoms, availability, prices, acceptances, and commitments must come from the mission or private operator controls. Never ask the remote callee to provide those caller-side facts.',
+          'A known relationship is usable caller-side information. If the mission says the appointment or issue is for my son, daughter, child, spouse, parent, or another relationship, answer that relationship when asked who it is for; only pause for the specific missing name, date of birth, or identifier.',
           'Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.',
           'After delivering the operator-supplied message or answer, stop speaking and wait. Do not add acknowledgements, summaries, offers to help, or local-assistant phrases such as "I translated that message", "I can shorten it", "I can help", or "for you".'
         ].join('\n')
