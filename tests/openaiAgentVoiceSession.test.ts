@@ -480,6 +480,49 @@ describe('OpenAI agent voice session startup gate', () => {
     ]);
   });
 
+  it('buffers and retries a no-space mission opener that asks about a client request', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Mission:',
+      'Call the doctor to make an appointment for my son.'
+    ].join('\n');
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
+      'Never say you are calling for, handling, verifying, or doing anything for a client'
+    );
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta:
+          'BecauseIwouldliketoverifythereasonforarequestonbehalfofaclient,couldyouconfirmthereasonfortherequest?'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent.map((payload) => payload.type)).toEqual(['session.update', 'response.create', 'response.create']);
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'good-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'Because I would like to make an appointment with the doctor for my son.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['good-audio']);
+    expect(agentTranscriptDeltas).toEqual(['Because I would like to make an appointment with the doctor for my son.']);
+  });
+
   it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {
     const { session, mutable, sent, startupDiagnostics } = makeLiveSession();
     mutable.firstUtteranceArmed = true;

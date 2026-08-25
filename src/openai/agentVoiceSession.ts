@@ -469,6 +469,7 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
     'Never say a generic placeholder like "quick matter", "brief matter", "quick outreach call", or "calling about something" if the mission contains a real purpose.',
     'Never open with vague alarm or placeholder phrasing like "I need to bring something to your attention", "I have an important matter", or "there is something I need to discuss" if the mission contains a concrete purpose.',
     'Never ask app-assistant questions such as "what would you like to do today", "how can I help you", or "what can I do for you". You are already on the phone with the remote callee.',
+    'Never say you are calling for, handling, verifying, or doing anything for a client, customer, user, or request. Speak as the caller in first person and name the actual purpose.',
     'Do not list multiple wants, constraints, or background details. Do not repeat the purpose in a second sentence. Save details for later only if the callee asks.',
     'Say only words intended for the remote callee.',
     '',
@@ -535,15 +536,37 @@ function containsSpanishSourceLeak(text: string): boolean {
 }
 
 function containsGenericPlaceholder(text: string): boolean {
+  const compact = compactTranscript(text);
   return (
     /\b(?:quick matter|brief matter|quick outreach|outreach call|calling about something|bring something to your attention|important matter|something i need to discuss)\b/i.test(
       text
     ) ||
     /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+for\s+(?:this\s+)?call\b/i.test(text) ||
+    /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+for\s+(?:a\s+)?request\b/i.test(text) ||
+    /\bon\s+behalf\s+of\s+(?:a\s+)?(?:client|customer|user)\b/i.test(text) ||
+    /\b(?:for|from)\s+(?:a\s+)?(?:client|customer|user)\b/i.test(text) ||
     /\b(?:is this|is it|if this is)\s+regarding\s+(?:a\s+)?request\s+from\s+(?:a\s+)?(?:client|customer)\b/i.test(text) ||
     /\b(?:request|matter)\s+from\s+(?:a\s+)?(?:client|customer)\b/i.test(text) ||
     /\b(?:what would you like to do today|how can i help you|what can i do for you)\b/i.test(text) ||
-    /^\s*(?:hello|hi),?\s+(?:am i speaking with|is this)\b/i.test(text)
+    /^\s*(?:hello|hi),?\s+(?:am i speaking with|is this)\b/i.test(text) ||
+    compact.includes('verifythereasonforacall') ||
+    compact.includes('verifythereasonforthiscall') ||
+    compact.includes('verifythereasonforarequest') ||
+    compact.includes('confirmthereasonforacall') ||
+    compact.includes('confirmthereasonforthiscall') ||
+    compact.includes('confirmthereasonforarequest') ||
+    compact.includes('clarifythereasonforacall') ||
+    compact.includes('clarifythereasonforthiscall') ||
+    compact.includes('clarifythereasonforarequest') ||
+    compact.includes('onbehalfofaclient') ||
+    compact.includes('onbehalfofcustomer') ||
+    compact.includes('onbehalfofauser') ||
+    compact.includes('requestfromaclient') ||
+    compact.includes('requestfromacustomer') ||
+    compact.includes('matterfromaclient') ||
+    compact.includes('matterfromacustomer') ||
+    compact.includes('foraclient') ||
+    compact.includes('foracustomer')
   );
 }
 
