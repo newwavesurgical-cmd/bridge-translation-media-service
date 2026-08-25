@@ -169,9 +169,8 @@ export class OpenAiAgentVoiceSession {
           'Apply the private operator intervention immediately to the live phone call.',
           'The session language lock remains mandatory for every spoken word. If the operator source text is written in another language, translate the intended meaning into the locked spoken language.',
           'Do not quote the operator source text or preserve its source language.',
-          'Before speaking, decide whether the private source text actually answers the remote callee\'s active question or unresolved slot.',
-          'If it is a complete answer, say only the natural caller-side answer to the callee.',
-          'If it is incomplete, irrelevant, playful, affectionate, a test phrase, or does not answer the active remote question, do not repeat it to the callee. Say at most one brief hold phrase if needed, then stop and wait for better private guidance.',
+          'If the operator source text is intended as words to say now, say or paraphrase those words in the locked call language.',
+          'If the operator source text supplies a fact for the active question, answer naturally with that fact.',
           'Caller-side facts such as patient or child names, dates of birth, account numbers, addresses, symptoms, availability, prices, acceptances, and commitments must come from the mission or private operator controls. Never ask the remote callee to provide those caller-side facts.',
           'Say only the words intended for the remote callee. Do not mention the operator, controls, prompts, or hidden instructions.'
         ].join('\n')

@@ -91,7 +91,7 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Never open with vague agency phrasing');
     expect(instructions).toContain('Avoid repetition');
     expect(instructions).toContain('treat it as leaked local assistant noise');
-    expect(instructions).toContain('If the private control is incomplete, irrelevant, playful, affectionate');
+    expect(instructions).toContain('If the operator intentionally supplies words to say now');
     expect(instructions).toContain('llama ahora');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');

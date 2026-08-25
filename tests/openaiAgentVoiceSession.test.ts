@@ -112,10 +112,10 @@ describe('OpenAI agent voice session startup gate', () => {
       'language lock remains mandatory'
     );
     expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
-      'decide whether the private source text actually answers'
+      'intended as words to say now'
     );
     expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
-      'playful, affectionate, a test phrase'
+      'supplies a fact for the active question'
     );
     expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
       'Never ask the remote callee to provide those caller-side facts'
