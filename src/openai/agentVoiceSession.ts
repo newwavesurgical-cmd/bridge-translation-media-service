@@ -424,6 +424,17 @@ export class OpenAiAgentVoiceSession {
   }
 
   private startMissionOpening(): void {
+    const exactOpening = buildDeterministicMissionOpening(this.instructions);
+    if (exactOpening) {
+      this.createResponse(
+        {
+          output_modalities: ['audio'],
+          instructions: `Say exactly this sentence and nothing else:\n${exactOpening}`
+        },
+        'mission_opening'
+      );
+      return;
+    }
     this.createResponse(
       {
         output_modalities: ['audio'],
@@ -539,6 +550,41 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
   ].join('\n');
 }
 
+function buildDeterministicMissionOpening(instructions: string): string | null {
+  if (!isEnglishLanguageLock(instructions)) {
+    return null;
+  }
+  const mission = compactLanguageText(`${extractMissionText(instructions)} ${instructions}`);
+  const doctorName = inferDoctorName(instructions);
+  if (/\b(?:doctor|dr|pediatric|pediatr|medical|medico|appointment|cita|surgery|operat|hospital)\b/.test(mission)) {
+    const contact = doctorName ? ` with ${doctorName}` : ' with the doctor';
+    const relation = /\b(?:daughter|hija)\b/.test(mission)
+      ? ' for my daughter'
+      : /\b(?:son|hijo|child|kid|patient|paciente)\b/.test(mission)
+        ? ' for my son'
+        : '';
+    const urgency = /\b(?:urgent|urgente|soon|pronto|sick|enfermo|fever|fiebre|vomit|surgery|operat|pain|dolor)\b/.test(
+      mission
+    )
+      ? ' as soon as possible'
+      : '';
+    return `Because I would like to make an appointment${contact}${relation}${urgency}. Could you help me schedule it?`;
+  }
+  if (/\b(?:car|coche|auto|vehicle|vehiculo)\b/.test(mission)) {
+    return 'Because I am calling about the car. Is it still available?';
+  }
+  if (/\b(?:reservation|reserva|restaurant|restaurante|table|mesa)\b/.test(mission)) {
+    return 'Because I would like to make a reservation. Do you have availability?';
+  }
+  if (/\b(?:order|pedido|delivery|entrega|shipment|tracking)\b/.test(mission)) {
+    return 'Because I am calling to check on an order. Could you help me with that?';
+  }
+  if (/\b(?:utility|electric|electricity|power|water|gas|bill|cuenta|factura|luz|agua)\b/.test(mission)) {
+    return 'Because I am calling about my account. Could you help me with that?';
+  }
+  return null;
+}
+
 function buildMissionOpeningBrief(instructions: string): string {
   const mission = extractMissionText(instructions);
   const cleaned = removeMissionScaffolding(mission);
@@ -602,8 +648,8 @@ function containsGenericPlaceholder(text: string): boolean {
     /\b(?:quick matter|brief matter|quick outreach|outreach call|calling about something|bring something to your attention|important matter|something i need to discuss|matter on file|request on file|issue on file|case on file)\b/i.test(
       text
     ) ||
-    /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+for\s+(?:this\s+)?call\b/i.test(text) ||
-    /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+for\s+(?:a\s+)?request\b/i.test(text) ||
+    /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+(?:for|recorded|listed|noted)\b/i.test(text) ||
+    /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?(?:recorded|listed|noted)\s+reason\b/i.test(text) ||
     /\bon\s+behalf\s+of\s+(?:a\s+)?(?:client|customer|user)\b/i.test(text) ||
     /\b(?:for|from)\s+(?:a\s+)?(?:client|customer|user)\b/i.test(text) ||
     /\b(?:is this|is it|if this is)\s+regarding\s+(?:a\s+)?request\s+from\s+(?:a\s+)?(?:client|customer)\b/i.test(text) ||
@@ -613,12 +659,19 @@ function containsGenericPlaceholder(text: string): boolean {
     compact.includes('verifythereasonforacall') ||
     compact.includes('verifythereasonforthiscall') ||
     compact.includes('verifythereasonforarequest') ||
+    compact.includes('verifythereasonrecorded') ||
+    compact.includes('verifythereasonlisted') ||
+    compact.includes('verifythereasonnoted') ||
+    compact.includes('verifyrecordedreason') ||
     compact.includes('confirmthereasonforacall') ||
     compact.includes('confirmthereasonforthiscall') ||
     compact.includes('confirmthereasonforarequest') ||
+    compact.includes('confirmthereasonrecorded') ||
+    compact.includes('confirmrecordedreason') ||
     compact.includes('clarifythereasonforacall') ||
     compact.includes('clarifythereasonforthiscall') ||
     compact.includes('clarifythereasonforarequest') ||
+    compact.includes('clarifythereasonrecorded') ||
     compact.includes('onbehalfofaclient') ||
     compact.includes('onbehalfofcustomer') ||
     compact.includes('onbehalfofauser') ||
@@ -631,7 +684,10 @@ function containsGenericPlaceholder(text: string): boolean {
     compact.includes('matteronfile') ||
     compact.includes('requestonfile') ||
     compact.includes('issueonfile') ||
-    compact.includes('caseonfile')
+    compact.includes('caseonfile') ||
+    compact.includes('recordedforthisoutreach') ||
+    compact.includes('reasonrecordedforthisoutreach') ||
+    compact.includes('recordedforthiscall')
   );
 }
 

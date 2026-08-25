@@ -304,8 +304,8 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
     const instructions = String((sent[1].response as { instructions?: string }).instructions);
-    expect(instructions).toContain('Clean mission opening brief');
-    expect(instructions).toContain('make an appointment');
+    expect(instructions).toContain('Say exactly this sentence and nothing else');
+    expect(instructions).toContain('make an appointment with the doctor for my son as soon as possible');
     expect(instructions).not.toContain('PURPOSE-SECOND RULE');
     expect(instructions).not.toContain('LITERAL FIRST UTTERANCE CONTRACT');
     expect(instructions).not.toContain('pedir una cita urgente');
@@ -403,8 +403,8 @@ describe('OpenAI agent voice session startup gate', () => {
 
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
     const openerInstructions = String((sent[1].response as { instructions?: string }).instructions);
-    expect(openerInstructions).toContain('make an appointment with Dr. Ramirez');
-    expect(openerInstructions).toContain('child is having issues');
+    expect(openerInstructions).toContain('Say exactly this sentence and nothing else');
+    expect(openerInstructions).toContain('make an appointment with Dr. Ramirez for my son as soon as possible');
 
     mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
     mutable.handleMessage(
@@ -440,7 +440,7 @@ describe('OpenAI agent voice session startup gate', () => {
     const rawInstructions = [
       'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
       'Mission:',
-      'Call the doctor to make an appointment.'
+      'Call about paperwork.'
     ].join('\n');
     const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
     mutable.firstUtteranceArmed = true;
@@ -485,7 +485,7 @@ describe('OpenAI agent voice session startup gate', () => {
     const rawInstructions = [
       'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
       'Mission:',
-      'Call the doctor to make an appointment for my son.'
+      'Call about paperwork.'
     ].join('\n');
     const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
     mutable.firstUtteranceArmed = true;
@@ -528,7 +528,7 @@ describe('OpenAI agent voice session startup gate', () => {
     const rawInstructions = [
       'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
       'Mission:',
-      'Call the doctor to make an appointment for my son after surgery.'
+      'Call about paperwork.'
     ].join('\n');
     const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions);
     mutable.firstUtteranceArmed = true;
@@ -544,7 +544,8 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(
       JSON.stringify({
         type: 'response.output_audio_transcript.delta',
-        delta: 'Because I need to continue the call about the matter on file, are you available to discuss it now?'
+        delta:
+          'Because I would like to verify the reason recorded for this outreach, can we discuss it now?'
       })
     );
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
@@ -557,13 +558,13 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(
       JSON.stringify({
         type: 'response.output_audio_transcript.delta',
-        delta: 'Because I would like to make an appointment with the doctor for my son.'
+        delta: 'Because I would like to discuss the paperwork. Could you help me with that?'
       })
     );
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
     expect(audioDeltas).toEqual(['good-audio']);
-    expect(agentTranscriptDeltas).toEqual(['Because I would like to make an appointment with the doctor for my son.']);
+    expect(agentTranscriptDeltas).toEqual(['Because I would like to discuss the paperwork. Could you help me with that?']);
   });
 
   it('buffers and retries operator interventions that leak private planning text', () => {
