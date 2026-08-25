@@ -82,6 +82,9 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Never ask the person who requested the call for private information out loud');
     expect(instructions).toContain('ABSOLUTE OPERATOR BOUNDARY');
     expect(instructions).toContain('Caller-side facts include patient or child names');
+    expect(instructions).toContain('Treat the Mission section as your working call memory');
+    expect(instructions).toContain('For symptom or medical-context questions');
+    expect(instructions).toContain('use every relevant symptom');
     expect(instructions).toContain('Do not treat a known relationship or caller category as missing information');
     expect(instructions).toContain('It is for my son');
     expect(instructions).toContain('Only use a hold phrase for caller-side facts that are truly absent');
