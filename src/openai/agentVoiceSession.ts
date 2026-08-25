@@ -484,6 +484,7 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
     'Ignore any repeated first-utterance, disclosure, or "same message" requirement in the mission text; that startup contract is already complete.',
     'Use the already-loaded session mission for facts, but do not read, quote, or summarize the raw mission prompt.',
     'Say exactly one short conversational turn. Start with the concrete reason for the call, using wording like "because I would like to..." or "because I need to..."; then ask exactly one mission-specific question.',
+    'Never ask the callee to identify or verify the reason for the call. You already know the call purpose from the mission.',
     'Do not start with "Hello", "am I speaking with", "is this", contact confirmation, or the contact/place name. If contact confirmation is necessary, place it after the concrete purpose in the same single question.',
     'Use the language lock for every spoken word, even if the mission text or operator context is written in another language. Translate the purpose into the locked spoken language instead of quoting it.',
     'Never say a generic placeholder like "quick matter", "brief matter", "quick outreach call", or "calling about something" if the mission contains a real purpose.',
@@ -559,6 +560,9 @@ function containsGenericPlaceholder(text: string): boolean {
     /\b(?:quick matter|brief matter|quick outreach|outreach call|calling about something|bring something to your attention|important matter|something i need to discuss)\b/i.test(
       text
     ) ||
+    /\b(?:verify|confirm|clarify|determine)\s+(?:the\s+)?reason\s+for\s+(?:this\s+)?call\b/i.test(text) ||
+    /\b(?:is this|is it|if this is)\s+regarding\s+(?:a\s+)?request\s+from\s+(?:a\s+)?(?:client|customer)\b/i.test(text) ||
+    /\b(?:request|matter)\s+from\s+(?:a\s+)?(?:client|customer)\b/i.test(text) ||
     /\b(?:what would you like to do today|how can i help you|what can i do for you)\b/i.test(text) ||
     /^\s*(?:hello|hi),?\s+(?:am i speaking with|is this)\b/i.test(text)
   );
@@ -639,7 +643,7 @@ function extractFirstUtterance(instructions: string): string {
 
 function normalizeFirstUtterance(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
-  if (!normalized || isLegacyFirstUtterance(normalized)) {
+  if (!normalized || isLegacyFirstUtterance(normalized) || isTruncatedDefaultFirstUtterance(normalized)) {
     return DEFAULT_FIRST_UTTERANCE;
   }
   return normalized;
@@ -647,6 +651,13 @@ function normalizeFirstUtterance(text: string): string {
 
 function isLegacyFirstUtterance(text: string): boolean {
   return compactTranscript(text) === compactTranscript(LEGACY_FIRST_UTTERANCE);
+}
+
+function isTruncatedDefaultFirstUtterance(text: string): boolean {
+  return (
+    compactTranscript(text) ===
+    compactTranscript("I'm Not a telemarketer. I'm using a translator app since my English is limited.")
+  );
 }
 
 function normalizeTranscript(text: string): string {

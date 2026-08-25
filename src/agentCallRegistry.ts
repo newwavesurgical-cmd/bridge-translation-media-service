@@ -715,7 +715,7 @@ function correlationAt(short: Int16Array, long: Int16Array, offset: number): num
 
 function normalizeFirstUtterance(text: string | undefined): string {
   const normalized = normalizeOptional(text)?.slice(0, 300);
-  if (!normalized || isLegacyFirstUtterance(normalized)) {
+  if (!normalized || isLegacyFirstUtterance(normalized) || isTruncatedDefaultFirstUtterance(normalized)) {
     return DEFAULT_FIRST_UTTERANCE;
   }
   return normalized;
@@ -723,6 +723,13 @@ function normalizeFirstUtterance(text: string | undefined): string {
 
 function isLegacyFirstUtterance(text: string): boolean {
   return compactFirstUtterance(text) === compactFirstUtterance(LEGACY_FIRST_UTTERANCE);
+}
+
+function isTruncatedDefaultFirstUtterance(text: string): boolean {
+  return (
+    compactFirstUtterance(text) ===
+    compactFirstUtterance("I'm Not a telemarketer. I'm using a translator app since my English is limited.")
+  );
 }
 
 function compactFirstUtterance(text: string): string {

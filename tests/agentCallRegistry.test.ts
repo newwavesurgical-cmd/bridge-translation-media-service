@@ -114,6 +114,22 @@ describe('AgentCallRegistry', () => {
     expect(instructions).not.toContain('calling on behalf of Alex');
   });
 
+  it('normalizes the truncated default disclosure back to the full first utterance', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask whether an appointment is available.',
+      languageLock: 'English',
+      firstUtterance: "I'm Not a telemarketer. I'm using a translator app since my English is limited."
+    });
+
+    expect(session.data.firstUtterance).toBe(
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling."
+    );
+    expect(buildAgentInstructions(session.data)).toContain(
+      'Your first spoken words must be exactly: "I\'m Not a telemarketer. I\'m using a translator app since my English is limited. I\'m calling."'
+    );
+  });
+
   it('ignores duplicate first-utterance enforcement controls from the caller app', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
