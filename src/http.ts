@@ -161,6 +161,7 @@ export function createBridgeMediaServer(config: AppConfig) {
           mediaRouterConfigured: mediaRouterConfigured(config),
           agentCallSupported: true,
           agentRealtimeVoiceBridgeSupported: true,
+          directVoiceTakeoverSupported: true,
           monitorStreamSupported: false,
           dryRunCalls: config.DRY_RUN_CALLS,
           activeCalls: registry.listDiagnostics(),
@@ -595,6 +596,7 @@ function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRe
     defaultVoice: 'marin',
     maxCallDurationSecondsDefault: 1800,
     languageLockSupported: true,
+    directVoiceTakeoverSupported: true,
     contextualMicroInterventionControls: contextualMicroInterventions,
     endpoints: {
       start: 'POST /agent-call/start',
