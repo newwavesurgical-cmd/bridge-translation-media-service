@@ -1,11 +1,17 @@
 import WebSocket from 'ws';
 import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
-import { base64ToBytes, makeDtmfMuLaw8kBase64 } from './audio/codec.js';
+import {
+  base64ToBytes,
+  makeDtmfMuLaw8kBase64,
+  openAiPcm24kBase64ToTwilioMuLaw8kBase64,
+  twilioMuLaw8kBase64ToOpenAiPcm24kBase64
+} from './audio/codec.js';
 import { decodeMuLaw } from './audio/mulaw.js';
 import { OpenAiAgentVoiceSession, type AgentStartupDiagnostics } from './openai/agentVoiceSession.js';
+import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { completeTwilioCall } from './twilio/client.js';
-import type { TwilioMediaMessage } from './types/messages.js';
+import type { AppClientMessage, AppServerMessage, TwilioMediaMessage } from './types/messages.js';
 
 const MAX_TRANSCRIPT_TAIL = 1200;
 const MAX_CONTROL_TAIL = 80;
@@ -120,8 +126,18 @@ export interface AgentCallRecord {
     dtmfSent: number;
     agentEchoAudioSuppressed: number;
     bargeInClears: number;
+    takeoverAppAudioChunks: number;
+    takeoverOwnerTranslatedAudioChunks: number;
+    takeoverRemoteTranslatedAudioChunks: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
+  takeover?: {
+    active: boolean;
+    userLanguage: string;
+    remoteLanguage: string;
+    startedAt?: string;
+    endedAt?: string;
+  };
   lastActivityAt?: string;
   endedAt?: string;
   endedReason?: string;
@@ -172,7 +188,10 @@ export class AgentCallRegistry {
         controlsDelivered: 0,
         dtmfSent: 0,
         agentEchoAudioSuppressed: 0,
-        bargeInClears: 0
+        bargeInClears: 0,
+        takeoverAppAudioChunks: 0,
+        takeoverOwnerTranslatedAudioChunks: 0,
+        takeoverRemoteTranslatedAudioChunks: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -211,7 +230,10 @@ export class AgentCallRegistry {
 
 export class AgentCallSession {
   private twilioWs?: WebSocket;
+  private appWs?: WebSocket;
   private agent?: OpenAiAgentVoiceSession;
+  private ownerToRemote?: OpenAiTranslationSession;
+  private remoteToOwner?: OpenAiTranslationSession;
   private timeout?: NodeJS.Timeout;
   private readonly recentAgentOutputFrames: Array<{ at: number; pcm: Int16Array }> = [];
   private lastAgentAudioAt = 0;
@@ -258,6 +280,88 @@ export class AgentCallSession {
 
   monitorStreamUrl(): string | null {
     return null;
+  }
+
+  appStreamUrl(): string {
+    const base = this.agentAppStreamBaseUrl();
+    return `${base}/${encodeURIComponent(this.sessionId)}?token=${encodeURIComponent(this.record.appToken)}`;
+  }
+
+  startTakeover(options: { userLanguage?: string; remoteLanguage?: string } = {}): {
+    active: boolean;
+    appStreamUrl: string;
+    userLanguage: string;
+    remoteLanguage: string;
+  } {
+    const userLanguage = normalizeOptional(options.userLanguage) ?? 'Spanish';
+    const remoteLanguage = normalizeOptional(options.remoteLanguage) ?? normalizeOptional(this.record.languageLock) ?? 'English';
+    this.record.takeover = {
+      active: true,
+      userLanguage,
+      remoteLanguage,
+      startedAt: new Date().toISOString()
+    };
+    this.agent?.injectInstruction(
+      'Human operator is taking direct voice control. Stop generating autonomous replies and remain silent until takeover ends.',
+      'human_takeover_start'
+    );
+    this.clearTwilioAudioForBargeIn();
+    this.ensureTakeoverTranslationSessions();
+    this.sendAppStatus();
+    this.emitTranscript('operator', '[direct voice takeover started]');
+    this.touch();
+    return {
+      active: true,
+      appStreamUrl: this.appStreamUrl(),
+      userLanguage,
+      remoteLanguage
+    };
+  }
+
+  stopTakeover(): void {
+    if (!this.record.takeover?.active) {
+      return;
+    }
+    this.record.takeover = {
+      ...this.record.takeover,
+      active: false,
+      endedAt: new Date().toISOString()
+    };
+    this.ownerToRemote?.close();
+    this.ownerToRemote = undefined;
+    this.remoteToOwner?.close();
+    this.remoteToOwner = undefined;
+    this.appWs?.close();
+    this.appWs = undefined;
+    this.agent?.injectInstruction(
+      'Human operator direct voice control ended. Resume normal autonomous call handling from the mission and live context.',
+      'human_takeover_end'
+    );
+    this.emitTranscript('operator', '[direct voice takeover ended]');
+    this.touch();
+  }
+
+  bindApp(ws: WebSocket): void {
+    this.appWs?.close();
+    this.appWs = ws;
+    if (!this.record.takeover?.active) {
+      this.startTakeover();
+    } else {
+      this.ensureTakeoverTranslationSessions();
+      this.sendAppStatus();
+    }
+
+    ws.on('message', (raw) => this.handleAppMessage(raw.toString()));
+    ws.on('close', () => {
+      if (this.appWs === ws) {
+        this.appWs = undefined;
+        if (this.record.takeover?.active) {
+          this.stopTakeover();
+          return;
+        }
+        this.sendAppStatus();
+      }
+    });
   }
 
   handleTwilioPreStart(ws: WebSocket, raw: string): boolean {
@@ -374,6 +478,9 @@ export class AgentCallSession {
     this.record.endedAt = new Date().toISOString();
     this.record.endedReason = reason;
     this.agent?.close();
+    this.ownerToRemote?.close();
+    this.remoteToOwner?.close();
+    this.appWs?.close();
     this.twilioWs?.close();
     if (this.timeout) {
       clearTimeout(this.timeout);
@@ -405,6 +512,19 @@ export class AgentCallSession {
       agentSession: this.agent?.status ?? 'idle',
       monitorStreamSupported: false,
       monitorStreamUrl: this.monitorStreamUrl(),
+      directVoiceTakeoverSupported: true,
+      takeoverActive: Boolean(this.record.takeover?.active),
+      takeoverAppStreamUrl: this.appStreamUrl(),
+      takeover: this.record.takeover ?? {
+        active: false,
+        userLanguage: null,
+        remoteLanguage: null
+      },
+      takeoverAppConnected: Boolean(this.appWs),
+      takeoverTranslationSessions: {
+        ownerToRemote: this.ownerToRemote?.status ?? 'idle',
+        remoteToOwner: this.remoteToOwner?.status ?? 'idle'
+      },
       error: this.record.error ?? null,
       startupDiagnostics: { ...this.record.startupDiagnostics },
       counters: { ...this.record.counters },
@@ -464,6 +584,11 @@ export class AgentCallSession {
         return;
       }
       this.record.counters.twilioMediaChunks += 1;
+      if (this.record.takeover?.active) {
+        this.ensureTakeoverTranslationSessions();
+        this.remoteToOwner?.appendPcm16Base64(twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload));
+        return;
+      }
       this.ensureAgentSession();
       this.agent?.appendPcmuBase64(message.media.payload);
       return;
@@ -486,7 +611,12 @@ export class AgentCallSession {
       instructions: buildAgentInstructions(this.record),
       firstUtterance: this.record.firstUtterance,
       voice: this.record.voice,
-      onAudioDelta: (pcmu) => this.sendTwilioMedia(pcmu, `agent-${Date.now()}`),
+      onAudioDelta: (pcmu) => {
+        if (this.record.takeover?.active) {
+          return;
+        }
+        this.sendTwilioMedia(pcmu, `agent-${Date.now()}`);
+      },
       onRemoteTranscriptDelta: (delta) => {
         this.record.counters.remoteTranscriptDeltas += 1;
         this.emitTranscript('remote', delta);
@@ -509,6 +639,124 @@ export class AgentCallSession {
       onError: (error) => this.fail(error)
     });
     this.agent.connect();
+  }
+
+  private handleAppMessage(raw: string): void {
+    let message: AppClientMessage;
+    try {
+      message = JSON.parse(raw) as AppClientMessage;
+    } catch {
+      this.sendApp({ type: 'error', message: 'Invalid app websocket JSON.' });
+      return;
+    }
+
+    this.touch();
+    if (message.type === 'start') {
+      if (!this.record.takeover?.active) {
+        this.startTakeover();
+      }
+      this.ensureTakeoverTranslationSessions();
+      this.sendAppStatus();
+      return;
+    }
+    if (message.type === 'audio') {
+      if (!this.record.takeover?.active) {
+        this.sendApp({ type: 'error', message: 'Direct voice takeover is not active.' });
+        return;
+      }
+      this.record.counters.takeoverAppAudioChunks += 1;
+      this.ensureTakeoverTranslationSessions();
+      this.ownerToRemote?.appendPcm16Base64(message.audio);
+      return;
+    }
+    if (message.type === 'dtmf') {
+      this.sendDtmf(message.digit);
+      return;
+    }
+    if (message.type === 'hangup') {
+      void this.end('operator_hangup');
+      return;
+    }
+  }
+
+  private ensureTakeoverTranslationSessions(): void {
+    const takeover = this.record.takeover;
+    if (!takeover?.active) {
+      return;
+    }
+    if (!this.ownerToRemote) {
+      this.ownerToRemote = new OpenAiTranslationSession({
+        config: this.config,
+        direction: 'owner-to-remote',
+        targetLanguage: takeover.remoteLanguage,
+        onAudioDelta: (pcm24k) => {
+          if (!this.record.takeover?.active) {
+            return;
+          }
+          this.record.counters.takeoverOwnerTranslatedAudioChunks += 1;
+          this.sendTwilioMedia(openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k), `takeover-owner-${Date.now()}`);
+        },
+        onInputTranscriptDelta: (delta) => this.sendAppTranscript('owner', 'source', delta),
+        onOutputTranscriptDelta: (delta) => {
+          this.emitTranscript('operator', delta);
+          this.sendAppTranscript('owner', 'translation', delta);
+        },
+        onStatus: () => this.sendAppStatus(),
+        onError: (error) => this.fail(error)
+      });
+      this.ownerToRemote.connect();
+    }
+
+    if (!this.remoteToOwner) {
+      this.remoteToOwner = new OpenAiTranslationSession({
+        config: this.config,
+        direction: 'remote-to-owner',
+        targetLanguage: takeover.userLanguage,
+        onAudioDelta: (pcm24k) => {
+          if (!this.record.takeover?.active) {
+            return;
+          }
+          this.record.counters.takeoverRemoteTranslatedAudioChunks += 1;
+          this.sendApp({ type: 'translated_audio', speaker: 'remote', audio: pcm24k, sampleRate: 24000, encoding: 'pcm16' });
+        },
+        onInputTranscriptDelta: (delta) => this.sendAppTranscript('remote', 'source', delta),
+        onOutputTranscriptDelta: (delta) => {
+          this.emitTranscript('remote', delta);
+          this.sendAppTranscript('remote', 'translation', delta);
+        },
+        onStatus: () => this.sendAppStatus(),
+        onError: (error) => this.fail(error)
+      });
+      this.remoteToOwner.connect();
+    }
+  }
+
+  private sendAppTranscript(speaker: 'owner' | 'remote', transcriptKind: 'source' | 'translation', delta: string): void {
+    this.sendApp({ type: 'transcript_delta', speaker, transcriptKind, delta });
+  }
+
+  private sendApp(message: AppServerMessage): void {
+    if (!this.appWs || this.appWs.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    this.appWs.send(JSON.stringify(message));
+  }
+
+  private sendAppStatus(): void {
+    this.sendApp({
+      type: 'status',
+      callId: this.sessionId,
+      state: this.record.takeover?.active ? 'takeover' : this.record.state,
+      twilioConnected: Boolean(this.twilioWs),
+      appConnected: Boolean(this.appWs),
+      sessionA: this.ownerToRemote?.status ?? 'idle',
+      sessionB: this.remoteToOwner?.status ?? 'idle'
+    });
+  }
+
+  private agentAppStreamBaseUrl(): string {
+    const base = this.config.APP_STREAM_PUBLIC_WSS_URL ?? `ws://localhost:${this.config.PORT}/app/stream`;
+    return base.replace(/\/app\/stream\/?$/, '/agent-call/app/stream');
   }
 
   private sendTwilioMedia(payload: string, markName: string): void {

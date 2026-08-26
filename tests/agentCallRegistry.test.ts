@@ -499,6 +499,66 @@ describe('AgentCallRegistry', () => {
       dtmfTail: [{ digit: '1', delivered: false }]
     });
   });
+
+  it('exposes a direct voice takeover app stream for active agent calls', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_takeover_test',
+      missionPrompt: 'Ask whether an appointment is available.',
+      languageLock: 'English'
+    });
+
+    const takeover = session.startTakeover({
+      userLanguage: 'Spanish',
+      remoteLanguage: 'English'
+    });
+
+    expect(takeover).toMatchObject({
+      active: true,
+      userLanguage: 'Spanish',
+      remoteLanguage: 'English'
+    });
+    expect(takeover.appStreamUrl).toMatch(
+      /^wss:\/\/bridge-media\.example\.com\/agent-call\/app\/stream\/agent_takeover_test\?token=/
+    );
+    expect(session.diagnostics()).toMatchObject({
+      directVoiceTakeoverSupported: true,
+      takeoverActive: true,
+      takeoverAppConnected: false,
+      takeover: {
+        active: true,
+        userLanguage: 'Spanish',
+        remoteLanguage: 'English'
+      },
+      takeoverTranslationSessions: {
+        ownerToRemote: 'connecting',
+        remoteToOwner: 'connecting'
+      }
+    });
+  });
+
+  it('turns direct voice takeover off without ending the agent call', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_takeover_stop_test',
+      missionPrompt: 'Ask whether an appointment is available.',
+      languageLock: 'English'
+    });
+
+    session.markCalling();
+    session.startTakeover({ userLanguage: 'Spanish', remoteLanguage: 'English' });
+    session.stopTakeover();
+
+    expect(session.diagnostics()).toMatchObject({
+      state: 'created',
+      takeoverActive: false,
+      takeover: {
+        active: false,
+        userLanguage: 'Spanish',
+        remoteLanguage: 'English'
+      }
+    });
+  });
 });
 
 describe('agent-call HTTP endpoint wiring', () => {

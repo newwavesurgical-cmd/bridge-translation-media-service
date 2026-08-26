@@ -123,6 +123,11 @@ const dtmfSchema = z.object({
   digit: z.enum(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '#'])
 });
 
+const agentTakeoverSchema = z.object({
+  userLanguage: z.string().min(2).max(80).optional(),
+  remoteLanguage: z.string().min(2).max(80).optional()
+});
+
 function firstText(...values: Array<string | undefined>): string | undefined {
   return values.find((value) => value?.replace(/\s+/g, ' ').trim());
 }
@@ -135,6 +140,7 @@ export function createBridgeMediaServer(config: AppConfig) {
   const appWss = new WebSocketServer({ noServer: true });
   const twilioWss = new WebSocketServer({ noServer: true });
   const agentCallTwilioWss = new WebSocketServer({ noServer: true });
+  const agentCallAppWss = new WebSocketServer({ noServer: true });
   const inPersonWss = new WebSocketServer({ noServer: true });
   const appToAppWss = new WebSocketServer({ noServer: true });
 
@@ -191,7 +197,9 @@ export function createBridgeMediaServer(config: AppConfig) {
           callSid,
           status: config.DRY_RUN_CALLS ? 'dry_run' : 'calling',
           monitorStreamSupported: false,
+          directVoiceTakeoverSupported: true,
           monitorStreamUrl: session.monitorStreamUrl(),
+          takeoverAppStreamUrl: session.appStreamUrl(),
           diagnostics: session.diagnostics()
         });
       }
@@ -220,6 +228,33 @@ export function createBridgeMediaServer(config: AppConfig) {
         const body = agentControlSchema.parse(await readJson(req));
         const control = session.receiveControl(body);
         return sendJson(res, 200, { ok: true, control, diagnostics: session.diagnostics() });
+      }
+
+      if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/takeover/start')) {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendJson(res, 404, { error: 'agent call not found' });
+        }
+        const body = agentTakeoverSchema.parse(await readJson(req));
+        const takeover = session.startTakeover(body);
+        return sendJson(res, 200, { ok: true, takeover, diagnostics: session.diagnostics() });
+      }
+
+      if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/takeover/end')) {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const sessionId = decodeURIComponent(url.pathname.split('/')[2] ?? '');
+        const session = agentCallRegistry.get(sessionId);
+        if (!session) {
+          return sendJson(res, 200, { ok: true, alreadyEnded: true });
+        }
+        session.stopTakeover();
+        return sendJson(res, 200, { ok: true, diagnostics: session.diagnostics() });
       }
 
       if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/dtmf')) {
@@ -398,6 +433,20 @@ export function createBridgeMediaServer(config: AppConfig) {
       return;
     }
 
+    if (url.pathname.startsWith('/agent-call/app/stream/')) {
+      agentCallAppWss.handleUpgrade(req, socket, head, (ws) => {
+        const sessionId = decodeURIComponent(url.pathname.replace('/agent-call/app/stream/', ''));
+        const token = url.searchParams.get('token') ?? '';
+        const session = agentCallRegistry.get(sessionId);
+        if (!session || !session.verifyAppToken(token)) {
+          ws.close();
+          return;
+        }
+        session.bindApp(ws);
+      });
+      return;
+    }
+
     if (url.pathname.startsWith('/in-person/stream/')) {
       inPersonWss.handleUpgrade(req, socket, head, (ws) => {
         const sessionId = decodeURIComponent(url.pathname.replace('/in-person/stream/', ''));
@@ -554,6 +603,10 @@ function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRe
       end: 'POST /agent-call/:sessionId/end',
       twiml: 'GET|POST /twiml/agent-call',
       twilioMediaStream: 'WS /agent-call/twilio/stream'
+      ,
+      takeoverStart: 'POST /agent-call/:sessionId/takeover/start',
+      takeoverEnd: 'POST /agent-call/:sessionId/takeover/end',
+      takeoverAppStream: 'WS /agent-call/app/stream/:sessionId'
     }
   };
 }
