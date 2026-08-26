@@ -149,6 +149,30 @@ export class OpenAiAgentVoiceSession {
     this.cancelActiveResponse();
   }
 
+  suppressActiveOutput(reason = 'Temporarily suppress autonomous agent output.'): void {
+    this.pendingIntervention = undefined;
+    this.activeIntervention = undefined;
+    this.guardedMissionAudio.splice(0);
+    this.guardedMissionTranscriptDeltas.splice(0);
+    this.guardedInterventionAudio.splice(0);
+    this.guardedInterventionTranscriptDeltas.splice(0);
+    this.missionOpeningTranscript = '';
+    this.interventionTranscript = '';
+    if (this.statusValue !== 'live') {
+      return;
+    }
+    this.sendJson({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: `Private system state: ${reason}` }]
+      }
+    });
+    this.cancelPostInterventionFollowup();
+    this.cancelActiveResponse();
+  }
+
   private flushPendingIntervention(): void {
     if (!this.pendingIntervention || this.statusValue !== 'live') {
       return;

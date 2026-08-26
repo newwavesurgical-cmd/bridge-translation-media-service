@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { makeStreamToken } from '../src/auth.js';
 import { bytesToBase64 } from '../src/audio/codec.js';
 import { encodeMuLaw } from '../src/audio/mulaw.js';
-import { AgentCallRegistry, buildAgentInstructions } from '../src/agentCallRegistry.js';
+import { AgentCallRegistry, buildAgentInstructions, detectIvrPrompt } from '../src/agentCallRegistry.js';
 import type { AppConfig } from '../src/config.js';
 import { createBridgeMediaServer } from '../src/http.js';
 import { buildAgentCallTwiMl } from '../src/twilio/twiml.js';
@@ -100,9 +100,9 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('If the operator intentionally supplies words to say now');
     expect(instructions).toContain('llama ahora');
     expect(instructions).toContain('Automated phone menus / IVR');
-    expect(instructions).toContain('Option 1: billing');
-    expect(instructions).toContain('Wait briefly for private operator DTMF control');
-    expect(instructions).toContain('choose the best matching keypad option');
+    expect(instructions).toContain('stop speaking');
+    expect(instructions).toContain('route by DTMF privately');
+    expect(instructions).toContain('Only speak to an IVR if it explicitly requires a spoken phrase');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
     expect(instructions).not.toContain('You may say you are calling on behalf');
@@ -497,6 +497,76 @@ describe('AgentCallRegistry', () => {
         dtmfSent: 0
       },
       dtmfTail: [{ digit: '1', delivered: false }]
+    });
+  });
+
+  it('extracts IVR menu options and recommends a mission-matching DTMF route', () => {
+    const ivr = detectIvrPrompt(
+      'Thank you for calling. For billing, press 1. For appointments and scheduling, press 2. To speak with pharmacy, press 3.',
+      'I need to make an appointment with the doctor for my son after surgery.'
+    );
+
+    expect(ivr).toMatchObject({
+      active: true,
+      kind: 'menu',
+      options: expect.arrayContaining([
+        expect.objectContaining({ digit: '1', label: expect.stringContaining('billing') }),
+        expect.objectContaining({ digit: '2', label: expect.stringContaining('appointments') })
+      ]),
+      recommended: expect.objectContaining({
+        digit: '2',
+        confidence: expect.any(Number)
+      }),
+      needsOperatorChoice: false
+    });
+  });
+
+  it('detects closed automated recordings without inventing menu options', () => {
+    const ivr = detectIvrPrompt(
+      'Thank you for calling the Jet Blue Central Baggage Service Team. We are currently closed. Please try again during our normal business hours.',
+      'Call JetBlue about a canceled flight.'
+    );
+
+    expect(ivr).toMatchObject({
+      active: true,
+      kind: 'closed',
+      options: [],
+      summary: 'Closed or after-hours recording detected.'
+    });
+  });
+
+  it('records IVR diagnostics and suppresses active agent output after menu detection', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_ivr_test',
+      missionPrompt: 'Make an appointment with the doctor for my son.',
+      languageLock: 'English'
+    });
+    let suppressed = 0;
+    const mutable = session as unknown as {
+      agent: { suppressActiveOutput: (reason: string) => void };
+      observeRemoteTranscript: (delta: string) => void;
+    };
+    mutable.agent = {
+      suppressActiveOutput: () => {
+        suppressed += 1;
+      }
+    };
+
+    mutable.observeRemoteTranscript('For billing press 1. For appointments press 2.');
+
+    expect(suppressed).toBe(1);
+    expect(session.diagnostics()).toMatchObject({
+      ivrMenuDetectionSupported: true,
+      ivr: {
+        active: true,
+        kind: 'menu',
+        options: expect.arrayContaining([expect.objectContaining({ digit: '2', label: 'appointments' })]),
+        recommended: expect.objectContaining({ digit: '2' })
+      },
+      counters: {
+        ivrDetections: 1
+      }
     });
   });
 

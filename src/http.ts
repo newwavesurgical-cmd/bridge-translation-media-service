@@ -597,6 +597,9 @@ function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRe
     maxCallDurationSecondsDefault: 1800,
     languageLockSupported: true,
     directVoiceTakeoverSupported: true,
+    ivrMenuDetectionSupported: true,
+    ivrOptionDisplaySupported: true,
+    ivrDtmfFallbackSupported: true,
     contextualMicroInterventionControls: contextualMicroInterventions,
     endpoints: {
       start: 'POST /agent-call/start',
@@ -608,7 +611,8 @@ function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRe
       ,
       takeoverStart: 'POST /agent-call/:sessionId/takeover/start',
       takeoverEnd: 'POST /agent-call/:sessionId/takeover/end',
-      takeoverAppStream: 'WS /agent-call/app/stream/:sessionId'
+      takeoverAppStream: 'WS /agent-call/app/stream/:sessionId',
+      dtmf: 'POST /agent-call/:sessionId/dtmf'
     }
   };
 }

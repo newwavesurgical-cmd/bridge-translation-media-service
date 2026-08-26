@@ -33,6 +33,7 @@ export type AppServerMessage =
       appConnected: boolean;
       sessionA: string;
       sessionB: string;
+      ivr?: unknown;
     }
   | {
       type: 'translated_audio';
