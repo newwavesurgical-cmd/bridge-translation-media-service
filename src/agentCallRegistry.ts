@@ -264,7 +264,10 @@ export class AgentCallRegistry {
         firstUtteranceArmed: false,
         firstUtteranceDelivered: false,
         preArmedAudio: 0,
-        firstUtteranceCorrectionSent: false
+        firstUtteranceCorrectionSent: false,
+        startupEnvelopeQueued: false,
+        startupEnvelopePlaybackConfirmed: false,
+        bufferedStartupAudio: 0
       }
     };
 
@@ -304,6 +307,7 @@ export class AgentCallSession {
   private agent?: OpenAiAgentVoiceSession;
   private ownerToRemote?: OpenAiTranslationSession;
   private remoteToOwner?: OpenAiTranslationSession;
+  private startupEnvelopeMarkName?: string;
   private timeout?: NodeJS.Timeout;
   private readonly recentAgentOutputFrames: Array<{ at: number; pcm: Int16Array }> = [];
   private readonly recentRemoteTranscriptDeltas: Array<{ at: number; delta: string }> = [];
@@ -380,8 +384,11 @@ export class AgentCallSession {
     userLanguage: string;
     remoteLanguage: string;
   } {
-    const userLanguage = normalizeOptional(options.userLanguage) ?? 'Spanish';
-    const remoteLanguage = normalizeOptional(options.remoteLanguage) ?? normalizeOptional(this.record.languageLock) ?? 'English';
+    const userLanguage = normalizeOptional(options.userLanguage) ?? 'English';
+    // The live call record is authoritative. A stale cockpit/assistant
+    // snapshot must never be able to turn a Spanish call into English↔English
+    // takeover by overriding the remote side of the pair.
+    const remoteLanguage = normalizeOptional(this.record.languageLock) ?? normalizeOptional(options.remoteLanguage) ?? 'English';
     this.record.takeover = {
       active: true,
       userLanguage,
@@ -715,6 +722,13 @@ export class AgentCallSession {
       this.emitTranscript('remote', `[DTMF ${message.dtmf.digit}]`);
       return;
     }
+    if (message.event === 'mark') {
+      if (message.mark.name === this.startupEnvelopeMarkName) {
+        this.startupEnvelopeMarkName = undefined;
+        this.agent?.confirmStartupEnvelopePlayback();
+      }
+      return;
+    }
     if (message.event === 'stop') {
       void this.end('twilio_stop');
     }
@@ -754,6 +768,11 @@ export class AgentCallSession {
         this.emitTranscript('agent', delta);
       },
       onUserSpeechStarted: () => this.clearTwilioAudioForBargeIn(),
+      onStartupEnvelopeQueued: () => {
+        const name = `agent-startup-envelope-${Date.now()}`;
+        this.startupEnvelopeMarkName = name;
+        this.sendTwilioMark(name);
+      },
       onStatus: (status) => {
         if (status === 'live' && this.twilioWs) {
           this.record.state = 'live';
@@ -1035,6 +1054,12 @@ export class AgentCallSession {
     if (!this.twilioWs || !this.record.twilioStreamSid) {
       return;
     }
+    // Twilio may still be playing media even after OpenAI has completed its
+    // response. Never clear the mandatory disclosure + prepared purpose until
+    // Twilio echoes the final envelope marker.
+    if (!this.record.startupDiagnostics.startupEnvelopePlaybackConfirmed) {
+      return;
+    }
     this.record.counters.bargeInClears += 1;
     this.twilioWs.send(
       JSON.stringify({
@@ -1043,6 +1068,19 @@ export class AgentCallSession {
       })
     );
     this.touch();
+  }
+
+  private sendTwilioMark(name: string): void {
+    if (!this.twilioWs || !this.record.twilioStreamSid) {
+      return;
+    }
+    this.twilioWs.send(
+      JSON.stringify({
+        event: 'mark',
+        streamSid: this.record.twilioStreamSid,
+        mark: { name }
+      })
+    );
   }
 
   private rememberAgentOutput(payload: string): void {

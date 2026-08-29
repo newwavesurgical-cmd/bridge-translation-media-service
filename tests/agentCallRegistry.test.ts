@@ -476,6 +476,7 @@ describe('AgentCallRegistry', () => {
       close: () => undefined
     };
     session.data.twilioStreamSid = 'MZ123';
+    session.data.startupDiagnostics.startupEnvelopePlaybackConfirmed = true;
 
     mutable.clearTwilioAudioForBargeIn();
 
@@ -489,6 +490,54 @@ describe('AgentCallRegistry', () => {
         bargeInClears: 1
       }
     });
+  });
+
+  it('does not clear the protected disclosure and purpose before Twilio confirms playback', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_startup_barge_guard_test'
+    });
+    const sentToTwilio: string[] = [];
+    const mutable = session as unknown as {
+      twilioWs: { send: (payload: string) => void; close: () => void };
+      clearTwilioAudioForBargeIn: () => void;
+    };
+    mutable.twilioWs = {
+      send: (payload: string) => sentToTwilio.push(payload),
+      close: () => undefined
+    };
+    session.data.twilioStreamSid = 'MZ123';
+
+    mutable.clearTwilioAudioForBargeIn();
+
+    expect(sentToTwilio).toEqual([]);
+    expect(session.diagnostics()).toMatchObject({ counters: { bargeInClears: 0 } });
+  });
+
+  it('releases the startup gate only for the matching Twilio playback marker', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_startup_mark_test'
+    });
+    const confirmStartupEnvelopePlayback = vi.fn();
+    const mutable = session as unknown as {
+      startupEnvelopeMarkName?: string;
+      agent: { confirmStartupEnvelopePlayback: () => void };
+      handleTwilioMessage: (raw: string) => void;
+    };
+    mutable.startupEnvelopeMarkName = 'startup-final';
+    mutable.agent = { confirmStartupEnvelopePlayback };
+
+    mutable.handleTwilioMessage(
+      JSON.stringify({ event: 'mark', sequenceNumber: '2', streamSid: 'MZ123', mark: { name: 'other' } })
+    );
+    expect(confirmStartupEnvelopePlayback).not.toHaveBeenCalled();
+
+    mutable.handleTwilioMessage(
+      JSON.stringify({ event: 'mark', sequenceNumber: '3', streamSid: 'MZ123', mark: { name: 'startup-final' } })
+    );
+    expect(confirmStartupEnvelopePlayback).toHaveBeenCalledTimes(1);
+    expect(mutable.startupEnvelopeMarkName).toBeUndefined();
   });
 
   it('sends DTMF over the agent-call Twilio media stream and records diagnostics', () => {
@@ -655,6 +704,29 @@ describe('AgentCallRegistry', () => {
         ownerToRemote: 'connecting',
         remoteToOwner: 'connecting'
       }
+    });
+  });
+
+  it('uses the active call lock for takeover even when a stale client sends another remote language', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_takeover_language_guard_test',
+      missionPrompt: 'Schedule a landscaping estimate.',
+      languageLock: 'es-ES'
+    });
+
+    const takeover = session.startTakeover({
+      userLanguage: 'en-US',
+      remoteLanguage: 'en-US'
+    });
+
+    expect(takeover).toMatchObject({
+      active: true,
+      userLanguage: 'en-US',
+      remoteLanguage: 'es-ES'
+    });
+    expect(session.diagnostics()).toMatchObject({
+      takeover: { userLanguage: 'en-US', remoteLanguage: 'es-ES' }
     });
   });
 

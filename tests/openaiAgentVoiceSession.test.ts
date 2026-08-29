@@ -35,6 +35,7 @@ function makeLiveSession(instructions = 'Mission instructions', spokenPurpose?: 
   const audioDeltas: string[] = [];
   const agentTranscriptDeltas: string[] = [];
   const speechStarted = vi.fn();
+  const startupEnvelopeQueued = vi.fn();
   const session = new OpenAiAgentVoiceSession({
     config,
     instructions,
@@ -45,6 +46,7 @@ function makeLiveSession(instructions = 'Mission instructions', spokenPurpose?: 
     onRemoteTranscriptDelta: () => undefined,
     onAgentTranscriptDelta: (delta) => agentTranscriptDeltas.push(delta),
     onUserSpeechStarted: speechStarted,
+    onStartupEnvelopeQueued: startupEnvelopeQueued,
     onStartupDiagnostics: (diagnostics) => startupDiagnostics.push(diagnostics),
     onStatus: () => undefined,
     onError: (error) => errors.push(error)
@@ -56,6 +58,7 @@ function makeLiveSession(instructions = 'Mission instructions', spokenPurpose?: 
     firstUtteranceArmed: boolean;
     firstUtteranceDelivered: boolean;
     firstUtteranceTranscript: string;
+    startupEnvelopePlaybackConfirmed: boolean;
     handleMessage: (message: string) => void;
   };
   mutable.ws = {
@@ -63,7 +66,17 @@ function makeLiveSession(instructions = 'Mission instructions', spokenPurpose?: 
     send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
   };
   mutable.statusValue = 'live';
-  return { session, mutable, sent, errors, startupDiagnostics, audioDeltas, agentTranscriptDeltas, speechStarted };
+  return {
+    session,
+    mutable,
+    sent,
+    errors,
+    startupDiagnostics,
+    audioDeltas,
+    agentTranscriptDeltas,
+    speechStarted,
+    startupEnvelopeQueued
+  };
 }
 
 describe('OpenAI agent voice session startup gate', () => {
@@ -196,7 +209,7 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(sent.map((payload) => payload.type)).toEqual(['response.cancel']);
   });
 
-  it('reenables VAD with a complete session update and continues into the mission after the first utterance', () => {
+  it('keeps VAD non-interrupting while it continues into the prepared purpose', () => {
     const { mutable, sent } = makeLiveSession();
     mutable.firstUtteranceArmed = true;
     mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
@@ -215,7 +228,8 @@ describe('OpenAI agent voice session startup gate', () => {
               threshold: 0.38,
               prefix_padding_ms: 300,
               silence_duration_ms: 300,
-              create_response: true
+              create_response: false,
+              interrupt_response: true
             }
           }
         }
@@ -245,6 +259,55 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[1].response as { instructions?: string }).instructions)).toContain(
       'Do not repeat the purpose in a second sentence'
     );
+  });
+
+  it('releases buffered recipient audio and barge-in only after Twilio confirms the entire opener played', () => {
+    const purpose = 'I am calling because I would like to schedule a landscaping estimate with Alberto.';
+    const {
+      session,
+      mutable,
+      sent,
+      startupDiagnostics,
+      speechStarted,
+      startupEnvelopeQueued
+    } = makeLiveSession('Language lock: speak only in English.', purpose);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+    session.appendPcmuBase64('early-hello');
+    mutable.handleMessage(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+    expect(speechStarted).not.toHaveBeenCalled();
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'purpose-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({ type: 'response.output_audio_transcript.delta', delta: purpose })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(startupEnvelopeQueued).toHaveBeenCalledTimes(1);
+    expect(startupDiagnostics.at(-1)).toMatchObject({
+      startupEnvelopeQueued: true,
+      startupEnvelopePlaybackConfirmed: false,
+      bufferedStartupAudio: 1
+    });
+    expect(sent.some((payload) => payload.type === 'input_audio_buffer.append')).toBe(false);
+
+    session.confirmStartupEnvelopePlayback();
+
+    expect(sent.at(-2)).toMatchObject({
+      type: 'session.update',
+      session: { audio: { input: { turn_detection: { create_response: true, interrupt_response: true } } } }
+    });
+    expect(sent.at(-1)).toEqual({ type: 'input_audio_buffer.append', audio: 'early-hello' });
+    expect(startupDiagnostics.at(-1)).toMatchObject({
+      startupEnvelopePlaybackConfirmed: true,
+      bufferedStartupAudio: 0
+    });
+
+    mutable.handleMessage(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
+    expect(speechStarted).toHaveBeenCalledTimes(1);
   });
 
   it('retries the mission opener if Realtime still has an active response after the first utterance', () => {
@@ -371,6 +434,7 @@ describe('OpenAI agent voice session startup gate', () => {
 
   it('notifies the bridge when remote speech starts so queued phone audio can be cleared', () => {
     const { mutable, sent, speechStarted } = makeLiveSession();
+    mutable.startupEnvelopePlaybackConfirmed = true;
 
     mutable.handleMessage(JSON.stringify({ type: 'input_audio_buffer.speech_started' }));
 
@@ -738,7 +802,7 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(agentTranscriptDeltas).toEqual(["I can't do Thursday. I need to do it on Friday."]);
   });
 
-  it('discards audio received before the first utterance instead of replaying it into the mission opener', () => {
+  it('buffers early recipient audio until the complete startup envelope is confirmed played', () => {
     const { session, mutable, sent, startupDiagnostics } = makeLiveSession();
     mutable.firstUtteranceArmed = true;
     mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
@@ -751,7 +815,9 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(sent.some((payload) => payload.type === 'input_audio_buffer.append')).toBe(false);
     expect(startupDiagnostics.at(-1)).toMatchObject({
       preArmedAudio: 2,
-      firstUtteranceDelivered: true
+      firstUtteranceDelivered: true,
+      bufferedStartupAudio: 2,
+      startupEnvelopePlaybackConfirmed: false
     });
   });
 

@@ -14,6 +14,8 @@ interface AgentVoiceSessionOptions {
   onRemoteTranscriptDelta: (delta: string) => void;
   onAgentTranscriptDelta: (delta: string) => void;
   onUserSpeechStarted?: () => void;
+  /** Called only after the literal disclosure and prepared purpose have both been queued for Twilio. */
+  onStartupEnvelopeQueued?: () => void;
   onStatus: (status: AgentVoiceSessionStatus, detail?: string) => void;
   onStartupDiagnostics?: (diagnostics: AgentStartupDiagnostics) => void;
   onError: (error: Error) => void;
@@ -25,6 +27,9 @@ export interface AgentStartupDiagnostics {
   firstUtteranceDelivered: boolean;
   preArmedAudio: number;
   firstUtteranceCorrectionSent: boolean;
+  startupEnvelopeQueued: boolean;
+  startupEnvelopePlaybackConfirmed: boolean;
+  bufferedStartupAudio: number;
 }
 
 const DEFAULT_FIRST_UTTERANCE =
@@ -53,6 +58,8 @@ export class OpenAiAgentVoiceSession {
   private missionOpeningCorrectionSent = false;
   private missionOpeningRetryAfterCancel = false;
   private missionOpeningTranscript = '';
+  private startupEnvelopeQueued = false;
+  private startupEnvelopePlaybackConfirmed = false;
   private preArmedAudio = 0;
   private responseActive = false;
   private pendingIntervention?: { text: string; semanticControl?: string };
@@ -120,15 +127,14 @@ export class OpenAiAgentVoiceSession {
     if (this.statusValue === 'idle') {
       this.connect();
     }
-    if (this.statusValue !== 'live') {
-      if (!this.firstUtteranceDelivered) {
-        this.preArmedAudio += 1;
-        this.publishStartupDiagnostics();
-      }
-      return;
-    }
-    if (!this.firstUtteranceDelivered) {
+    if (this.statusValue !== 'live' || !this.startupEnvelopePlaybackConfirmed) {
       this.preArmedAudio += 1;
+      // Preserve a bounded tail of anything the recipient says during the
+      // protected opener. It is submitted only after Twilio confirms that the
+      // disclosure + purpose finished playing, so a cough or early "hello"
+      // cannot cancel the mandatory opening and a real answer is not lost.
+      this.queuedAudio.push(base64Pcmu);
+      if (this.queuedAudio.length > 800) this.queuedAudio.shift();
       this.publishStartupDiagnostics();
       return;
     }
@@ -151,8 +157,42 @@ export class OpenAiAgentVoiceSession {
     }
 
     this.pendingIntervention = { text: normalized, semanticControl };
+    // Talk/Lock Talk may be pressed early, but neither is allowed to cancel
+    // the protected startup envelope. The intervention is released after the
+    // Twilio playback marker returns.
+    if (this.firstUtteranceArmed && !this.startupEnvelopePlaybackConfirmed) {
+      return;
+    }
     this.cancelPostInterventionFollowup();
     this.cancelActiveResponse();
+  }
+
+  /**
+   * Twilio echoes a mark only after all media queued before it has played.
+   * Until that acknowledgement arrives, caller audio is buffered and VAD
+   * remains unable to interrupt or auto-respond.
+   */
+  confirmStartupEnvelopePlayback(): void {
+    if (!this.startupEnvelopeQueued || this.startupEnvelopePlaybackConfirmed || this.statusValue !== 'live') {
+      return;
+    }
+    this.startupEnvelopePlaybackConfirmed = true;
+    this.sendJson({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        audio: {
+          input: {
+            turn_detection: realtimeTurnDetectionConfig(true)
+          }
+        }
+      }
+    });
+    for (const audio of this.queuedAudio.splice(0)) {
+      this.sendJson({ type: 'input_audio_buffer.append', audio });
+    }
+    this.publishStartupDiagnostics();
+    this.flushPendingIntervention();
   }
 
   suppressActiveOutput(reason = 'Temporarily suppress autonomous agent output.'): void {
@@ -334,7 +374,9 @@ export class OpenAiAgentVoiceSession {
     }
     if (event.type === 'input_audio_buffer.speech_started') {
       this.cancelPostInterventionFollowup();
-      this.options.onUserSpeechStarted?.();
+      if (this.startupEnvelopePlaybackConfirmed) {
+        this.options.onUserSpeechStarted?.();
+      }
       return;
     }
     if (event.type === 'session.closed') {
@@ -359,18 +401,19 @@ export class OpenAiAgentVoiceSession {
         for (const audio of this.guardedFirstAudio.splice(0)) {
           this.options.onAudioDelta(audio);
         }
+        // Keep an explicit no-barge-in session contract while the second half
+        // of the protected envelope (the prepared purpose) is generated.
         this.sendJson({
           type: 'session.update',
           session: {
             type: 'realtime',
             audio: {
               input: {
-                turn_detection: realtimeTurnDetectionConfig(true)
+                turn_detection: realtimeTurnDetectionConfig(false)
               }
             }
           }
         });
-        this.queuedAudio.splice(0);
         this.publishStartupDiagnostics();
         this.startMissionOpening();
         return;
@@ -387,6 +430,11 @@ export class OpenAiAgentVoiceSession {
           this.options.onAudioDelta(audio);
         }
         this.missionOpeningTranscript = '';
+        if (!this.startupEnvelopeQueued) {
+          this.startupEnvelopeQueued = true;
+          this.publishStartupDiagnostics();
+          this.options.onStartupEnvelopeQueued?.();
+        }
       }
       if (this.currentResponseKind === 'intervention') {
         if (!this.isInterventionAllowed()) {
@@ -402,7 +450,9 @@ export class OpenAiAgentVoiceSession {
         this.interventionTranscript = '';
         this.activeIntervention = undefined;
       }
-      this.flushPendingIntervention();
+      if (this.startupEnvelopePlaybackConfirmed) {
+        this.flushPendingIntervention();
+      }
       this.currentResponseKind = 'normal';
       return;
     }
@@ -554,7 +604,10 @@ export class OpenAiAgentVoiceSession {
       firstUtteranceArmed: this.firstUtteranceArmed,
       firstUtteranceDelivered: this.firstUtteranceDelivered,
       preArmedAudio: this.preArmedAudio,
-      firstUtteranceCorrectionSent: this.firstUtteranceCorrectionSent
+      firstUtteranceCorrectionSent: this.firstUtteranceCorrectionSent,
+      startupEnvelopeQueued: this.startupEnvelopeQueued,
+      startupEnvelopePlaybackConfirmed: this.startupEnvelopePlaybackConfirmed,
+      bufferedStartupAudio: this.queuedAudio.length
     });
   }
 }
