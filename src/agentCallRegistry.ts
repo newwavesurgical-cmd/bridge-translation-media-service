@@ -80,7 +80,19 @@ export interface AgentControlRequest {
   note?: string;
 }
 
-type AgentCallState = 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
+export type AgentCallState = 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
+
+/**
+ * States in which a call is over. Direct voice takeover must never engage on
+ * one of these: it would open the operator's microphone and spin up
+ * translation sessions for a call that no longer exists.
+ */
+const TERMINAL_AGENT_CALL_STATES: readonly AgentCallState[] = ['ended', 'error'];
+
+/** Result of a direct voice takeover start attempt. */
+export type TakeoverStartOutcome =
+  | { active: true; appStreamUrl: string; userLanguage: string; remoteLanguage: string }
+  | { active: false; reason: string; state: AgentCallState };
 
 interface AgentTranscriptEntry {
   at: string;
@@ -378,12 +390,22 @@ export class AgentCallSession {
     return `${base}/${encodeURIComponent(this.sessionId)}?token=${encodeURIComponent(this.record.appToken)}`;
   }
 
-  startTakeover(options: { userLanguage?: string; remoteLanguage?: string } = {}): {
-    active: boolean;
-    appStreamUrl: string;
-    userLanguage: string;
-    remoteLanguage: string;
-  } {
+  /** True while the call can still carry a live operator takeover. */
+  canStartTakeover(): boolean {
+    return !TERMINAL_AGENT_CALL_STATES.includes(this.record.state);
+  }
+
+  startTakeover(options: { userLanguage?: string; remoteLanguage?: string } = {}): TakeoverStartOutcome {
+    // An ended/errored call must be refused before anything mutates: the app
+    // opens the operator microphone only when this reports active, so an
+    // honest refusal here is what keeps the mic shut on a dead call.
+    if (!this.canStartTakeover()) {
+      return {
+        active: false,
+        reason: 'agent call is not active',
+        state: this.record.state
+      };
+    }
     const userLanguage = normalizeOptional(options.userLanguage) ?? 'English';
     // The live call record is authoritative. A stale cockpit/assistant
     // snapshot must never be able to turn a Spanish call into English↔English
@@ -436,6 +458,11 @@ export class AgentCallSession {
   }
 
   bindApp(ws: WebSocket): void {
+    // A takeover socket must not resurrect a finished call.
+    if (!this.canStartTakeover()) {
+      ws.close();
+      return;
+    }
     this.appWs?.close();
     this.appWs = ws;
     if (!this.record.takeover?.active) {

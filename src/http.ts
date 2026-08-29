@@ -1,4 +1,5 @@
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
 import { URL } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { z } from 'zod';
@@ -278,6 +279,16 @@ export function createBridgeMediaServer(config: AppConfig) {
         }
         const body = agentTakeoverSchema.parse(await readJson(req));
         const takeover = session.startTakeover(body);
+        if (!takeover.active) {
+          // 409, and deliberately no appStreamUrl: the caller must not open a
+          // microphone for a call that has already ended or errored.
+          return sendJson(res, 409, {
+            ok: false,
+            error: takeover.reason,
+            takeover,
+            diagnostics: session.diagnostics()
+          });
+        }
         return sendJson(res, 200, { ok: true, takeover, diagnostics: session.diagnostics() });
       }
 
@@ -707,9 +718,27 @@ function sendXml(res: http.ServerResponse, status: number, body: string): void {
   res.end(body);
 }
 
+/**
+ * Constant-time string compare. Length is not secret here (the expected token
+ * length is fixed by config), but the byte comparison must not short-circuit
+ * on the first mismatch.
+ */
+function safeEqual(a: string, b: string): boolean {
+  const left = Buffer.from(a, 'utf8');
+  const right = Buffer.from(b, 'utf8');
+  if (left.length !== right.length) {
+    return false;
+  }
+  return timingSafeEqual(left, right);
+}
+
 function authorized(config: AppConfig, req: http.IncomingMessage): boolean {
   if (!config.BRIDGE_MEDIA_API_KEY) {
     return true;
   }
-  return req.headers.authorization === `Bearer ${config.BRIDGE_MEDIA_API_KEY}`;
+  const header = req.headers.authorization;
+  if (typeof header !== 'string') {
+    return false;
+  }
+  return safeEqual(header, `Bearer ${config.BRIDGE_MEDIA_API_KEY}`);
 }
