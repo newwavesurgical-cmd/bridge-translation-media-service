@@ -160,6 +160,35 @@ export function createBridgeMediaServer(config: AppConfig) {
       }
 
       if (req.method === 'GET' && url.pathname === '/health') {
+        const activeCalls = registry.listDiagnostics();
+        const recentCalls = registry.listRecentDiagnostics();
+        const activeAgentCalls = agentCallRegistry.listDiagnostics();
+        const recentAgentCalls = agentCallRegistry.listRecentDiagnostics();
+        const activeInPersonSessions = inPersonRegistry.listDiagnostics();
+        const recentInPersonSessions = inPersonRegistry.listRecentDiagnostics();
+        const activeAppToAppSessions = appToAppRegistry.listDiagnostics();
+        const recentAppToAppSessions = appToAppRegistry.listRecentDiagnostics();
+        const diagnostics = authorized(config, req)
+          ? {
+              activeCalls,
+              recentCalls,
+              activeAgentCalls,
+              recentAgentCalls,
+              activeInPersonSessions,
+              recentInPersonSessions,
+              activeAppToAppSessions,
+              recentAppToAppSessions
+            }
+          : {
+              activeCallCount: activeCalls.length,
+              recentCallCount: recentCalls.length,
+              activeAgentCallCount: activeAgentCalls.length,
+              recentAgentCallCount: recentAgentCalls.length,
+              activeInPersonSessionCount: activeInPersonSessions.length,
+              recentInPersonSessionCount: recentInPersonSessions.length,
+              activeAppToAppSessionCount: activeAppToAppSessions.length,
+              recentAppToAppSessionCount: recentAppToAppSessions.length
+            };
         return sendJson(res, 200, {
           ok: true,
           service: 'bridge-translation-media-service',
@@ -172,22 +201,21 @@ export function createBridgeMediaServer(config: AppConfig) {
           directVoiceTakeoverSupported: true,
           monitorStreamSupported: false,
           dryRunCalls: config.DRY_RUN_CALLS,
-          activeCalls: registry.listDiagnostics(),
-          recentCalls: registry.listRecentDiagnostics(),
-          activeAgentCalls: agentCallRegistry.listDiagnostics(),
-          recentAgentCalls: agentCallRegistry.listRecentDiagnostics(),
-          activeInPersonSessions: inPersonRegistry.listDiagnostics(),
-          recentInPersonSessions: inPersonRegistry.listRecentDiagnostics(),
-          activeAppToAppSessions: appToAppRegistry.listDiagnostics(),
-          recentAppToAppSessions: appToAppRegistry.listRecentDiagnostics()
+          ...diagnostics
         });
       }
 
       if (req.method === 'GET' && url.pathname === '/agent-call/health') {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
         return sendJson(res, 200, agentCallHealth(config, agentCallRegistry));
       }
 
       if (req.method === 'GET' && url.pathname === '/agent-call/capabilities') {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
         return sendJson(res, 200, agentCallCapabilities(config, agentCallRegistry));
       }
 
