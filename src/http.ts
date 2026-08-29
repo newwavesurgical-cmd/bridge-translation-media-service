@@ -79,6 +79,9 @@ const createAgentCallSchema = z
     firstUtterance: z.string().max(300).optional(),
     requireLiteralFirstUtterance: z.boolean().optional(),
     deferFirstResponseUntilSessionReady: z.boolean().optional(),
+    machineDetection: z.literal('DetectMessageEnd').optional(),
+    asyncAmd: z.literal(false).optional(),
+    machineDetectionTimeout: z.coerce.number().int().min(3).max(59).optional(),
     maxCallDurationSeconds: z.coerce.number().int().positive().optional(),
     metadata: z.record(z.unknown()).optional()
   })
@@ -108,6 +111,9 @@ const createAgentCallSchema = z
     firstUtterance: body.firstUtterance,
     requireLiteralFirstUtterance: body.requireLiteralFirstUtterance,
     deferFirstResponseUntilSessionReady: body.deferFirstResponseUntilSessionReady,
+    machineDetection: body.machineDetection,
+    asyncAmd: body.asyncAmd,
+    machineDetectionTimeout: body.machineDetectionTimeout,
     maxCallDurationSeconds: body.maxCallDurationSeconds,
     metadata: body.metadata
   }))
@@ -402,12 +408,27 @@ export function createBridgeMediaServer(config: AppConfig) {
         if (!session) {
           return sendXml(res, 404, '<Response><Reject /></Response>');
         }
+        session.applyTwilioMetadata({
+          answeredBy: url.searchParams.get('AnsweredBy'),
+          forwardedFrom: url.searchParams.get('ForwardedFrom'),
+          callStatus: url.searchParams.get('CallStatus')
+        });
         const xml = buildAgentCallTwiMl({ config, sessionId });
         return sendXml(res, 200, xml);
       }
 
       if (req.method === 'POST' && url.pathname === '/twilio/status') {
-        await readBody(req);
+        const form = new URLSearchParams(await readBody(req));
+        const sessionId = url.searchParams.get('sessionId');
+        const callSid = form.get('CallSid');
+        const session =
+          (sessionId ? agentCallRegistry.get(sessionId) : undefined) ??
+          (callSid ? agentCallRegistry.getByCallSid(callSid) : undefined);
+        session?.applyTwilioMetadata({
+          answeredBy: form.get('AnsweredBy'),
+          forwardedFrom: form.get('ForwardedFrom'),
+          callStatus: form.get('CallStatus')
+        });
         return sendJson(res, 200, { ok: true });
       }
 

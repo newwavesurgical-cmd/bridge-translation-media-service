@@ -5,6 +5,7 @@ import { encodeMuLaw } from '../src/audio/mulaw.js';
 import { AgentCallRegistry, buildAgentInstructions, detectIvrPrompt } from '../src/agentCallRegistry.js';
 import type { AppConfig } from '../src/config.js';
 import { createBridgeMediaServer } from '../src/http.js';
+import { buildAgentCallCreateOptions } from '../src/twilio/client.js';
 import { buildAgentCallTwiMl } from '../src/twilio/twiml.js';
 
 const config: AppConfig = {
@@ -249,6 +250,54 @@ describe('AgentCallRegistry', () => {
     expect(xml).toContain('<Stream url="wss://bridge-media.example.com/agent-call/twilio/stream">');
     expect(xml).toContain('name="sessionId" value="agent_test"');
     expect(xml).toContain('name="streamToken"');
+    expect(xml).not.toContain('<Say');
+    expect(xml).not.toContain('<Play');
+  });
+
+  it('blocks agent TwiML on synchronous AMD so voicemail cannot cover the disclosure', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_amd_test',
+      missionPrompt: 'Confirm store hours.',
+      firstUtterance:
+        "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.",
+      machineDetection: 'DetectMessageEnd',
+      asyncAmd: false,
+      machineDetectionTimeout: 30
+    });
+
+    const options = buildAgentCallCreateOptions(config, session);
+
+    expect(options).toMatchObject({
+      machineDetection: 'DetectMessageEnd',
+      machineDetectionTimeout: 30,
+      asyncAmd: 'false',
+      method: 'GET'
+    });
+    expect(options.url).toContain('/twiml/agent-call?sessionId=agent_amd_test');
+    expect(options.statusCallback).toContain('/twilio/status?sessionId=agent_amd_test');
+  });
+
+  it('surfaces sanitized answer and forwarding diagnostics', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_answered_by_test'
+    });
+
+    session.applyTwilioMetadata({
+      answeredBy: 'machine_end_beep',
+      forwardedFrom: '+19545558980',
+      callStatus: 'in-progress'
+    });
+
+    expect(session.diagnostics()).toMatchObject({
+      machineDetection: 'DetectMessageEnd',
+      machineDetectionTimeout: 30,
+      asyncAmd: false,
+      answeredBy: 'machine_end_beep',
+      forwardedFrom: '********8980',
+      twilioStatus: 'in-progress'
+    });
   });
 
   it('waits for Twilio start before binding the realtime voice session', () => {

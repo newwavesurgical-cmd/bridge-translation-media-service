@@ -63,6 +63,11 @@ export interface CreateAgentCallRequest {
   firstUtterance?: string;
   requireLiteralFirstUtterance?: boolean;
   deferFirstResponseUntilSessionReady?: boolean;
+  /** Twilio AMD mode. DetectMessageEnd keeps TwiML/media blocked through a voicemail greeting. */
+  machineDetection?: 'DetectMessageEnd';
+  /** Synchronous AMD is required so no app audio can overlap the greeting. */
+  asyncAmd?: boolean;
+  machineDetectionTimeout?: number;
   maxCallDurationSeconds?: number;
   metadata?: Record<string, unknown>;
 }
@@ -141,6 +146,12 @@ export interface AgentCallRecord {
   firstUtterance: string;
   requireLiteralFirstUtterance: boolean;
   deferFirstResponseUntilSessionReady: boolean;
+  machineDetection: 'DetectMessageEnd';
+  asyncAmd: boolean;
+  machineDetectionTimeout: number;
+  answeredBy?: string;
+  forwardedFrom?: string;
+  twilioStatus?: string;
   maxCallDurationSeconds: number;
   metadata?: Record<string, unknown>;
   createdAt: string;
@@ -211,6 +222,12 @@ export class AgentCallRegistry {
       firstUtterance: normalizeFirstUtterance(request.firstUtterance),
       requireLiteralFirstUtterance: request.requireLiteralFirstUtterance ?? true,
       deferFirstResponseUntilSessionReady: request.deferFirstResponseUntilSessionReady ?? true,
+      machineDetection: 'DetectMessageEnd',
+      // Async AMD lets TwiML run while detection is still listening, which is
+      // exactly how the disclosure was spoken over a forwarding/voicemail
+      // announcement. Default to synchronous detection for agent calls.
+      asyncAmd: false,
+      machineDetectionTimeout: clampMachineDetectionTimeout(request.machineDetectionTimeout),
       maxCallDurationSeconds: clampMaxCallDuration(request.maxCallDurationSeconds),
       metadata: request.metadata,
       createdAt: new Date().toISOString(),
@@ -254,6 +271,10 @@ export class AgentCallRegistry {
 
   get(sessionId: string): AgentCallSession | undefined {
     return this.sessions.get(sessionId);
+  }
+
+  getByCallSid(callSid: string): AgentCallSession | undefined {
+    return Array.from(this.sessions.values()).find((session) => session.data.callSid === callSid);
   }
 
   delete(sessionId: string, diagnostics?: Record<string, unknown>): void {
@@ -311,6 +332,20 @@ export class AgentCallSession {
 
   markCalling(): void {
     this.record.state = this.config.DRY_RUN_CALLS ? 'created' : 'calling';
+    this.touch();
+  }
+
+  applyTwilioMetadata(input: {
+    answeredBy?: string | null;
+    forwardedFrom?: string | null;
+    callStatus?: string | null;
+  }): void {
+    const answeredBy = normalizeOptional(input.answeredBy);
+    const forwardedFrom = normalizeOptional(input.forwardedFrom);
+    const callStatus = normalizeOptional(input.callStatus);
+    if (answeredBy) this.record.answeredBy = answeredBy.slice(0, 80);
+    if (forwardedFrom) this.record.forwardedFrom = forwardedFrom.slice(0, 80);
+    if (callStatus) this.record.twilioStatus = callStatus.slice(0, 80);
     this.touch();
   }
 
@@ -562,6 +597,12 @@ export class AgentCallSession {
       targetName: this.record.targetName ?? null,
       callerName: this.record.callerName ?? null,
       languageLock: this.record.languageLock ?? null,
+      machineDetection: this.record.machineDetection,
+      machineDetectionTimeout: this.record.machineDetectionTimeout,
+      asyncAmd: this.record.asyncAmd,
+      answeredBy: this.record.answeredBy ?? null,
+      forwardedFrom: this.record.forwardedFrom ? redactPhone(this.record.forwardedFrom) : null,
+      twilioStatus: this.record.twilioStatus ?? null,
       voice: this.record.voice,
       missionPromptWasFallback: this.record.missionPromptWasFallback,
       missionPromptPreview: redactMissionText(this.record.systemPrompt ?? this.record.missionPrompt),
@@ -1399,7 +1440,7 @@ function normalizeMission(text: string | undefined): { text: string; wasFallback
       };
 }
 
-function normalizeOptional(text: string | undefined): string | undefined {
+function normalizeOptional(text: string | null | undefined): string | undefined {
   const normalized = text?.replace(/\s+/g, ' ').trim();
   return normalized ? normalized.slice(0, 6000) : undefined;
 }
@@ -1511,6 +1552,11 @@ function clampMaxCallDuration(value: number | undefined): number {
     return DEFAULT_MAX_CALL_DURATION_SECONDS;
   }
   return Math.min(DEFAULT_MAX_CALL_DURATION_SECONDS, Math.max(30, Math.floor(value)));
+}
+
+function clampMachineDetectionTimeout(value: number | undefined): number {
+  if (!Number.isFinite(value)) return 30;
+  return Math.max(3, Math.min(59, Math.round(value as number)));
 }
 
 function redactPhone(phone: string): string {
