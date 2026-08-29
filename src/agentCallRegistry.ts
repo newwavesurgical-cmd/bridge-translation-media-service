@@ -59,6 +59,8 @@ export interface CreateAgentCallRequest {
   missionPrompt?: string;
   systemPrompt?: string;
   languageLock?: string;
+  /** Prepared callee-facing purpose, already resolved in the language lock. */
+  spokenPurpose?: string;
   voice?: string;
   firstUtterance?: string;
   requireLiteralFirstUtterance?: boolean;
@@ -142,6 +144,7 @@ export interface AgentCallRecord {
   missionPromptWasFallback: boolean;
   systemPrompt?: string;
   languageLock?: string;
+  spokenPurpose?: string;
   voice: string;
   firstUtterance: string;
   requireLiteralFirstUtterance: boolean;
@@ -218,6 +221,7 @@ export class AgentCallRegistry {
       missionPromptWasFallback: mission.wasFallback,
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
+      spokenPurpose: normalizeOptional(request.spokenPurpose),
       voice: normalizeVoice(request.voice, request.languageLock),
       firstUtterance: normalizeFirstUtterance(request.firstUtterance),
       requireLiteralFirstUtterance: request.requireLiteralFirstUtterance ?? true,
@@ -597,6 +601,7 @@ export class AgentCallSession {
       targetName: this.record.targetName ?? null,
       callerName: this.record.callerName ?? null,
       languageLock: this.record.languageLock ?? null,
+      preparedSpokenPurpose: Boolean(this.record.spokenPurpose),
       machineDetection: this.record.machineDetection,
       machineDetectionTimeout: this.record.machineDetectionTimeout,
       asyncAmd: this.record.asyncAmd,
@@ -723,6 +728,7 @@ export class AgentCallSession {
       config: this.config,
       instructions: buildAgentInstructions(this.record),
       firstUtterance: this.record.firstUtterance,
+      spokenPurpose: this.record.spokenPurpose,
       voice: this.record.voice,
       onAudioDelta: (pcmu) => {
         if (this.record.takeover?.active) {

@@ -28,7 +28,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function makeLiveSession(instructions = 'Mission instructions') {
+function makeLiveSession(instructions = 'Mission instructions', spokenPurpose?: string) {
   const sent: Array<Record<string, unknown>> = [];
   const errors: Error[] = [];
   const startupDiagnostics: unknown[] = [];
@@ -39,6 +39,7 @@ function makeLiveSession(instructions = 'Mission instructions') {
     config,
     instructions,
     firstUtterance: "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.",
+    ...(spokenPurpose ? { spokenPurpose } : {}),
     voice: 'marin',
     onAudioDelta: (delta) => audioDeltas.push(delta),
     onRemoteTranscriptDelta: () => undefined,
@@ -278,6 +279,96 @@ describe('OpenAI agent voice session startup gate', () => {
     );
   });
 
+  it('uses the exact prepared English purpose even when the wrapper contains medical examples', () => {
+    const rawInstructions = [
+      'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
+      'Policy example: if a patient needs a doctor appointment after surgery, use known medical facts.',
+      'Mission:',
+      'Confirm whether order 4471 shipped and request the tracking number.'
+    ].join('\n');
+    const purpose = "I'm calling to check whether order 4471 shipped.";
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions, purpose);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    const opener = String((sent[1].response as { instructions?: string }).instructions);
+    expect(opener).toContain(`Say exactly this sentence and nothing else:\n${purpose}`);
+    expect(opener).not.toMatch(/doctor|appointment|surgery/i);
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'wrong-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'Because I would like to make an appointment with the doctor.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    const retry = String((sent[2].response as { instructions?: string }).instructions);
+    expect(retry).toContain('differed from the prepared, language-locked purpose');
+    expect(retry).toContain(purpose);
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'correct-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio_transcript.delta', delta: purpose }));
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['correct-audio']);
+    expect(agentTranscriptDeltas).toEqual([purpose]);
+  });
+
+  it('uses the exact prepared Spanish purpose without translating or substituting a category', () => {
+    const rawInstructions = [
+      'Language lock: speak only in es-ES.',
+      'Policy examples mention doctors, appointments, cars, reservations, orders, and utility bills.',
+      'Mission:',
+      'Confirmar si el pedido 4471 ya fue enviado y pedir el número de seguimiento.'
+    ].join('\n');
+    const purpose = 'Llamo para confirmar si el pedido 4471 ya fue enviado.';
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession(rawInstructions, purpose);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    const opener = String((sent[1].response as { instructions?: string }).instructions);
+    expect(opener).toContain(`Say exactly this sentence and nothing else:\n${purpose}`);
+    expect(opener).not.toContain('make an appointment');
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'audio-es' }));
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio_transcript.delta', delta: purpose }));
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['audio-es']);
+    expect(agentTranscriptDeltas).toEqual([purpose]);
+  });
+
+  it('recovers the canonical prepared purpose from the prompt for older clients', () => {
+    const purpose = "I'm calling about the piano you listed for sale.";
+    const rawInstructions = [
+      'Language lock: speak only in en-US.',
+      'Medical policy examples mention a doctor, appointment, surgery, and hospital.',
+      `SPOKEN PURPOSE (RESOLVED): the purpose you state is EXACTLY this English sentence: "${purpose}" — never the mission text in another language.`,
+      'Mission:',
+      'Ask whether the piano is still available and whether the price is negotiable.'
+    ].join('\n');
+    const { mutable, sent } = makeLiveSession(rawInstructions);
+    mutable.firstUtteranceArmed = true;
+    mutable.firstUtteranceTranscript =
+      "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    const opener = String((sent[1].response as { instructions?: string }).instructions);
+    expect(opener).toContain(`Say exactly this sentence and nothing else:\n${purpose}`);
+    expect(opener).not.toMatch(/doctor|appointment|surgery|hospital/i);
+  });
+
   it('notifies the bridge when remote speech starts so queued phone audio can be cleared', () => {
     const { mutable, sent, speechStarted } = makeLiveSession();
 
@@ -297,7 +388,10 @@ describe('OpenAI agent voice session startup gate', () => {
       '=== FIRST UTTERANCE DISCLOSURE (HARD) === LITERAL FIRST UTTERANCE CONTRACT: your VERY FIRST spoken words are EXACTLY this text, verbatim, in English: "Hey there, just so you know, I am a real person but I am using an AI translator." PURPOSE-SECOND RULE: immediately after the exact text, in the SAME message, state the call purpose.',
       'Objetivo: pedir una cita urgente con el doctor que operó a su hijo.'
     ].join('\n');
-    const { mutable, sent } = makeLiveSession(rawInstructions);
+    const { mutable, sent } = makeLiveSession(
+      rawInstructions,
+      'Because I would like to make an appointment with the doctor for my son as soon as possible.'
+    );
     mutable.firstUtteranceArmed = true;
     mutable.firstUtteranceTranscript = "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 
@@ -403,8 +497,8 @@ describe('OpenAI agent voice session startup gate', () => {
 
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
     const openerInstructions = String((sent[1].response as { instructions?: string }).instructions);
-    expect(openerInstructions).toContain('Say exactly this sentence and nothing else');
-    expect(openerInstructions).toContain('make an appointment with Dr. Ramirez for my son as soon as possible');
+    expect(openerInstructions).toContain('Clean mission opening brief');
+    expect(openerInstructions).toContain('doctor Ramírez');
 
     mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'bad-audio' }));
     mutable.handleMessage(
@@ -436,7 +530,7 @@ describe('OpenAI agent voice session startup gate', () => {
     ]);
   });
 
-  it('does not let generic daughter examples override a son mission in the deterministic opener', () => {
+  it('does not let generic daughter examples override the prepared son purpose', () => {
     const rawInstructions = [
       'Language lock: speak only in en-US, unless the remote callee explicitly cannot understand.',
       'Remote callee/contact: oficina del doctor Ramírez.',
@@ -444,7 +538,9 @@ describe('OpenAI agent voice session startup gate', () => {
       'Mission:',
       'Objetivo: pedir una cita con la oficina del doctor Ramírez porque mi hijo tiene problemas después de cirugía y necesita verlo pronto.'
     ].join('\n');
-    const { mutable, sent } = makeLiveSession(rawInstructions);
+    const preparedPurpose =
+      'Because I would like to make an appointment with Dr. Ramirez for my son as soon as possible.';
+    const { mutable, sent } = makeLiveSession(rawInstructions, preparedPurpose);
     mutable.firstUtteranceArmed = true;
     mutable.firstUtteranceTranscript =
       "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
@@ -452,7 +548,7 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
     const openerInstructions = String((sent[1].response as { instructions?: string }).instructions);
-    expect(openerInstructions).toContain('make an appointment with Dr. Ramirez for my son as soon as possible');
+    expect(openerInstructions).toContain(preparedPurpose);
     expect(openerInstructions).not.toContain('for my daughter');
   });
 
@@ -490,14 +586,14 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(
       JSON.stringify({
         type: 'response.output_audio_transcript.delta',
-        delta: 'Because I would like to make an appointment with the doctor. Do you have anything available soon?'
+        delta: 'Because I would like to discuss the paperwork. Could you help me with that?'
       })
     );
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
     expect(audioDeltas).toEqual(['good-audio']);
     expect(agentTranscriptDeltas).toEqual([
-      'Because I would like to make an appointment with the doctor. Do you have anything available soon?'
+      'Because I would like to discuss the paperwork. Could you help me with that?'
     ]);
   });
 
@@ -535,13 +631,15 @@ describe('OpenAI agent voice session startup gate', () => {
     mutable.handleMessage(
       JSON.stringify({
         type: 'response.output_audio_transcript.delta',
-        delta: 'Because I would like to make an appointment with the doctor for my son.'
+        delta: 'Because I would like to discuss the paperwork. Could you help me with that?'
       })
     );
     mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
 
     expect(audioDeltas).toEqual(['good-audio']);
-    expect(agentTranscriptDeltas).toEqual(['Because I would like to make an appointment with the doctor for my son.']);
+    expect(agentTranscriptDeltas).toEqual([
+      'Because I would like to discuss the paperwork. Could you help me with that?'
+    ]);
   });
 
   it('buffers and retries a mission opener that invents a matter-on-file placeholder', () => {

@@ -48,7 +48,8 @@ describe('AgentCallRegistry', () => {
       clientSessionId: 'agent_test',
       targetName: 'Electric Company',
       missionPrompt: 'Call about a bill issue.',
-      languageLock: 'English'
+      languageLock: 'English',
+      spokenPurpose: "I'm calling about a problem with my electric bill."
     });
 
     const control = session.receiveControl({ control: 'yes' });
@@ -58,6 +59,7 @@ describe('AgentCallRegistry', () => {
       sessionId: 'agent_test',
       state: 'created',
       languageLock: 'English',
+      preparedSpokenPurpose: true,
       monitorStreamSupported: false,
       counters: {
         controlsReceived: 1

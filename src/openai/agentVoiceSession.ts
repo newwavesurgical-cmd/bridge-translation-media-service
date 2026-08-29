@@ -7,6 +7,8 @@ interface AgentVoiceSessionOptions {
   config: AppConfig;
   instructions: string;
   firstUtterance?: string;
+  /** Prepared callee-facing purpose, already resolved in the language lock. */
+  spokenPurpose?: string;
   voice: string;
   onAudioDelta: (base64Pcmu: string) => void;
   onRemoteTranscriptDelta: (delta: string) => void;
@@ -41,6 +43,7 @@ export class OpenAiAgentVoiceSession {
   private readonly guardedInterventionTranscriptDeltas: string[] = [];
   private readonly instructions: string;
   private readonly firstUtterance: string;
+  private readonly missionOpening?: string;
   private hasStartedCall = false;
   private sessionUpdateAcked = false;
   private firstUtteranceArmed = false;
@@ -62,6 +65,9 @@ export class OpenAiAgentVoiceSession {
   constructor(private readonly options: AgentVoiceSessionOptions) {
     this.instructions = options.instructions;
     this.firstUtterance = normalizeFirstUtterance(options.firstUtterance ?? extractFirstUtterance(options.instructions));
+    this.missionOpening = normalizeMissionOpening(
+      options.spokenPurpose ?? extractPreparedSpokenPurpose(options.instructions)
+    );
   }
 
   get status(): AgentVoiceSessionStatus {
@@ -448,7 +454,7 @@ export class OpenAiAgentVoiceSession {
   }
 
   private startMissionOpening(): void {
-    const exactOpening = buildDeterministicMissionOpening(this.instructions);
+    const exactOpening = this.missionOpening;
     if (exactOpening) {
       this.createResponse(
         {
@@ -479,16 +485,20 @@ export class OpenAiAgentVoiceSession {
     this.guardedMissionAudio.splice(0);
     this.guardedMissionTranscriptDeltas.splice(0);
     this.missionOpeningTranscript = '';
-    this.createResponse(
-      {
-        output_modalities: ['audio'],
-        instructions: buildMissionOpeningInstructions(this.instructions, true)
-      },
-      'mission_opening'
-    );
+    const instructions = this.missionOpening
+      ? [
+          'Your previous mission opening differed from the prepared, language-locked purpose and was discarded before the callee heard it.',
+          'Say exactly this sentence and nothing else:',
+          this.missionOpening
+        ].join('\n')
+      : buildMissionOpeningInstructions(this.instructions, true);
+    this.createResponse({ output_modalities: ['audio'], instructions }, 'mission_opening');
   }
 
   private isMissionOpeningAllowed(): boolean {
+    if (this.missionOpening) {
+      return isCompleteMissionOpening(this.missionOpeningTranscript, this.missionOpening);
+    }
     if (isEnglishLanguageLock(this.instructions) && containsSpanishSourceLeak(this.missionOpeningTranscript)) {
       return false;
     }
@@ -574,54 +584,16 @@ function buildMissionOpeningInstructions(instructions: string, correction = fals
   ].join('\n');
 }
 
-function buildDeterministicMissionOpening(instructions: string): string | null {
-  if (!isEnglishLanguageLock(instructions)) {
-    return null;
-  }
-  const missionOnly = compactLanguageText(extractMissionText(instructions));
-  const mission = compactLanguageText(`${missionOnly} ${instructions}`);
-  const doctorName = inferDoctorName(instructions);
-  if (/\b(?:doctor|dr|pediatric|pediatr|medical|medico|appointment|cita|surgery|operat|hospital)\b/.test(mission)) {
-    const contact = doctorName ? ` with ${doctorName}` : ' with the doctor';
-    const relation = /\b(?:daughter|hija)\b/.test(missionOnly)
-      ? ' for my daughter'
-      : /\b(?:son|hijo|child|kid|patient|paciente)\b/.test(missionOnly)
-        ? ' for my son'
-        : '';
-    const urgency = /\b(?:urgent|urgente|soon|pronto|sick|enfermo|fever|fiebre|vomit|surgery|operat|pain|dolor)\b/.test(
-      mission
-    )
-      ? ' as soon as possible'
-      : '';
-    return `Because I would like to make an appointment${contact}${relation}${urgency}. Could you help me schedule it?`;
-  }
-  if (/\b(?:car|coche|auto|vehicle|vehiculo)\b/.test(mission)) {
-    return 'Because I am calling about the car. Is it still available?';
-  }
-  if (/\b(?:reservation|reserva|restaurant|restaurante|table|mesa)\b/.test(mission)) {
-    return 'Because I would like to make a reservation. Do you have availability?';
-  }
-  if (/\b(?:order|pedido|delivery|entrega|shipment|tracking)\b/.test(mission)) {
-    return 'Because I am calling to check on an order. Could you help me with that?';
-  }
-  if (/\b(?:utility|electric|electricity|power|water|gas|bill|cuenta|factura|luz|agua)\b/.test(mission)) {
-    return 'Because I am calling about my account. Could you help me with that?';
-  }
-  return null;
-}
-
 function buildMissionOpeningBrief(instructions: string): string {
   const mission = extractMissionText(instructions);
   const cleaned = removeMissionScaffolding(mission);
   if (isEnglishLanguageLock(instructions) && containsSpanishSourceLeak(cleaned)) {
-    return (
-      inferEnglishMissionPurpose(cleaned, instructions) ??
-      [
-        'The source mission contains non-English purpose text.',
-        'Use the concrete purpose from the already-loaded session mission, translated into natural English.',
-        'Do not speak any source-language words or labels from the mission.'
-      ].join(' ')
-    );
+    return [
+      'The source mission below contains non-English purpose text.',
+      'Translate its actual meaning into natural English; do not substitute a category example or a different call purpose.',
+      'Do not speak any source-language words or labels from the mission.',
+      `Source mission: ${cleaned}`
+    ].join(' ');
   }
   return cleaned || 'Use the concrete purpose from the already-loaded session mission and ask the next mission-specific question.';
 }
@@ -740,36 +712,6 @@ function containsPrivateMetaCommentary(text: string): boolean {
   );
 }
 
-function inferEnglishMissionPurpose(cleanedMission: string, allInstructions: string): string | null {
-  const normalized = compactLanguageText(`${cleanedMission} ${allInstructions}`);
-  if (/\b(?:doctor|dr|pediatric|pediatr|cita|appointment|medical|medico|hijo|son)\b/.test(normalized)) {
-    const doctorName = inferDoctorName(`${cleanedMission} ${allInstructions}`);
-    const contact = doctorName ? ` with ${doctorName}` : ' with the doctor';
-    return [
-      `Open by saying you are calling because you would like to make an appointment${contact}.`,
-      'If the mission mentions a child, son, symptoms, urgency, or post-surgical concern, briefly include that the child is having issues and needs to be seen as soon as possible.',
-      'Ask whether there is an appointment available soon.',
-      'Do not say any Spanish office label such as "oficina del doctor".'
-    ].join(' ');
-  }
-  if (/\b(?:car|coche|auto|vehicle|vehiculo)\b/.test(normalized)) {
-    return [
-      'Open by saying you are calling because you are interested in the car.',
-      'Ask whether it is still available.',
-      'Do not say source-language labels from the mission.'
-    ].join(' ');
-  }
-  return null;
-}
-
-function inferDoctorName(text: string): string | null {
-  const match = text.match(/\b(?:Dr\.?|doctor)\s+([A-ZÁÉÍÓÚÑ][\p{L}'-]+)/u);
-  if (!match?.[1]) {
-    return null;
-  }
-  return `Dr. ${match[1].normalize('NFKD').replace(/[\u0300-\u036f]/g, '')}`;
-}
-
 function compactLanguageText(text: string): string {
   return normalizeTranscript(text)
     .toLowerCase()
@@ -813,6 +755,16 @@ function extractFirstUtterance(instructions: string): string {
   return normalizeFirstUtterance(match?.[1] ?? DEFAULT_FIRST_UTTERANCE);
 }
 
+function extractPreparedSpokenPurpose(instructions: string): string | undefined {
+  const match = instructions.match(/SPOKEN PURPOSE \(RESOLVED\):[^\n]*?sentence:\s*"([^"\n]+)"/i);
+  return normalizeMissionOpening(match?.[1]);
+}
+
+function normalizeMissionOpening(text: string | undefined): string | undefined {
+  const normalized = text?.replace(/\s+/g, ' ').trim();
+  return normalized || undefined;
+}
+
 function normalizeFirstUtterance(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized || isLegacyFirstUtterance(normalized) || isTruncatedDefaultFirstUtterance(normalized)) {
@@ -853,6 +805,13 @@ function isCompleteFirstUtterance(actual: string, expected: string): boolean {
   return (
     normalizeTranscript(actual).toLowerCase().startsWith(normalizeTranscript(expected).toLowerCase()) ||
     compactTranscript(actual).startsWith(compactTranscript(expected))
+  );
+}
+
+function isCompleteMissionOpening(actual: string, expected: string): boolean {
+  return (
+    normalizeTranscript(actual).toLowerCase() === normalizeTranscript(expected).toLowerCase() ||
+    compactTranscript(actual) === compactTranscript(expected)
   );
 }
 
