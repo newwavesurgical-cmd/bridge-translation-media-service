@@ -85,6 +85,14 @@ const createAgentCallSchema = z
     asyncAmd: z.literal(false).optional(),
     machineDetectionTimeout: z.coerce.number().int().min(3).max(59).optional(),
     maxCallDurationSeconds: z.coerce.number().int().positive().optional(),
+    statusCallbackUrl: z
+      .string()
+      .url()
+      .max(2000)
+      .refine((value) => ['http:', 'https:'].includes(new URL(value).protocol), {
+        message: 'statusCallbackUrl must use http or https'
+      })
+      .optional(),
     metadata: z.record(z.unknown()).optional()
   })
   .passthrough()
@@ -118,6 +126,7 @@ const createAgentCallSchema = z
     asyncAmd: body.asyncAmd,
     machineDetectionTimeout: body.machineDetectionTimeout,
     maxCallDurationSeconds: body.maxCallDurationSeconds,
+    statusCallbackUrl: body.statusCallbackUrl,
     metadata: body.metadata
   }))
   .refine((body) => body.to.length >= 7, { message: 'to or phoneNumber is required' });
@@ -135,6 +144,13 @@ const dtmfSchema = z.object({
 const agentTakeoverSchema = z.object({
   userLanguage: z.string().min(2).max(80).optional(),
   remoteLanguage: z.string().min(2).max(80).optional()
+});
+
+const agentTwilioStatusSchema = z.object({
+  sessionId: z.string().min(1).max(160),
+  callSid: z.string().max(80).optional(),
+  callStatus: z.string().min(1).max(80),
+  twilioDurationSeconds: z.number().int().nonnegative().nullable().optional()
 });
 
 function firstText(...values: Array<string | undefined>): string | undefined {
@@ -240,6 +256,24 @@ export function createBridgeMediaServer(config: AppConfig) {
           takeoverAppStreamUrl: session.appStreamUrl(),
           diagnostics: session.diagnostics()
         });
+      }
+
+      if (req.method === 'POST' && url.pathname === '/agent-call/twilio-status') {
+        if (!authorized(config, req)) {
+          return sendJson(res, 401, { error: 'unauthorized' });
+        }
+        const body = agentTwilioStatusSchema.parse(await readJson(req));
+        const session =
+          agentCallRegistry.get(body.sessionId) ??
+          (body.callSid ? agentCallRegistry.getByCallSid(body.callSid) : undefined);
+        if (!session) {
+          return sendJson(res, 404, { error: 'agent call not found' });
+        }
+        session.applyTwilioMetadata({
+          callStatus: body.callStatus,
+          twilioDurationSeconds: body.twilioDurationSeconds
+        });
+        return sendJson(res, 200, { ok: true, diagnostics: session.diagnostics() });
       }
 
       if (req.method === 'GET' && url.pathname.startsWith('/agent-call/')) {
@@ -468,7 +502,8 @@ export function createBridgeMediaServer(config: AppConfig) {
         session?.applyTwilioMetadata({
           answeredBy: form.get('AnsweredBy'),
           forwardedFrom: form.get('ForwardedFrom'),
-          callStatus: form.get('CallStatus')
+          callStatus: form.get('CallStatus'),
+          twilioDurationSeconds: parseOptionalNonnegativeInteger(form.get('CallDuration'))
         });
         return sendJson(res, 200, { ok: true });
       }
@@ -628,6 +663,12 @@ export function createBridgeMediaServer(config: AppConfig) {
   });
 
   return { server, registry, agentCallRegistry, inPersonRegistry, appToAppRegistry };
+}
+
+function parseOptionalNonnegativeInteger(value: string | null): number | null {
+  if (value === null || value.trim() === '') return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function agentCallHealth(config: AppConfig, agentCallRegistry: AgentCallRegistry): Record<string, unknown> {

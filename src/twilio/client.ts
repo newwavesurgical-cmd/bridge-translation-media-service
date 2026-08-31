@@ -54,8 +54,12 @@ export function buildAgentCallCreateOptions(config: AppConfig, session: AgentCal
   }
   const twimlUrl = new URL('/twiml/agent-call', config.PUBLIC_BASE_URL);
   twimlUrl.searchParams.set('sessionId', session.sessionId);
-  const statusCallback = new URL('/twilio/status', config.PUBLIC_BASE_URL);
-  statusCallback.searchParams.set('sessionId', session.sessionId);
+  const statusCallback = session.data.statusCallbackUrl
+    ? new URL(session.data.statusCallbackUrl)
+    : new URL('/twilio/status', config.PUBLIC_BASE_URL);
+  if (!session.data.statusCallbackUrl) {
+    statusCallback.searchParams.set('sessionId', session.sessionId);
+  }
 
   return {
     to: session.data.to,

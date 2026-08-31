@@ -280,6 +280,23 @@ describe('AgentCallRegistry', () => {
     expect(options.statusCallback).toContain('/twilio/status?sessionId=agent_amd_test');
   });
 
+  it('sends carrier status directly to the authenticated app settlement callback', () => {
+    const statusCallbackUrl =
+      'https://translator.example.com/api/public/agent-call-status?sessionId=agent_callback_test&callbackToken=signed-token';
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_callback_test',
+      statusCallbackUrl
+    });
+
+    const options = buildAgentCallCreateOptions(config, session);
+
+    expect(options.statusCallback).toBe(statusCallbackUrl);
+    expect(session.diagnostics()).toMatchObject({
+      statusCallbackConfigured: true
+    });
+  });
+
   it('surfaces sanitized answer and forwarding diagnostics', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
@@ -289,7 +306,8 @@ describe('AgentCallRegistry', () => {
     session.applyTwilioMetadata({
       answeredBy: 'machine_end_beep',
       forwardedFrom: '+19545558980',
-      callStatus: 'in-progress'
+      callStatus: 'completed',
+      twilioDurationSeconds: 137
     });
 
     expect(session.diagnostics()).toMatchObject({
@@ -298,7 +316,8 @@ describe('AgentCallRegistry', () => {
       asyncAmd: false,
       answeredBy: 'machine_end_beep',
       forwardedFrom: '********8980',
-      twilioStatus: 'in-progress'
+      twilioStatus: 'completed',
+      twilioDurationSeconds: 137
     });
   });
 

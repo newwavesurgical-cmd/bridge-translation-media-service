@@ -71,6 +71,8 @@ export interface CreateAgentCallRequest {
   asyncAmd?: boolean;
   machineDetectionTimeout?: number;
   maxCallDurationSeconds?: number;
+  /** Authenticated app endpoint that settles the user's minute reservation. */
+  statusCallbackUrl?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -167,7 +169,9 @@ export interface AgentCallRecord {
   answeredBy?: string;
   forwardedFrom?: string;
   twilioStatus?: string;
+  twilioDurationSeconds?: number;
   maxCallDurationSeconds: number;
+  statusCallbackUrl?: string;
   metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
@@ -245,6 +249,7 @@ export class AgentCallRegistry {
       asyncAmd: false,
       machineDetectionTimeout: clampMachineDetectionTimeout(request.machineDetectionTimeout),
       maxCallDurationSeconds: clampMaxCallDuration(request.maxCallDurationSeconds),
+      statusCallbackUrl: normalizeOptional(request.statusCallbackUrl),
       metadata: request.metadata,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -359,6 +364,7 @@ export class AgentCallSession {
     answeredBy?: string | null;
     forwardedFrom?: string | null;
     callStatus?: string | null;
+    twilioDurationSeconds?: number | null;
   }): void {
     const answeredBy = normalizeOptional(input.answeredBy);
     const forwardedFrom = normalizeOptional(input.forwardedFrom);
@@ -366,6 +372,13 @@ export class AgentCallSession {
     if (answeredBy) this.record.answeredBy = answeredBy.slice(0, 80);
     if (forwardedFrom) this.record.forwardedFrom = forwardedFrom.slice(0, 80);
     if (callStatus) this.record.twilioStatus = callStatus.slice(0, 80);
+    if (
+      typeof input.twilioDurationSeconds === 'number' &&
+      Number.isFinite(input.twilioDurationSeconds) &&
+      input.twilioDurationSeconds >= 0
+    ) {
+      this.record.twilioDurationSeconds = Math.floor(input.twilioDurationSeconds);
+    }
     this.touch();
   }
 
@@ -642,6 +655,8 @@ export class AgentCallSession {
       answeredBy: this.record.answeredBy ?? null,
       forwardedFrom: this.record.forwardedFrom ? redactPhone(this.record.forwardedFrom) : null,
       twilioStatus: this.record.twilioStatus ?? null,
+      twilioDurationSeconds: this.record.twilioDurationSeconds ?? null,
+      statusCallbackConfigured: Boolean(this.record.statusCallbackUrl),
       voice: this.record.voice,
       missionPromptWasFallback: this.record.missionPromptWasFallback,
       missionPromptPreview: redactMissionText(this.record.systemPrompt ?? this.record.missionPrompt),
