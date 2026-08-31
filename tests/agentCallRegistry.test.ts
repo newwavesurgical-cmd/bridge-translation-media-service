@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { makeStreamToken } from '../src/auth.js';
 import { bytesToBase64 } from '../src/audio/codec.js';
 import { encodeMuLaw } from '../src/audio/mulaw.js';
-import { AgentCallRegistry, buildAgentInstructions, detectIvrPrompt } from '../src/agentCallRegistry.js';
+import {
+  AgentCallRegistry,
+  buildAgentInstructions,
+  detectConversationalAnsweringService,
+  detectIvrPrompt
+} from '../src/agentCallRegistry.js';
 import type { AppConfig } from '../src/config.js';
 import { createBridgeMediaServer } from '../src/http.js';
 import { buildAgentCallCreateOptions } from '../src/twilio/client.js';
@@ -106,6 +111,8 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('stop speaking');
     expect(instructions).toContain('route by DTMF privately');
     expect(instructions).toContain('Only speak to an IVR if it explicitly requires a spoken phrase');
+    expect(instructions).toContain('A conversational AI answering service is different from a keypad IVR');
+    expect(instructions).toContain('Never narrate private reasoning or plans');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
     expect(instructions).not.toContain('You may say you are calling on behalf');
@@ -197,6 +204,23 @@ describe('AgentCallRegistry', () => {
         controlsDelivered: 0
       },
       transcriptDeltaRetainedCount: 2
+    });
+  });
+
+  it('shows operator-supplied values instead of internal control wrappers in the transcript', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Complete the intake.'
+    });
+
+    session.receiveControl({ text: '202-555-0147' });
+    session.receiveControl({ control: 'yes' });
+
+    expect(session.diagnostics()).toMatchObject({
+      transcriptTail: [
+        expect.objectContaining({ speaker: 'operator', delta: '202-555-0147' }),
+        expect.objectContaining({ speaker: 'operator', delta: 'Yes' })
+      ]
     });
   });
 
@@ -689,6 +713,57 @@ describe('AgentCallRegistry', () => {
       }),
       needsOperatorChoice: false
     });
+  });
+
+  it('recognizes a conversational AI answering service without treating it as keypad IVR', () => {
+    const transcript = [
+      'Please provide your ZIP code.',
+      'What is the best callback phone number?',
+      'Now provide your policy number.',
+      'Take your time. Please let me know when you are ready.',
+      'Reply yes or no to continue.'
+    ].join(' ');
+
+    expect(detectIvrPrompt(transcript)).toBeNull();
+    expect(detectConversationalAnsweringService(transcript)).toMatchObject({
+      kind: 'conversational_ai',
+      confidence: expect.any(Number)
+    });
+  });
+
+  it('does not classify one ordinary human intake question as an answering bot', () => {
+    expect(detectConversationalAnsweringService('Thanks for calling. What phone number can I reach you at?')).toBeNull();
+  });
+
+  it('retains structured intake signals across turns and updates the live agent mode once', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask about travel insurance.'
+    });
+    const modes: string[] = [];
+    const mutable = session as unknown as {
+      agent: { setRemoteInteractionMode: (mode: string) => void };
+      observeRemoteTranscript: (delta: string) => void;
+    };
+    mutable.agent = { setRemoteInteractionMode: (mode) => modes.push(mode) };
+
+    mutable.observeRemoteTranscript('Please provide your ZIP code.');
+    mutable.observeRemoteTranscript('What is the best callback phone number?');
+    mutable.observeRemoteTranscript('Please provide your policy number.');
+    mutable.observeRemoteTranscript('Take your time.');
+
+    expect(modes).toEqual(['conversational_ai']);
+    expect(session.diagnostics()).toMatchObject({
+      remoteParty: { kind: 'conversational_ai' },
+      counters: { conversationalAiDetections: 1 }
+    });
+  });
+
+  it('keeps a real numbered menu classified as IVR even if it mentions an agent', () => {
+    const transcript = 'For an automated agent, press 1. To speak with customer service, press 2.';
+
+    expect(detectIvrPrompt(transcript)).toMatchObject({ kind: 'menu' });
+    expect(detectConversationalAnsweringService(transcript)).toBeNull();
   });
 
   it('merges transcript fragments into one IVR option per keypad digit', () => {

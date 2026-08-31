@@ -802,6 +802,54 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(agentTranscriptDeltas).toEqual(["I can't do Thursday. I need to do it on Friday."]);
   });
 
+  it('buffers ordinary autonomous turns and discards private planning before the callee hears it', () => {
+    const { mutable, sent, audioDeltas, agentTranscriptDeltas } = makeLiveSession();
+    mutable.firstUtteranceDelivered = true;
+    mutable.startupEnvelopePlaybackConfirmed = true;
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'private-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'Okay, let me consider what I can share for that before I respond.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual([]);
+    expect(agentTranscriptDeltas).toEqual([]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'response.create' });
+    expect(String((sent[0].response as { instructions?: string }).instructions)).toContain(
+      'discarded before the callee heard it'
+    );
+
+    mutable.handleMessage(JSON.stringify({ type: 'response.output_audio.delta', delta: 'safe-audio' }));
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'response.output_audio_transcript.delta',
+        delta: 'My phone number is 202-555-0147.'
+      })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'response.done' }));
+
+    expect(audioDeltas).toEqual(['safe-audio']);
+    expect(agentTranscriptDeltas).toEqual(['My phone number is 202-555-0147.']);
+  });
+
+  it('updates conversational-answering-service instructions without creating a spoken response', () => {
+    const { session, sent } = makeLiveSession();
+
+    session.setRemoteInteractionMode('conversational_ai');
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'session.update' });
+    expect(String((sent[0].session as { instructions?: string }).instructions)).toContain(
+      'conversational automated answering service'
+    );
+    expect(sent.some((payload) => payload.type === 'response.create')).toBe(false);
+  });
+
   it('buffers early recipient audio until the complete startup envelope is confirmed played', () => {
     const { session, mutable, sent, startupDiagnostics } = makeLiveSession();
     mutable.firstUtteranceArmed = true;

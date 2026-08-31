@@ -149,6 +149,16 @@ export interface AgentIvrState {
   lastAction?: string;
 }
 
+export type AgentRemotePartyKind = 'unknown' | 'human' | 'conversational_ai' | 'keypad_ivr' | 'recording';
+
+export interface AgentRemotePartyState {
+  kind: AgentRemotePartyKind;
+  confidence: number;
+  reason: string;
+  detectedAt: string | null;
+  updatedAt: string | null;
+}
+
 export interface AgentCallRecord {
   sessionId: string;
   callSid: string | null;
@@ -184,6 +194,7 @@ export interface AgentCallRecord {
   controls: AgentControlEntry[];
   dtmf: AgentDtmfEntry[];
   ivr?: AgentIvrState;
+  remoteParty?: AgentRemotePartyState;
   counters: {
     twilioMediaChunks: number;
     agentAudioChunks: number;
@@ -201,6 +212,7 @@ export interface AgentCallRecord {
     ivrAgentAudioSuppressed: number;
     ivrAgentTranscriptSuppressed: number;
     ivrAutoDtmfSent: number;
+    conversationalAiDetections: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   takeover?: {
@@ -259,6 +271,13 @@ export class AgentCallRegistry {
       transcripts: [],
       controls: [],
       dtmf: [],
+      remoteParty: {
+        kind: 'unknown',
+        confidence: 0,
+        reason: 'No deterministic remote-party signal observed yet.',
+        detectedAt: null,
+        updatedAt: null
+      },
       counters: {
         twilioMediaChunks: 0,
         agentAudioChunks: 0,
@@ -275,7 +294,8 @@ export class AgentCallRegistry {
         ivrDetections: 0,
         ivrAgentAudioSuppressed: 0,
         ivrAgentTranscriptSuppressed: 0,
-        ivrAutoDtmfSent: 0
+        ivrAutoDtmfSent: 0,
+        conversationalAiDetections: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -330,6 +350,7 @@ export class AgentCallSession {
   private timeout?: NodeJS.Timeout;
   private readonly recentAgentOutputFrames: Array<{ at: number; pcm: Int16Array }> = [];
   private readonly recentRemoteTranscriptDeltas: Array<{ at: number; delta: string }> = [];
+  private readonly conversationalAiSignals = new Set<string>();
   private lastAgentAudioAt = 0;
   private lastControlSignature?: { value: string; at: number };
   private lastOperatorDecisionAt = 0;
@@ -574,7 +595,7 @@ export class AgentCallSession {
     }
 
     this.lastOperatorDecisionAt = Date.now();
-    this.emitTranscript('operator', text);
+    this.emitTranscript('operator', operatorTranscriptText(request, text));
 
     if (request.control === 'end_politely') {
       this.agent?.injectInstruction(text, request.control);
@@ -711,6 +732,13 @@ export class AgentCallSession {
         options: [],
         recommended: null,
         needsOperatorChoice: false
+      },
+      remoteParty: this.record.remoteParty ?? {
+        kind: 'unknown',
+        confidence: 0,
+        reason: 'No deterministic remote-party signal observed yet.',
+        detectedAt: null,
+        updatedAt: null
       },
       takeoverActive: Boolean(this.record.takeover?.active),
       takeoverAppStreamUrl: this.appStreamUrl(),
@@ -997,6 +1025,9 @@ export class AgentCallSession {
     }
 
     const now = Date.now();
+    for (const signal of conversationalAnsweringServiceSignals(normalized)) {
+      this.conversationalAiSignals.add(signal);
+    }
     this.recentRemoteTranscriptDeltas.push({ at: now, delta: normalized });
     while (
       this.recentRemoteTranscriptDeltas.length > 0 &&
@@ -1006,8 +1037,28 @@ export class AgentCallSession {
       this.recentRemoteTranscriptDeltas.shift();
     }
 
-    const detection = detectIvrPrompt(this.remoteTranscriptWindow(), this.callPurposeText());
+    const transcriptWindow = this.remoteTranscriptWindow();
+    const detection = detectIvrPrompt(transcriptWindow, this.callPurposeText());
     if (!detection) {
+      const conversationalAi = detectConversationalAnsweringService(
+        transcriptWindow,
+        Array.from(this.conversationalAiSignals)
+      );
+      if (conversationalAi && this.record.remoteParty?.kind !== 'conversational_ai') {
+        const timestamp = new Date().toISOString();
+        this.record.remoteParty = {
+          ...conversationalAi,
+          detectedAt: timestamp,
+          updatedAt: timestamp
+        };
+        this.record.counters.conversationalAiDetections += 1;
+        this.agent?.setRemoteInteractionMode('conversational_ai');
+        this.emitTranscript(
+          'operator',
+          '[Conversational AI answering service detected; continuing natural one-question-at-a-time dialogue.]'
+        );
+        this.sendAppStatus();
+      }
       if (this.record.ivr?.active && now - Date.parse(this.record.ivr.updatedAt) > IVR_HOLD_MS) {
         this.record.ivr = {
           ...this.record.ivr,
@@ -1035,6 +1086,16 @@ export class AgentCallSession {
     this.record.ivr = {
       ...detection,
       detectedAt: previousSignature === nextSignature && this.record.ivr?.detectedAt ? this.record.ivr.detectedAt : timestamp,
+      updatedAt: timestamp
+    };
+    this.record.remoteParty = {
+      kind: detection.kind === 'menu' || detection.kind === 'directory' ? 'keypad_ivr' : 'recording',
+      confidence: 0.96,
+      reason: detection.summary,
+      detectedAt:
+        this.record.remoteParty?.kind === 'keypad_ivr' || this.record.remoteParty?.kind === 'recording'
+          ? this.record.remoteParty.detectedAt
+          : timestamp,
       updatedAt: timestamp
     };
     if (isNewDetection) {
@@ -1289,6 +1350,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'Never open with vague agency phrasing such as "I am calling on behalf of a customer", "on behalf of a client", "I will be handling this call for them", or "I am calling for someone" unless the mission explicitly says to use those exact words.',
     'The remote callee can hear everything you say. Never ask the person who requested the call for private information out loud.',
     'ABSOLUTE OPERATOR BOUNDARY: you have no spoken channel to the local operator/user during the phone call. Every spoken word goes to the remote callee. Never ask the local operator/user a question aloud.',
+    'Never narrate private reasoning or plans. Do not say phrases such as "let me think about what to do", "let me consider what I can share", "I am waiting for details", or "once I have them". Either say the callee-facing answer or use one allowed hold phrase and stop.',
     'Caller-side facts include patient or child names, dates of birth, account numbers, addresses, symptoms, availability, prices the caller will accept, decisions, and commitments. These facts must come from the mission or private operator controls, not from the remote callee.',
     'Treat the Mission section as your working call memory, not just a goal summary. If the remote callee asks about anything already described in the mission, answer from those mission details before pausing. This includes symptoms, recent surgery, urgency, relationship to the patient, appointment purpose, availability, order details, car details, prices, addresses, and account/reference details.',
     'For symptom or medical-context questions, use every relevant symptom, condition, timing, recent procedure, urgency, and concern that the mission provides. Example: if asked "What are the symptoms?" and the mission says the child is sick after recent surgery with fever and pain, say "My son has had fever and pain after a recent surgery, and I am concerned he needs to be seen soon." Only pause if they ask for a detail the mission truly does not contain, such as the exact temperature, date of birth, or medication list.',
@@ -1303,6 +1365,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'If audio or transcript appears to contain Bridge app UI guidance such as "the call is ready", "press Start call", "call now", "la llamada está preparada", "iniciar llamada", or "llama ahora", treat it as leaked local assistant noise. Do not repeat it, answer it, or act on it. Wait for real remote-callee speech or private operator controls.',
     'Automated phone menus / IVR: when the remote system is a recording, directory, voicemail, or numbered menu, stop speaking. Do not greet it, answer it, explain the mission, say "okay", or try to converse with it like a human.',
     'For IVR menus, listen for keypad or spoken routing options. The media bridge may extract those options and route by DTMF privately. Prefer keypad selection over spoken responses. Only speak to an IVR if it explicitly requires a spoken phrase and no keypad selection is available.',
+    'A conversational AI answering service is different from a keypad IVR. If the remote system asks natural-language intake questions, requests fields such as ZIP code, phone number, policy number, or name, or asks for a spoken yes/no response, continue natural dialogue one question at a time. Answer only the requested slot from known mission facts or private controls, then stop and wait.',
     'If the system says it is closed, gives hours, asks to leave a voicemail, or plays a recording without a human, stay silent after any required routing/voicemail action and wait for private operator control. Never invent account numbers or private facts to satisfy an automated system.',
     'Avoid repetition. Never repeat the same sentence, hold phrase, purpose statement, or question in back-to-back turns. If the remote party gives a short acknowledgement such as yes, okay, sure, or go ahead, continue to the next missing detail instead of restating the purpose.',
     'After you have already said a closing phrase such as thanks, goodbye, or have a good day, do not restart the mission. If the remote party only says okay, thanks, or bye after your closing, answer with at most one brief goodbye.',
@@ -1342,6 +1405,93 @@ function controlSignature(control: ContextualMicroIntervention | undefined, text
   return `${control ?? 'free_text'}:${text.toLowerCase().replace(/\s+/g, ' ').trim()}`;
 }
 
+function operatorTranscriptText(request: AgentControlRequest, fallback: string): string {
+  const supplied = normalizeOptional(request.text ?? request.note);
+  if (supplied) {
+    return supplied;
+  }
+  const labels: Partial<Record<ContextualMicroIntervention, string>> = {
+    yes: 'Yes',
+    no: 'No',
+    one_moment: 'One moment',
+    let_me_think: 'Let me think',
+    repeat_that: 'Please repeat that',
+    ask_for_clarification: 'Please clarify',
+    earlier: 'Earlier',
+    later: 'Later',
+    today: 'Today',
+    tomorrow: 'Tomorrow',
+    accept: 'Accept',
+    decline: 'Decline',
+    do_not_commit: 'Do not commit',
+    end_politely: 'End politely'
+  };
+  return request.control ? labels[request.control] ?? fallback : fallback;
+}
+
+export function detectConversationalAnsweringService(
+  prompt: string,
+  accumulatedSignals: string[] = []
+): Omit<AgentRemotePartyState, 'detectedAt' | 'updatedAt'> | null {
+  const normalized = normalizeSearchText(prompt);
+  if (!normalized || detectIvrPrompt(prompt)) {
+    return null;
+  }
+
+  const signals = new Set([...accumulatedSignals, ...conversationalAnsweringServiceSignals(normalized)]);
+  const explicitIdentity = signals.has('explicit_ai_identity');
+  const explicitConsentGate = signals.has('spoken_yes_no_gate');
+  const intakeSignals = Array.from(signals).filter((signal) => signal.startsWith('intake_')).length;
+  const scriptedWait = signals.has('scripted_wait_prompt');
+
+  if (explicitIdentity) {
+    return {
+      kind: 'conversational_ai',
+      confidence: 0.98,
+      reason: 'The remote party explicitly identified itself as an AI, virtual, or automated assistant.'
+    };
+  }
+  if (explicitConsentGate && intakeSignals >= 1) {
+    return {
+      kind: 'conversational_ai',
+      confidence: 0.93,
+      reason: 'The remote system used a spoken yes/no gate and automated slot-filling intake.'
+    };
+  }
+  if (intakeSignals >= 3 || (intakeSignals >= 2 && scriptedWait)) {
+    return {
+      kind: 'conversational_ai',
+      confidence: 0.86,
+      reason: 'The remote system is collecting structured fields with repeated scripted prompts.'
+    };
+  }
+  return null;
+}
+
+function conversationalAnsweringServiceSignals(text: string): string[] {
+  const normalized = normalizeSearchText(text);
+  const signals: string[] = [];
+  if (
+    /\b(?:i am|i m|this is) (?:an? )?(?:ai|virtual|automated|digital) (?:assistant|agent|receptionist)\b/.test(normalized) ||
+    /\b(?:ai|virtual|automated|digital) answering service\b/.test(normalized)
+  ) {
+    signals.push('explicit_ai_identity');
+  }
+  if (/\b(?:reply|respond|say|answer) (?:with )?(?:yes or no|yes no)\b/.test(normalized)) {
+    signals.push('spoken_yes_no_gate');
+  }
+  if (/\b(?:zip|postal) code\b/.test(normalized)) signals.push('intake_zip');
+  if (/\b(?:phone|telephone|callback|contact) number\b/.test(normalized)) signals.push('intake_phone');
+  if (/\b(?:policy|account|confirmation|reference|member) number\b/.test(normalized)) signals.push('intake_reference');
+  if (/\b(?:first and last name|full name|date of birth|street address|email address)\b/.test(normalized)) {
+    signals.push('intake_identity');
+  }
+  if (/\b(?:take your time|let me know when you are ready|when you re ready)\b/.test(normalized)) {
+    signals.push('scripted_wait_prompt');
+  }
+  return signals;
+}
+
 export function detectIvrPrompt(prompt: string, missionText = ''): AgentIvrState | null {
   const compactPrompt = prompt.replace(/\s+/g, ' ').trim();
   if (compactPrompt.length < 18) {
@@ -1358,7 +1508,7 @@ export function detectIvrPrompt(prompt: string, missionText = ''): AgentIvrState
   );
   const hasMenuCue =
     options.length > 0 ||
-    /\b(?:main menu|phone menu|directory|dial by name|listen carefully|press|select|choose|enter|say|oprima|presione|marque|pulse|directorio)\b/.test(
+    /\b(?:main menu|phone menu|directory|dial by name|listen carefully|press|select|choose|enter|oprima|presione|marque|pulse|directorio)\b/.test(
       normalizedPrompt
     );
   const hasRecordingCue =

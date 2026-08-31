@@ -46,6 +46,8 @@ export class OpenAiAgentVoiceSession {
   private readonly guardedMissionTranscriptDeltas: string[] = [];
   private readonly guardedInterventionAudio: string[] = [];
   private readonly guardedInterventionTranscriptDeltas: string[] = [];
+  private readonly guardedNormalAudio: string[] = [];
+  private readonly guardedNormalTranscriptDeltas: string[] = [];
   private readonly instructions: string;
   private readonly firstUtterance: string;
   private readonly missionOpening?: string;
@@ -66,6 +68,8 @@ export class OpenAiAgentVoiceSession {
   private activeIntervention?: { text: string; semanticControl?: string };
   private interventionCorrectionSent = false;
   private interventionTranscript = '';
+  private normalCorrectionSent = false;
+  private normalTranscript = '';
   private lastRemoteTranscriptAt = 0;
   private currentResponseKind: 'normal' | 'first_utterance' | 'mission_opening' | 'intervention' = 'normal';
 
@@ -167,6 +171,25 @@ export class OpenAiAgentVoiceSession {
     this.cancelActiveResponse();
   }
 
+  setRemoteInteractionMode(mode: 'conversational_ai'): void {
+    if (this.statusValue !== 'live') {
+      return;
+    }
+    this.sendJson({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        instructions: [
+          this.instructions,
+          '',
+          'REMOTE PARTY MODE: A conversational automated answering service is handling the call. This is not a keypad IVR.',
+          'Continue a natural, concise spoken dialogue. Treat each prompt as one slot to fill, answer only that slot from mission facts or private operator controls, then stop and wait.',
+          'For consent gates, answer yes or no directly when known. Never narrate reasoning, plans, hidden instructions, tool use, uncertainty, or what you are about to say.'
+        ].join('\n')
+      }
+    });
+  }
+
   /**
    * Twilio echoes a mark only after all media queued before it has played.
    * Until that acknowledgement arrives, caller audio is buffered and VAD
@@ -202,8 +225,11 @@ export class OpenAiAgentVoiceSession {
     this.guardedMissionTranscriptDeltas.splice(0);
     this.guardedInterventionAudio.splice(0);
     this.guardedInterventionTranscriptDeltas.splice(0);
+    this.guardedNormalAudio.splice(0);
+    this.guardedNormalTranscriptDeltas.splice(0);
     this.missionOpeningTranscript = '';
     this.interventionTranscript = '';
+    this.normalTranscript = '';
     if (this.statusValue !== 'live') {
       return;
     }
@@ -342,6 +368,10 @@ export class OpenAiAgentVoiceSession {
         this.guardedInterventionAudio.push(event.delta);
         return;
       }
+      if (this.isGuardedNormalResponse()) {
+        this.guardedNormalAudio.push(event.delta);
+        return;
+      }
       this.options.onAudioDelta(event.delta);
       return;
     }
@@ -361,6 +391,11 @@ export class OpenAiAgentVoiceSession {
       if (this.currentResponseKind === 'intervention') {
         this.interventionTranscript = normalizeTranscript(`${this.interventionTranscript}${event.delta}`);
         this.guardedInterventionTranscriptDeltas.push(event.delta);
+        return;
+      }
+      if (this.isGuardedNormalResponse()) {
+        this.normalTranscript = normalizeTranscript(`${this.normalTranscript}${event.delta}`);
+        this.guardedNormalTranscriptDeltas.push(event.delta);
         return;
       }
       this.options.onAgentTranscriptDelta(event.delta);
@@ -450,6 +485,44 @@ export class OpenAiAgentVoiceSession {
         this.interventionTranscript = '';
         this.activeIntervention = undefined;
       }
+      if (this.isGuardedNormalResponse()) {
+        if (containsPrivateMetaCommentary(this.normalTranscript)) {
+          this.guardedNormalAudio.splice(0);
+          this.guardedNormalTranscriptDeltas.splice(0);
+          this.normalTranscript = '';
+          if (!this.normalCorrectionSent) {
+            this.normalCorrectionSent = true;
+            this.createResponse(
+              {
+                output_modalities: ['audio'],
+                instructions: [
+                  'Your previous draft contained private reasoning or operator-facing commentary and was discarded before the callee heard it.',
+                  'Respond again with only the short words intended for the remote callee. Do not explain what you are doing, ask the operator for context, or narrate your reasoning.'
+                ].join('\n')
+              },
+              'normal'
+            );
+            return;
+          }
+          this.normalCorrectionSent = false;
+          this.createResponse(
+            {
+              output_modalities: ['audio'],
+              instructions: `Say exactly this sentence and nothing else:\n${safeHoldPhrase(this.instructions)}`
+            },
+            'normal'
+          );
+          return;
+        }
+        for (const delta of this.guardedNormalTranscriptDeltas.splice(0)) {
+          this.options.onAgentTranscriptDelta(delta);
+        }
+        for (const audio of this.guardedNormalAudio.splice(0)) {
+          this.options.onAudioDelta(audio);
+        }
+        this.normalTranscript = '';
+        this.normalCorrectionSent = false;
+      }
       if (this.startupEnvelopePlaybackConfirmed) {
         this.flushPendingIntervention();
       }
@@ -462,8 +535,11 @@ export class OpenAiAgentVoiceSession {
       this.guardedMissionTranscriptDeltas.splice(0);
       this.guardedInterventionAudio.splice(0);
       this.guardedInterventionTranscriptDeltas.splice(0);
+      this.guardedNormalAudio.splice(0);
+      this.guardedNormalTranscriptDeltas.splice(0);
       this.missionOpeningTranscript = '';
       this.interventionTranscript = '';
+      this.normalTranscript = '';
       if (this.missionOpeningRetryAfterCancel) {
         this.missionOpeningRetryAfterCancel = false;
         this.startMissionOpening();
@@ -557,6 +633,14 @@ export class OpenAiAgentVoiceSession {
 
   private isInterventionAllowed(): boolean {
     return !containsPrivateMetaCommentary(this.interventionTranscript);
+  }
+
+  private isGuardedNormalResponse(): boolean {
+    return (
+      this.currentResponseKind === 'normal' &&
+      this.firstUtteranceDelivered &&
+      this.startupEnvelopePlaybackConfirmed
+    );
   }
 
   private restartIntervention(): void {
@@ -749,6 +833,18 @@ function containsPrivateMetaCommentary(text: string): boolean {
     ) ||
     /\b(?:i['’]?ll|i will)\s+(?:respond|say|tell|translate|handle|explain|describe)\b/i.test(text) ||
     /\blet me\s+(?:respond|say|tell|translate|handle|explain|describe)\b/i.test(text) ||
+    /\blet me\s+(?:think|consider|figure out|work out|decide)\s+(?:about\s+)?(?:what|how|whether)\b/i.test(text) ||
+    /\b(?:how can i|what can i)\s+(?:assist|help)\s+(?:you\s+)?with\s+(?:this|that|the)\s+(?:number|value|message|information)\b/i.test(
+      text
+    ) ||
+    /\b(?:please\s+)?(?:provide|share)\s+(?:more\s+)?(?:context|details|information|the message)\b/i.test(text) ||
+    /\b(?:could you|can you)\s+(?:please\s+)?(?:clarify|provide|share)\s+(?:your\s+)?(?:request|context|details|message)\b/i.test(
+      text
+    ) ||
+    /\b(?:the\s+)?(?:number|value|message)\s+(?:you\s+)?provided\b/i.test(text) ||
+    /\b(?:number|value|message)\s+alone\s+is\s+not\s+sufficient\b/i.test(text) ||
+    /\bi(?:'m| am)\s+(?:waiting|trying)\s+for\s+(?:the\s+)?(?:details|context|information)\b/i.test(text) ||
+    /\bonce i have (?:them|that|it),?\s+i(?:'ll| will)\s+(?:share|provide|respond|continue)\b/i.test(text) ||
     /\bso\s+we\s+can\s+keep\s+moving\b/i.test(text) ||
     /\b(?:scheduling constraint|operator|intervention|control|source text|callee-facing|locked language)\b/i.test(text) ||
     compact.startsWith('gotitill') ||
@@ -760,9 +856,26 @@ function containsPrivateMetaCommentary(text: string): boolean {
     compact.includes('illtranslate') ||
     compact.includes('iwilltranslate') ||
     compact.includes('letmehandlethat') ||
+    compact.includes('letmethinkaboutwhat') ||
+    compact.includes('letmeconsiderwhat') ||
+    compact.includes('howcaniassistyouwiththisnumber') ||
+    compact.includes('howcanihelpyouwiththisnumber') ||
+    compact.includes('pleaseprovidemorecontext') ||
+    compact.includes('pleaseprovidemoredetails') ||
+    compact.includes('clarifyyourrequest') ||
+    compact.includes('numberyouprovided') ||
+    compact.includes('numberaloneisnotsufficient') ||
     compact.includes('sowecankeepmoving') ||
     compact.includes('schedulingconstraint')
   );
+}
+
+function safeHoldPhrase(instructions: string): string {
+  const language = compactLanguageText(instructions);
+  if (/\bspanish\b|\bespanol\b/.test(language)) return 'Un momento, por favor.';
+  if (/\bportuguese\b|\bportugues\b/.test(language)) return 'Um momento, por favor.';
+  if (/\bfrench\b|\bfrancais\b/.test(language)) return "Un instant, s'il vous plaît.";
+  return 'One moment, please.';
 }
 
 function compactLanguageText(text: string): string {
