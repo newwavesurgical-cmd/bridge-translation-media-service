@@ -547,17 +547,17 @@ export function createBridgeMediaServer(config: AppConfig) {
     }
 
     if (url.pathname.startsWith('/agent-call/monitor/stream/')) {
+      const sessionId = decodeURIComponent(url.pathname.replace('/agent-call/monitor/stream/', ''));
+      const token = url.searchParams.get('token') ?? '';
+      const session = agentCallRegistry.get(sessionId);
+      if (!session || !session.verifyAppToken(token)) {
+        // Fail before the WebSocket upgrade so unauthenticated monitor
+        // requests cannot leave an idle upgraded connection behind.
+        socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       agentCallMonitorWss.handleUpgrade(req, socket, head, (ws) => {
-        const sessionId = decodeURIComponent(url.pathname.replace('/agent-call/monitor/stream/', ''));
-        const token = url.searchParams.get('token') ?? '';
-        const session = agentCallRegistry.get(sessionId);
-        if (!session || !session.verifyAppToken(token)) {
-          // Reject before binding the receive-only stream. `close()` can leave
-          // an upgraded but unauthenticated socket waiting on a close
-          // handshake, so terminate it immediately instead.
-          ws.terminate();
-          return;
-        }
         session.bindMonitor(ws);
       });
       return;
