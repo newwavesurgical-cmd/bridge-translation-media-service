@@ -552,7 +552,10 @@ export function createBridgeMediaServer(config: AppConfig) {
         const token = url.searchParams.get('token') ?? '';
         const session = agentCallRegistry.get(sessionId);
         if (!session || !session.verifyAppToken(token)) {
-          ws.close();
+          // Reject before binding the receive-only stream. `close()` can leave
+          // an upgraded but unauthenticated socket waiting on a close
+          // handshake, so terminate it immediately instead.
+          ws.terminate();
           return;
         }
         session.bindMonitor(ws);
