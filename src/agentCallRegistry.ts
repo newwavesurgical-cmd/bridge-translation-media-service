@@ -27,6 +27,7 @@ const IVR_REMOTE_BUFFER_MS = 18000;
 const IVR_REMOTE_BUFFER_MAX_CHARS = 2200;
 const IVR_HOLD_MS = 45000;
 const IVR_AUTO_CHOICE_DELAY_MS = 8000;
+const IVR_SELECTION_COOLDOWN_MS = 5000;
 const DEFAULT_FIRST_UTTERANCE =
   "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 const LEGACY_FIRST_UTTERANCE =
@@ -321,6 +322,7 @@ export class AgentCallRegistry {
 export class AgentCallSession {
   private twilioWs?: WebSocket;
   private appWs?: WebSocket;
+  private readonly monitorSockets = new Set<WebSocket>();
   private agent?: OpenAiAgentVoiceSession;
   private ownerToRemote?: OpenAiTranslationSession;
   private remoteToOwner?: OpenAiTranslationSession;
@@ -332,6 +334,7 @@ export class AgentCallSession {
   private lastControlSignature?: { value: string; at: number };
   private lastOperatorDecisionAt = 0;
   private ivrAutoChoiceTimer?: NodeJS.Timeout;
+  private lastIvrSelection?: { signature: string; at: number };
 
   constructor(
     private readonly config: AppConfig,
@@ -395,7 +398,8 @@ export class AgentCallSession {
   }
 
   monitorStreamUrl(): string | null {
-    return null;
+    const base = this.agentMonitorStreamBaseUrl();
+    return `${base}/${encodeURIComponent(this.sessionId)}?token=${encodeURIComponent(this.record.appToken)}`;
   }
 
   appStreamUrl(): string {
@@ -498,6 +502,23 @@ export class AgentCallSession {
     });
   }
 
+  /**
+   * Bind a receive-only browser monitor. This socket never accepts operator
+   * audio and therefore never opens or depends on the browser microphone.
+   */
+  bindMonitor(ws: WebSocket): void {
+    this.monitorSockets.add(ws);
+    ws.on('close', () => this.monitorSockets.delete(ws));
+    ws.on('error', () => this.monitorSockets.delete(ws));
+    this.sendMonitor(ws, {
+      type: 'monitor_status',
+      state: this.record.state,
+      sampleRate: 24000,
+      microphone: false
+    });
+    this.touch();
+  }
+
   handleTwilioPreStart(ws: WebSocket, raw: string): boolean {
     let message: TwilioMediaMessage;
     try {
@@ -597,12 +618,20 @@ export class AgentCallSession {
     entry.delivered = true;
     this.record.counters.dtmfSent += 1;
     if (this.record.ivr?.active) {
+      const selectedSignature = this.ivrSignature(this.record.ivr);
       this.record.ivr = {
         ...this.record.ivr,
         active: false,
+        needsOperatorChoice: false,
+        autoChoiceDeadlineAt: undefined,
         updatedAt: new Date().toISOString(),
         lastAction: `Operator selected DTMF ${digit}.`
       };
+      this.lastIvrSelection = { signature: selectedSignature, at: Date.now() };
+      // Do not immediately re-detect the already-answered prompt from the
+      // rolling transcript window. Fresh post-selection audio starts a new
+      // menu window and can surface a genuinely new choice.
+      this.recentRemoteTranscriptDeltas.splice(0);
     }
     this.emitTranscript('operator', `[DTMF ${digit}]`);
     this.touch();
@@ -626,6 +655,8 @@ export class AgentCallSession {
     this.ownerToRemote?.close();
     this.remoteToOwner?.close();
     this.appWs?.close();
+    for (const monitor of this.monitorSockets) monitor.close();
+    this.monitorSockets.clear();
     this.twilioWs?.close();
     this.clearIvrAutoChoiceTimer();
     if (this.timeout) {
@@ -665,8 +696,9 @@ export class AgentCallSession {
       twilioConnected: Boolean(this.twilioWs),
       twilioStreamSid: this.record.twilioStreamSid ?? null,
       agentSession: this.agent?.status ?? 'idle',
-      monitorStreamSupported: false,
+      monitorStreamSupported: true,
       monitorStreamUrl: this.monitorStreamUrl(),
+      monitorConnected: this.monitorSockets.size > 0,
       directVoiceTakeoverSupported: true,
       ivrMenuDetectionSupported: true,
       ivrOptionDisplaySupported: true,
@@ -751,6 +783,10 @@ export class AgentCallSession {
         return;
       }
       this.record.counters.twilioMediaChunks += 1;
+      this.broadcastMonitorAudio(
+        'remote',
+        twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload)
+      );
       if (this.record.takeover?.active) {
         this.ensureTakeoverTranslationSessions();
         this.remoteToOwner?.appendPcm16Base64(twilioMuLaw8kBase64ToOpenAiPcm24kBase64(message.media.payload));
@@ -949,6 +985,11 @@ export class AgentCallSession {
     return base.replace(/\/app\/stream\/?$/, '/agent-call/app/stream');
   }
 
+  private agentMonitorStreamBaseUrl(): string {
+    const base = this.config.APP_STREAM_PUBLIC_WSS_URL ?? `ws://localhost:${this.config.PORT}/app/stream`;
+    return base.replace(/\/app\/stream\/?$/, '/agent-call/monitor/stream');
+  }
+
   private observeRemoteTranscript(delta: string): void {
     const normalized = delta.replace(/\s+/g, ' ').trim();
     if (!normalized) {
@@ -982,6 +1023,13 @@ export class AgentCallSession {
 
     const previousSignature = this.ivrSignature(this.record.ivr);
     const nextSignature = this.ivrSignature(detection);
+    if (
+      this.lastIvrSelection &&
+      this.lastIvrSelection.signature === nextSignature &&
+      now - this.lastIvrSelection.at < IVR_SELECTION_COOLDOWN_MS
+    ) {
+      return;
+    }
     const isNewDetection = previousSignature !== nextSignature;
     const timestamp = new Date().toISOString();
     this.record.ivr = {
@@ -1089,7 +1137,28 @@ export class AgentCallSession {
         mark: { name: markName }
       })
     );
+    this.broadcastMonitorAudio('agent', twilioMuLaw8kBase64ToOpenAiPcm24kBase64(payload));
     this.rememberAgentOutput(payload);
+  }
+
+  private broadcastMonitorAudio(track: 'agent' | 'remote', audio: string): void {
+    if (this.monitorSockets.size === 0 || !audio) {
+      return;
+    }
+    const message = JSON.stringify({
+      type: 'monitor_audio',
+      track,
+      audio,
+      sampleRate: 24000,
+      encoding: 'pcm16'
+    });
+    for (const socket of this.monitorSockets) {
+      if (socket.readyState === WebSocket.OPEN) socket.send(message);
+    }
+  }
+
+  private sendMonitor(ws: WebSocket, message: Record<string, unknown>): void {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
   }
 
   private clearTwilioAudioForBargeIn(): void {
@@ -1372,8 +1441,15 @@ function addOption(
   if ((!digit && !phrase) || !label) {
     return;
   }
-  const key = `${digit ?? ''}:${phrase?.toLowerCase() ?? ''}:${normalizeSearchText(label)}`;
-  if (options.has(key)) {
+  // A streaming transcript often repeats or splits one menu option across
+  // adjacent deltas. Key digit choices by the actual keypad action so option
+  // 2 can never render as two separate "2" buttons.
+  const key = digit ? `digit:${digit}` : `phrase:${phrase?.toLowerCase() ?? ''}`;
+  const existing = options.get(key);
+  if (existing) {
+    existing.label = mergeIvrLabels(existing.label, label);
+    existing.raw = mergeIvrLabels(existing.raw, rawValue?.replace(/\s+/g, ' ').trim() ?? label).slice(0, 200);
+    existing.confidence = Math.max(existing.confidence, digit || phrase ? 0.86 : 0.6);
     return;
   }
   options.set(key, {
@@ -1383,6 +1459,16 @@ function addOption(
     raw: rawValue?.replace(/\s+/g, ' ').trim() ?? label,
     confidence: digit || phrase ? 0.86 : 0.6
   });
+}
+
+function mergeIvrLabels(first: string, second: string): string {
+  const a = first.replace(/\s+/g, ' ').trim();
+  const b = second.replace(/\s+/g, ' ').trim();
+  const normalizedA = normalizeSearchText(a);
+  const normalizedB = normalizeSearchText(b);
+  if (!normalizedB || normalizedA === normalizedB || normalizedA.includes(normalizedB)) return a;
+  if (normalizedB.includes(normalizedA)) return b.slice(0, 80);
+  return `${a} / ${b}`.slice(0, 80);
 }
 
 function normalizeDtmfDigit(value: string | undefined): string | undefined {

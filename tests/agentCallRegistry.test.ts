@@ -60,7 +60,7 @@ describe('AgentCallRegistry', () => {
       state: 'created',
       languageLock: 'English',
       preparedSpokenPurpose: true,
-      monitorStreamSupported: false,
+      monitorStreamSupported: true,
       counters: {
         controlsReceived: 1
       }
@@ -598,6 +598,57 @@ describe('AgentCallRegistry', () => {
     });
   });
 
+  it('streams both call sides to a receive-only monitor socket', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_monitor_test'
+    });
+    const monitorMessages: string[] = [];
+    const monitor = {
+      readyState: 1,
+      send: (payload: string) => monitorMessages.push(payload),
+      on: () => undefined,
+      close: () => undefined
+    };
+    session.bindMonitor(monitor as never);
+
+    const sentToTwilio: string[] = [];
+    const mutable = session as unknown as {
+      twilioWs: { send: (payload: string) => void; close: () => void };
+      agent: { appendPcmuBase64: (payload: string) => void };
+      handleTwilioMessage: (raw: string) => void;
+    };
+    mutable.twilioWs = {
+      send: (payload: string) => sentToTwilio.push(payload),
+      close: () => undefined
+    };
+    mutable.agent = { appendPcmuBase64: () => undefined };
+    session.data.twilioStreamSid = 'MZ123';
+
+    mutable.handleTwilioMessage(
+      JSON.stringify({
+        event: 'media',
+        sequenceNumber: '2',
+        streamSid: 'MZ123',
+        media: { track: 'inbound', payload: makeSpeechPayload(510) }
+      })
+    );
+    session.sendDtmf('2');
+
+    const audio = monitorMessages
+      .map((message) => JSON.parse(message))
+      .filter((message) => message.type === 'monitor_audio');
+    expect(audio.map((message) => message.track)).toEqual(expect.arrayContaining(['remote', 'agent']));
+    expect(audio.every((message) => message.sampleRate === 24000 && message.encoding === 'pcm16')).toBe(true);
+    expect(session.monitorStreamUrl()).toMatch(
+      /^wss:\/\/bridge-media\.example\.com\/agent-call\/monitor\/stream\/agent_monitor_test\?token=/
+    );
+    expect(session.diagnostics()).toMatchObject({
+      monitorStreamSupported: true,
+      monitorConnected: true
+    });
+  });
+
   it('records DTMF attempts before the agent-call Twilio stream is live', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
@@ -638,6 +689,45 @@ describe('AgentCallRegistry', () => {
       }),
       needsOperatorChoice: false
     });
+  });
+
+  it('merges transcript fragments into one IVR option per keypad digit', () => {
+    const ivr = detectIvrPrompt(
+      'For appointments and, press 2. For scheduling, press 2. For billing, press 1.',
+      'Schedule an appointment.'
+    );
+
+    expect(ivr?.options.filter((option) => option.digit === '2')).toHaveLength(1);
+    const optionTwo = ivr?.options.find((option) => option.digit === '2');
+    expect(optionTwo?.label).toContain('appointments and');
+    expect(optionTwo?.label).toContain('scheduling');
+  });
+
+  it('keeps the answered IVR closed while stale menu text is still in flight', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-30T12:00:00.000Z'));
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      clientSessionId: 'agent_ivr_cooldown_test',
+      missionPrompt: 'Reach the front desk.'
+    });
+    const mutable = session as unknown as {
+      twilioWs: { send: () => void; close: () => void };
+      agent: { suppressActiveOutput: () => void };
+      observeRemoteTranscript: (delta: string) => void;
+    };
+    mutable.twilioWs = { send: () => undefined, close: () => undefined };
+    mutable.agent = { suppressActiveOutput: () => undefined };
+    session.data.twilioStreamSid = 'MZ123';
+
+    mutable.observeRemoteTranscript('For sales press 1. For appointments press 2.');
+    expect((session.diagnostics().ivr as { active: boolean }).active).toBe(true);
+    session.sendDtmf('2');
+    expect((session.diagnostics().ivr as { active: boolean }).active).toBe(false);
+
+    mutable.observeRemoteTranscript('For sales press 1. For appointments press 2.');
+    expect((session.diagnostics().ivr as { active: boolean }).active).toBe(false);
+    vi.useRealTimers();
   });
 
   it('detects closed automated recordings without inventing menu options', () => {
@@ -788,7 +878,7 @@ describe('agent-call HTTP endpoint wiring', () => {
       {
         sessionId: 'agent_http_test',
         realtimeModel: 'gpt-realtime-2.1',
-        monitorStreamSupported: false
+        monitorStreamSupported: true
       }
     ]);
   });

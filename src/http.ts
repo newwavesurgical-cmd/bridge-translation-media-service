@@ -166,6 +166,7 @@ export function createBridgeMediaServer(config: AppConfig) {
   const twilioWss = new WebSocketServer({ noServer: true });
   const agentCallTwilioWss = new WebSocketServer({ noServer: true });
   const agentCallAppWss = new WebSocketServer({ noServer: true });
+  const agentCallMonitorWss = new WebSocketServer({ noServer: true });
   const inPersonWss = new WebSocketServer({ noServer: true });
   const appToAppWss = new WebSocketServer({ noServer: true });
 
@@ -216,7 +217,7 @@ export function createBridgeMediaServer(config: AppConfig) {
           agentCallSupported: true,
           agentRealtimeVoiceBridgeSupported: true,
           directVoiceTakeoverSupported: true,
-          monitorStreamSupported: false,
+          monitorStreamSupported: true,
           dryRunCalls: config.DRY_RUN_CALLS,
           ...diagnostics
         });
@@ -250,7 +251,7 @@ export function createBridgeMediaServer(config: AppConfig) {
           callId: session.sessionId,
           callSid,
           status: config.DRY_RUN_CALLS ? 'dry_run' : 'calling',
-          monitorStreamSupported: false,
+          monitorStreamSupported: true,
           directVoiceTakeoverSupported: true,
           monitorStreamUrl: session.monitorStreamUrl(),
           takeoverAppStreamUrl: session.appStreamUrl(),
@@ -545,6 +546,20 @@ export function createBridgeMediaServer(config: AppConfig) {
       return;
     }
 
+    if (url.pathname.startsWith('/agent-call/monitor/stream/')) {
+      agentCallMonitorWss.handleUpgrade(req, socket, head, (ws) => {
+        const sessionId = decodeURIComponent(url.pathname.replace('/agent-call/monitor/stream/', ''));
+        const token = url.searchParams.get('token') ?? '';
+        const session = agentCallRegistry.get(sessionId);
+        if (!session || !session.verifyAppToken(token)) {
+          ws.close();
+          return;
+        }
+        session.bindMonitor(ws);
+      });
+      return;
+    }
+
     if (url.pathname.startsWith('/in-person/stream/')) {
       inPersonWss.handleUpgrade(req, socket, head, (ws) => {
         const sessionId = decodeURIComponent(url.pathname.replace('/in-person/stream/', ''));
@@ -678,7 +693,7 @@ function agentCallHealth(config: AppConfig, agentCallRegistry: AgentCallRegistry
     gitCommit: serviceGitCommit(),
     agentCallSupported: true,
     agentRealtimeVoiceBridgeSupported: true,
-    monitorStreamSupported: false,
+    monitorStreamSupported: true,
     twilioConfigured: twilioConfigured(config),
     openAiConfigured: openAiConfigured(config),
     mediaRouterConfigured: mediaRouterConfigured(config),
@@ -715,6 +730,7 @@ function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRe
       takeoverStart: 'POST /agent-call/:sessionId/takeover/start',
       takeoverEnd: 'POST /agent-call/:sessionId/takeover/end',
       takeoverAppStream: 'WS /agent-call/app/stream/:sessionId',
+      monitorStream: 'WS /agent-call/monitor/stream/:sessionId',
       dtmf: 'POST /agent-call/:sessionId/dtmf'
     }
   };
