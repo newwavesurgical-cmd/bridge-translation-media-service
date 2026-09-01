@@ -16,6 +16,10 @@ const MAX_AUDIO_TIMING_EVENTS = 80;
 const SINGLE_MIC_ROUTE_PRIME_SPEECH_RMS = 0.012;
 const SINGLE_MIC_ROUTE_ARMED_TIMEOUT_MS = 5000;
 const SINGLE_MIC_ROUTE_POST_SPEECH_SILENCE_MS = 1800;
+const STRICT_PARTNER_SPEECH_RMS = 0.012;
+const STRICT_PARTNER_TURN_SILENCE_MS = 550;
+const STRICT_PENDING_AUDIO_CHUNKS_MAX = 240;
+const STRICT_PENDING_TRANSCRIPT_DELTAS_MAX = 160;
 
 type InPersonSpeaker = 'owner' | 'partner';
 type InPersonTarget = 'user' | 'partner';
@@ -25,6 +29,11 @@ type SingleMicRoute = 'auto' | InPersonSpeaker;
 type TranscriptEntry = {
   at: string;
   speaker: InPersonSpeaker;
+  kind: TranscriptKind;
+  delta: string;
+};
+
+type StrictPendingTranscript = {
   kind: TranscriptKind;
   delta: string;
 };
@@ -188,7 +197,13 @@ export class InPersonRegistry {
     }
     const sessionId = request.clientSessionId ?? makeId('inperson');
     const inputMode = request.inputMode ?? 'dual_channel';
-    const languageGateMode = request.languageGateMode ?? (inputMode === 'single_mic_auto' ? 'soft_suppress' : 'monitor');
+    const languageGateMode =
+      request.languageGateMode ??
+      (inputMode === 'single_mic_auto'
+        ? 'soft_suppress'
+        : inputMode === 'single_mic_hold_to_speak'
+          ? 'strict_suppress'
+          : 'monitor');
     const record: InPersonRecord = {
       sessionId,
       userLanguage: request.userLanguage,
@@ -252,6 +267,12 @@ export class InPersonSession {
   private singleMicRouteSpeechStartedAt = 0;
   private singleMicRouteLastSpeechAt = 0;
   private lastSentActiveSingleMicRoute: SingleMicRoute | null = null;
+  private strictPartnerSpeechActive = false;
+  private strictPartnerLastSpeechAt = 0;
+  private readonly strictPartnerPending: {
+    audio: string[];
+    transcripts: StrictPendingTranscript[];
+  } = { audio: [], transcripts: [] };
 
   constructor(
     private readonly config: AppConfig,
@@ -369,11 +390,17 @@ export class InPersonSession {
       routeOverrideLastSpeechAgeMs: this.singleMicRouteLastSpeechAt ? Date.now() - this.singleMicRouteLastSpeechAt : null,
       languageGateMode: this.record.languageGateMode,
       languageGateNote:
-        'Transcript-based soft language gate. Monitor mode reports likely wrong-language pickup without muting; soft_suppress drops output from a channel only after confident opposite-language transcript evidence.',
+        'Transcript-based language gate. strict_suppress is fail-closed for the released Hold-mode partner lane: transcript and translated audio are buffered until the configured partner language passes, and operator-language turns are discarded.',
       routingModeNote: this.routingModeNote(),
       languageGate: {
         owner: this.languageGates.owner.diagnostics(),
         partner: this.languageGates.partner.diagnostics()
+      },
+      strictPartnerIsolation: {
+        enabled: this.strictPartnerIsolationEnabled(),
+        speechActive: this.strictPartnerSpeechActive,
+        pendingAudioChunks: this.strictPartnerPending.audio.length,
+        pendingTranscriptDeltas: this.strictPartnerPending.transcripts.length
       },
       error: this.record.error ?? null,
       counters: { ...this.record.counters },
@@ -533,6 +560,7 @@ export class InPersonSession {
       this.ownerToPartner?.appendPcm16Base64(audio);
       return;
     }
+    this.updateStrictPartnerTurn(audio);
     this.record.counters.partnerAudioChunks += 1;
     this.trackAudioInput('partnerToOwner');
     this.partnerToOwner?.appendPcm16Base64(audio);
@@ -586,6 +614,10 @@ export class InPersonSession {
         targetLanguage: this.record.userLanguage,
         onAudioDelta: (pcm24k) => {
           this.trackOpenAiAudio('partnerToOwner');
+          if (this.strictPartnerIsolationEnabled()) {
+            this.handleStrictPartnerAudio(pcm24k);
+            return;
+          }
           if (!this.shouldEmitTranslatedOutput('partner')) {
             this.trackSuppressedAudio('partnerToOwner', this.suppressionReasonFor('partner'));
             return;
@@ -603,12 +635,21 @@ export class InPersonSession {
         },
         onInputTranscriptDelta: (delta) => {
           const decision = this.languageGates.partner.observe(delta);
+          if (this.strictPartnerIsolationEnabled()) {
+            this.handleStrictPartnerSourceTranscript(delta, decision);
+            this.sendRouteStatusIfChanged();
+            return;
+          }
           if (this.shouldEmitTranscriptForDecision('partner', decision)) {
             this.emitTranscript('partner', 'source', 'user', delta);
           }
           this.sendRouteStatusIfChanged();
         },
         onOutputTranscriptDelta: (delta) => {
+          if (this.strictPartnerIsolationEnabled()) {
+            this.handleStrictPartnerTranslationTranscript(delta);
+            return;
+          }
           if (this.shouldEmitTranslatedOutput('partner')) {
             this.emitTranscript('partner', 'translation', 'user', delta);
           }
@@ -632,6 +673,9 @@ export class InPersonSession {
   }
 
   private shouldEmitTranscriptForDecision(speaker: InPersonSpeaker, decision: LanguageGateDecision): boolean {
+    if (this.strictPartnerIsolationEnabled() && speaker === 'partner') {
+      return decision === 'pass';
+    }
     if (this.record.inputMode !== 'single_mic_auto') {
       return true;
     }
@@ -642,6 +686,10 @@ export class InPersonSession {
   }
 
   private shouldEmitTranslatedOutput(speaker: InPersonSpeaker): boolean {
+    if (this.strictPartnerIsolationEnabled()) {
+      if (speaker === 'owner') return true;
+      return this.languageGates.partner.shouldPassOutput();
+    }
     const gate = this.languageGates[speaker];
     if (this.record.inputMode === 'single_mic_auto') {
       if (this.singleMicRoute !== 'auto') {
@@ -664,6 +712,117 @@ export class InPersonSession {
       return 'language_gate_waiting_for_fresh_pass';
     }
     return 'unknown';
+  }
+
+  private strictPartnerIsolationEnabled(): boolean {
+    return (
+      this.record.inputMode === 'single_mic_hold_to_speak' &&
+      this.record.languageGateMode === 'strict_suppress'
+    );
+  }
+
+  private updateStrictPartnerTurn(audio: string): void {
+    if (!this.strictPartnerIsolationEnabled()) return;
+    const now = Date.now();
+    const speechLikely = pcm16RmsForInPersonDiagnostics(audio) >= STRICT_PARTNER_SPEECH_RMS;
+    if (speechLikely) {
+      if (!this.strictPartnerSpeechActive) {
+        this.beginStrictPartnerTurn();
+      }
+      this.strictPartnerSpeechActive = true;
+      this.strictPartnerLastSpeechAt = now;
+      return;
+    }
+    if (
+      this.strictPartnerSpeechActive &&
+      this.strictPartnerLastSpeechAt &&
+      now - this.strictPartnerLastSpeechAt >= STRICT_PARTNER_TURN_SILENCE_MS
+    ) {
+      this.strictPartnerSpeechActive = false;
+    }
+  }
+
+  private beginStrictPartnerTurn(): void {
+    this.discardStrictPartnerPending('strict_new_turn_unverified');
+    this.languageGates.partner.resetTurn();
+  }
+
+  private handleStrictPartnerSourceTranscript(
+    delta: string,
+    decision: LanguageGateDecision
+  ): void {
+    this.queueStrictPartnerTranscript('source', delta);
+    if (decision === 'pass') {
+      this.flushStrictPartnerPending();
+    } else if (decision === 'suppress') {
+      this.discardStrictPartnerPending('strict_operator_language');
+    }
+  }
+
+  private handleStrictPartnerTranslationTranscript(delta: string): void {
+    const decision = this.languageGates.partner.diagnostics().decision;
+    if (decision === 'pass') {
+      this.emitTranscript('partner', 'translation', 'user', delta);
+      return;
+    }
+    if (decision === 'suppress') return;
+    this.queueStrictPartnerTranscript('translation', delta);
+  }
+
+  private handleStrictPartnerAudio(pcm24k: string): void {
+    const decision = this.languageGates.partner.diagnostics().decision;
+    if (decision === 'pass') {
+      this.emitPartnerTranslatedAudio(pcm24k);
+      return;
+    }
+    if (decision === 'suppress') {
+      this.trackSuppressedAudio('partnerToOwner', 'strict_operator_language');
+      return;
+    }
+    this.strictPartnerPending.audio.push(pcm24k);
+    if (this.strictPartnerPending.audio.length > STRICT_PENDING_AUDIO_CHUNKS_MAX) {
+      this.strictPartnerPending.audio.shift();
+      this.trackSuppressedAudio('partnerToOwner', 'strict_pending_cap');
+    }
+  }
+
+  private queueStrictPartnerTranscript(kind: TranscriptKind, delta: string): void {
+    this.strictPartnerPending.transcripts.push({ kind, delta });
+    if (this.strictPartnerPending.transcripts.length > STRICT_PENDING_TRANSCRIPT_DELTAS_MAX) {
+      this.strictPartnerPending.transcripts.shift();
+    }
+  }
+
+  private flushStrictPartnerPending(): void {
+    const transcripts = this.strictPartnerPending.transcripts.splice(0);
+    const audio = this.strictPartnerPending.audio.splice(0);
+    for (const entry of transcripts) {
+      this.emitTranscript('partner', entry.kind, 'user', entry.delta);
+    }
+    for (const chunk of audio) {
+      this.emitPartnerTranslatedAudio(chunk);
+    }
+  }
+
+  private discardStrictPartnerPending(reason: string): void {
+    const droppedAudio = this.strictPartnerPending.audio.splice(0);
+    this.strictPartnerPending.transcripts.splice(0);
+    for (let i = 0; i < droppedAudio.length; i += 1) {
+      this.trackSuppressedAudio('partnerToOwner', reason);
+    }
+  }
+
+  private emitPartnerTranslatedAudio(pcm24k: string): void {
+    this.record.counters.userTranslatedAudioChunks += 1;
+    this.trackEmittedAudio('partnerToOwner');
+    this.sendApp({
+      type: 'translated_audio',
+      speaker: 'partner',
+      target: 'user',
+      audio: pcm24k,
+      sampleRate: 24000,
+      encoding: 'pcm16'
+    });
   }
 
   private trackAudioInput(direction: InPersonTranslationDirection): void {

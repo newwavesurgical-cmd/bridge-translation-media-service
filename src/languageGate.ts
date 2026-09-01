@@ -1,4 +1,4 @@
-export type LanguageGateMode = 'off' | 'monitor' | 'soft_suppress';
+export type LanguageGateMode = 'off' | 'monitor' | 'soft_suppress' | 'strict_suppress';
 export type LanguageGateDecision = 'pass' | 'monitor' | 'suppress' | 'uncertain';
 
 export interface LanguageGateEvent {
@@ -27,7 +27,7 @@ export interface LanguageGateDiagnostics {
   recentEvents: LanguageGateEvent[];
 }
 
-type LanguageCode = 'en' | 'es';
+type LanguageCode = 'en' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'ja' | 'ko' | 'zh' | 'ar' | 'hi' | 'tr';
 
 const MIN_TEXT_LENGTH = 12;
 const MAX_EVENTS = 16;
@@ -164,7 +164,57 @@ const SPANISH_WORDS = new Set([
   'ya'
 ]);
 
-const UNIVERSAL_WORDS = new Set(['ok', 'okay', 'no', 'yes', 'si', 'sí', 'hello', 'hola', 'gracias', 'thanks']);
+const FRENCH_WORDS = new Set([
+  'alors', 'avec', 'bonjour', 'ce', 'cela', 'cette', 'comme', 'dans', 'de', 'des', 'est', 'et', 'je', 'la', 'le',
+  'les', 'mais', 'merci', 'mon', 'nous', 'oui', 'pas', 'pour', 'que', 'qui', 'suis', 'un', 'une', 'vous'
+]);
+
+const GERMAN_WORDS = new Set([
+  'aber', 'auf', 'aus', 'bitte', 'das', 'danke', 'der', 'die', 'ein', 'eine', 'für', 'haben', 'hallo', 'ich', 'ist',
+  'fur', 'ja', 'kann', 'mein', 'mit', 'nein', 'nicht', 'oder', 'sie', 'und', 'von', 'was', 'wie', 'wir', 'zu'
+]);
+
+const ITALIAN_WORDS = new Set([
+  'anche', 'buongiorno', 'che', 'ciao', 'con', 'come', 'del', 'della', 'di', 'e', 'grazie', 'ho', 'il', 'io', 'la',
+  'le', 'ma', 'mi', 'no', 'non', 'per', 'puo', 'sono', 'si', 'un', 'una', 'vorrei'
+]);
+
+const PORTUGUESE_WORDS = new Set([
+  'a', 'agora', 'ajuda', 'bom', 'com', 'como', 'da', 'de', 'do', 'e', 'eu', 'favor', 'nao', 'obrigado', 'obrigada',
+  'ola', 'os', 'para', 'por', 'preciso', 'que', 'sim', 'sou', 'um', 'uma', 'voce'
+]);
+
+const TURKISH_WORDS = new Set([
+  'ama', 'ben', 'bir', 'bu', 'icin', 'ile', 'istiyorum', 'lütfen', 'lutfen', 'merhaba', 'mi', 'miyim', 'nasıl',
+  'nasil', 'randevu', 'siz', 'teşekkürler', 'tesekkurler', 've', 'yardım', 'yardim', 'var', 'yok'
+]);
+
+const UNIVERSAL_WORDS = new Set(['ok', 'okay', 'no']);
+
+const LATIN_LANGUAGE_WORDS: Record<'en' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'tr', Set<string>> = {
+  en: ENGLISH_WORDS,
+  es: SPANISH_WORDS,
+  fr: FRENCH_WORDS,
+  de: GERMAN_WORDS,
+  it: ITALIAN_WORDS,
+  pt: PORTUGUESE_WORDS,
+  tr: TURKISH_WORDS
+};
+
+const EXPECTED_SHORT_UTTERANCES: Partial<Record<LanguageCode, RegExp>> = {
+  en: /^(?:yes|hello|hi|thanks|thank you)$/iu,
+  es: /^(?:sí|si|hola|gracias|claro)$/iu,
+  fr: /^(?:oui|bonjour|merci|salut)$/iu,
+  de: /^(?:ja|nein|hallo|danke|bitte)$/iu,
+  it: /^(?:sì|si|ciao|grazie|buongiorno)$/iu,
+  pt: /^(?:sim|olá|ola|obrigado|obrigada|bom dia)$/iu,
+  ja: /^(?:はい|こんにちは|ありがとう)$/u,
+  ko: /^(?:네|예|안녕하세요|감사합니다)$/u,
+  zh: /^(?:是|好的|你好|谢谢|謝謝)$/u,
+  ar: /^(?:نعم|مرحبا|شكرا)$/u,
+  hi: /^(?:हाँ|नमस्ते|धन्यवाद)$/u,
+  tr: /^(?:evet|hayır|hayir|merhaba|teşekkürler|tesekkurler)$/iu
+};
 
 export class TranscriptLanguageGate {
   private detectedLanguage: string | null = null;
@@ -184,7 +234,19 @@ export class TranscriptLanguageGate {
   constructor(
     private readonly expectedLanguage: string,
     private readonly mode: LanguageGateMode = 'monitor'
-  ) {}
+  ) {
+    this.suppressed = mode === 'strict_suppress';
+  }
+
+  resetTurn(): void {
+    this.detectedLanguage = null;
+    this.confidence = 0;
+    this.decision = 'uncertain';
+    this.suppressed = this.mode === 'strict_suppress';
+    this.rollingText = '';
+    this.lastObservedAt = 0;
+    this.lastPassAt = 0;
+  }
 
   observe(text: string): LanguageGateDecision {
     const trimmed = text.trim();
@@ -199,7 +261,14 @@ export class TranscriptLanguageGate {
     this.lastObservedAt = now;
 
     const expected = supportedLanguageCode(this.expectedLanguage);
-    const deltaDetection = classifyLanguage(trimmed);
+    const shortCandidate = appendRollingText(this.rollingText, trimmed);
+    const expectedShort =
+      expected &&
+      (matchesExpectedShortUtterance(trimmed, expected) ||
+        matchesExpectedShortUtterance(shortCandidate, expected));
+    const deltaDetection = expectedShort
+      ? { language: expected, confidence: 0.98 }
+      : classifyLanguage(trimmed);
     const currentDetection = classifyLanguage(this.rollingText);
     const confidentDelta = deltaDetection.language && deltaDetection.confidence >= 0.72;
     const deltaLanguageChanged =
@@ -214,10 +283,11 @@ export class TranscriptLanguageGate {
     const fullDetection = classifyLanguage(this.rollingText);
     const recentText = tailText(this.rollingText, RECENT_TURN_TEXT_LENGTH);
     const recentDetection = classifyLanguage(recentText);
-    const detection =
-      recentDetection.language &&
-      recentDetection.confidence >= 0.72 &&
-      (!fullDetection.language || recentDetection.language !== fullDetection.language || recentDetection.language === expected)
+    const detection = expectedShort
+      ? deltaDetection
+      : recentDetection.language &&
+          recentDetection.confidence >= 0.72 &&
+          (!fullDetection.language || recentDetection.language !== fullDetection.language || recentDetection.language === expected)
         ? recentDetection
         : fullDetection;
     if (detection === recentDetection) {
@@ -230,13 +300,13 @@ export class TranscriptLanguageGate {
     if (!expected || !detection.language || detection.confidence < 0.72) {
       this.uncertainCount += 1;
       this.decision = 'uncertain';
-      this.suppressed = false;
+      this.suppressed = this.mode === 'strict_suppress';
     } else if (detection.language === expected) {
       this.passCount += 1;
       this.decision = this.mode === 'monitor' ? 'monitor' : 'pass';
       this.suppressed = false;
       this.lastPassAt = now;
-    } else if (this.mode === 'soft_suppress') {
+    } else if (this.mode === 'soft_suppress' || this.mode === 'strict_suppress') {
       this.suppressionCount += 1;
       this.lastSuppressedText = this.rollingText;
       this.decision = 'suppress';
@@ -251,7 +321,7 @@ export class TranscriptLanguageGate {
   }
 
   shouldSuppressOutput(): boolean {
-    return this.mode === 'soft_suppress' && this.suppressed;
+    return (this.mode === 'soft_suppress' || this.mode === 'strict_suppress') && this.suppressed;
   }
 
   shouldPassOutput(): boolean {
@@ -310,6 +380,10 @@ export class TranscriptLanguageGate {
 }
 
 export function classifyLanguage(text: string): { language: LanguageCode | null; confidence: number } {
+  const scripted = classifyScriptLanguage(text);
+  if (scripted) {
+    return { language: scripted, confidence: 0.98 };
+  }
   const normalized = normalizeText(text);
   const tokens = normalized.split(/\s+/).filter(Boolean);
   const meaningfulTokens = tokens.filter((token) => !UNIVERSAL_WORDS.has(token));
@@ -318,60 +392,73 @@ export function classifyLanguage(text: string): { language: LanguageCode | null;
     return { language: null, confidence: 0 };
   }
 
-  let englishScore = 0;
-  let spanishScore = 0;
-
+  const scores: Record<'en' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'tr', number> = {
+    en: 0,
+    es: 0,
+    fr: 0,
+    de: 0,
+    it: 0,
+    pt: 0,
+    tr: 0
+  };
   for (const token of meaningfulTokens) {
-    if (ENGLISH_WORDS.has(token)) {
-      englishScore += 1;
-    }
-    if (SPANISH_WORDS.has(token)) {
-      spanishScore += 1;
+    for (const [language, words] of Object.entries(LATIN_LANGUAGE_WORDS) as Array<
+      ['en' | 'es' | 'fr' | 'de' | 'it' | 'pt' | 'tr', Set<string>]
+    >) {
+      if (words.has(token)) scores[language] += 1;
     }
   }
 
   if (/[¿¡áéíóúüñ]/i.test(text)) {
-    spanishScore += 2;
+    scores.es += 2;
   }
   if (
     /\b(?:enti\s*endes|entiendes|diciendo|dices|funciona|funcionando|est[aá]\s*funcionando|direcci[oó]n|molesta|hablas|tengo|tampoco|qu[eé]\s*t[uú]|por\s*qu[eé]|qu[eé]\s+pasa|qu[eé]\s+est[aá]\s+pasando|historia\s+muy\s+linda|muy\s+impresionante)\b/i.test(
       text
     )
   ) {
-    spanishScore += 3;
+    scores.es += 3;
   }
   if (
     /\b(?:t[uú]|me|no|ya|eso|s[ií])\b[\s,]*(?:enti|endes|entiendes|funciona|molesta|tengo|direcci[oó]n)\b/i.test(
       text
     )
   ) {
-    spanishScore += 2;
+    scores.es += 2;
   }
   if (/\b(i'm|i’ll|i'd|don't|can't|wouldn't|you're|we're)\b/i.test(text)) {
-    englishScore += 2;
+    scores.en += 2;
   }
 
-  const total = englishScore + spanishScore;
-  const margin = Math.abs(englishScore - spanishScore);
-  if (total < 2 || margin < 2) {
+  if (/[ãõç]/i.test(text)) scores.pt += 2;
+  if (/[àâçéèêëîïôùûüÿœ]/i.test(text)) scores.fr += 2;
+  if (/[äöüß]/i.test(text)) scores.de += 2;
+  if (/[çğıöşü]/i.test(text)) scores.tr += 2;
+
+  const ranked = (Object.entries(scores) as Array<[LanguageCode, number]>).sort(
+    (a, b) => b[1] - a[1]
+  );
+  const [winner, runnerUp] = ranked;
+  const winnerScore = winner?.[1] ?? 0;
+  const runnerUpScore = runnerUp?.[1] ?? 0;
+  const margin = winnerScore - runnerUpScore;
+  if (!winner || winnerScore < 2 || margin < 1) {
     return { language: null, confidence: 0.35 };
   }
 
-  const language: LanguageCode = englishScore > spanishScore ? 'en' : 'es';
-  const confidence = Math.min(0.98, 0.55 + margin / Math.max(4, total));
-  return { language, confidence };
+  const confidence = Math.min(0.98, 0.62 + margin / Math.max(5, winnerScore + runnerUpScore));
+  return { language: winner[0], confidence };
 }
 
 export function supportedLanguageCode(language: string): LanguageCode | null {
   const normalized = language.trim().toLowerCase().replace('_', '-');
   const primary = normalized.split('-')[0] ?? normalized;
-  if (normalized === 'english' || primary === 'en') {
-    return 'en';
-  }
-  if (normalized === 'spanish' || normalized === 'es' || primary === 'es') {
-    return 'es';
-  }
-  return null;
+  const map: Record<string, LanguageCode> = {
+    english: 'en', spanish: 'es', french: 'fr', german: 'de', italian: 'it', portuguese: 'pt', turkish: 'tr',
+    japanese: 'ja', korean: 'ko', chinese: 'zh', mandarin: 'zh', arabic: 'ar', hindi: 'hi',
+    en: 'en', es: 'es', fr: 'fr', de: 'de', it: 'it', pt: 'pt', ja: 'ja', ko: 'ko', zh: 'zh', ar: 'ar', hi: 'hi', tr: 'tr'
+  };
+  return map[normalized] ?? map[primary] ?? null;
 }
 
 function normalizeText(text: string): string {
@@ -379,9 +466,25 @@ function normalizeText(text: string): string {
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-zñáéíóúü\s']/g, ' ')
+    .replace(/[^\p{L}\s']/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function matchesExpectedShortUtterance(text: string, expected: LanguageCode): boolean {
+  const matcher = EXPECTED_SHORT_UTTERANCES[expected];
+  const trimmed = text.trim();
+  if (!matcher || !trimmed) return false;
+  return matcher.test(trimmed) || matcher.test(trimmed.replace(/\s+/g, ''));
+}
+
+function classifyScriptLanguage(text: string): LanguageCode | null {
+  if (/[\u3040-\u30ff]/u.test(text)) return 'ja';
+  if (/[\uac00-\ud7af]/u.test(text)) return 'ko';
+  if (/[\u4e00-\u9fff]/u.test(text)) return 'zh';
+  if (/[\u0600-\u06ff]/u.test(text)) return 'ar';
+  if (/[\u0900-\u097f]/u.test(text)) return 'hi';
+  return null;
 }
 
 function appendRollingText(current: string, delta: string): string {

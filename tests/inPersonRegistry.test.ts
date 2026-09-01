@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { createBridgeMediaServer } from '../src/http.js';
 import { InPersonRegistry } from '../src/inPersonRegistry.js';
+import type { LanguageGateDecision, TranscriptLanguageGate } from '../src/languageGate.js';
 import { pcm16ToBase64 } from '../src/audio/codec.js';
 import type { AppConfig } from '../src/config.js';
 
@@ -71,7 +72,7 @@ describe('InPersonRegistry', () => {
     });
   });
 
-  it('creates a phone-only hold-to-speak session without enabling suppression by default', () => {
+  it('defaults phone-only hold-to-speak to strict partner-language isolation', () => {
     const registry = new InPersonRegistry(config);
     const session = registry.create({
       userLanguage: 'English',
@@ -85,15 +86,21 @@ describe('InPersonRegistry', () => {
       mode: 'in-person-phone-hold-to-speak',
       inputMode: 'single_mic_hold_to_speak',
       phoneOnlyMode: true,
-      languageGateMode: 'monitor',
+      languageGateMode: 'strict_suppress',
+      strictPartnerIsolation: {
+        enabled: true,
+        pendingAudioChunks: 0,
+        pendingTranscriptDeltas: 0
+      },
       languageGate: {
         owner: {
-          mode: 'monitor',
+          mode: 'strict_suppress',
           expectedLanguage: 'English'
         },
         partner: {
-          mode: 'monitor',
-          expectedLanguage: 'Spanish'
+          mode: 'strict_suppress',
+          expectedLanguage: 'Spanish',
+          suppressed: true
         }
       }
     });
@@ -124,6 +131,89 @@ describe('InPersonRegistry', () => {
           expectedLanguage: 'Spanish'
         }
       }
+    });
+  });
+
+  it('discards operator speech on the released lane and flushes verified partner speech', () => {
+    const registry = new InPersonRegistry(config);
+    const session = registry.create({
+      userLanguage: 'English',
+      partnerLanguage: 'Spanish',
+      clientSessionId: 'inperson_strict_isolation_test',
+      inputMode: 'single_mic_hold_to_speak'
+    });
+    const strict = session as unknown as {
+      beginStrictPartnerTurn(): void;
+      handleStrictPartnerAudio(audio: string): void;
+      handleStrictPartnerSourceTranscript(delta: string, decision: LanguageGateDecision): void;
+      handleStrictPartnerTranslationTranscript(delta: string): void;
+      shouldEmitTranslatedOutput(speaker: 'owner' | 'partner'): boolean;
+      languageGates: { partner: TranscriptLanguageGate };
+    };
+
+    strict.beginStrictPartnerTurn();
+    strict.handleStrictPartnerAudio('operator-audio');
+    strict.handleStrictPartnerTranslationTranscript('Texto que no debe salir.');
+    const operatorDecision = strict.languageGates.partner.observe(
+      'I am the operator and this speech must stay private.'
+    );
+    strict.handleStrictPartnerSourceTranscript(
+      'I am the operator and this speech must stay private.',
+      operatorDecision
+    );
+
+    expect(session.diagnostics()).toMatchObject({
+      strictPartnerIsolation: {
+        enabled: true,
+        pendingAudioChunks: 0,
+        pendingTranscriptDeltas: 0
+      },
+      counters: {
+        userTranslatedAudioChunks: 0,
+        transcriptDeltas: 0
+      },
+      audioTiming: {
+        partnerToOwner: {
+          emittedAudioChunks: 0,
+          suppressedAudioChunks: 1
+        }
+      },
+      transcriptTail: []
+    });
+
+    strict.beginStrictPartnerTurn();
+    strict.handleStrictPartnerAudio('partner-audio');
+    strict.handleStrictPartnerTranslationTranscript('Hello, I need an appointment.');
+    const partnerDecision = strict.languageGates.partner.observe(
+      'Hola, necesito una cita por favor.'
+    );
+    strict.handleStrictPartnerSourceTranscript(
+      'Hola, necesito una cita por favor.',
+      partnerDecision
+    );
+
+    expect(strict.shouldEmitTranslatedOutput('owner')).toBe(true);
+    expect(session.diagnostics()).toMatchObject({
+      strictPartnerIsolation: {
+        pendingAudioChunks: 0,
+        pendingTranscriptDeltas: 0
+      },
+      counters: {
+        userTranslatedAudioChunks: 1,
+        transcriptDeltas: 2
+      },
+      audioTiming: {
+        partnerToOwner: {
+          emittedAudioChunks: 1,
+          suppressedAudioChunks: 1
+        }
+      }
+    });
+    expect(session.diagnostics()).toMatchObject({
+      transcriptTail: [
+        { speaker: 'partner', kind: 'translation', delta: 'Hello, I need an appointment.' },
+        { speaker: 'partner', kind: 'source', delta: 'Hola, necesito una cita por favor.' }
+      ]
     });
   });
 

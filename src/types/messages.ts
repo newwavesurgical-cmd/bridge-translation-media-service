@@ -2,7 +2,7 @@ export type Speaker = 'owner' | 'remote';
 export type TranscriptKind = 'source' | 'translation';
 export type PredictiveMode = 'off' | 'restaurant_reservation_v1';
 export type FillerVoiceGender = 'auto' | 'male' | 'female';
-export type LanguageGateMode = 'off' | 'monitor' | 'soft_suppress';
+export type LanguageGateMode = 'off' | 'monitor' | 'soft_suppress' | 'strict_suppress';
 export type InPersonInputMode = 'dual_channel' | 'single_mic_hold_to_speak' | 'single_mic_auto';
 
 export type AppClientMessage =

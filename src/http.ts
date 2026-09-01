@@ -30,7 +30,7 @@ const createInPersonSessionSchema = z.object({
   partnerLanguage: z.string().min(2),
   clientSessionId: z.string().optional(),
   inputMode: z.enum(['dual_channel', 'single_mic_hold_to_speak', 'single_mic_auto']).optional(),
-  languageGateMode: z.enum(['off', 'monitor', 'soft_suppress']).optional()
+  languageGateMode: z.enum(['off', 'monitor', 'soft_suppress', 'strict_suppress']).optional()
 });
 
 const createAppToAppSessionSchema = z.object({

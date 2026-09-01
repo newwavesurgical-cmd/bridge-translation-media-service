@@ -35,6 +35,38 @@ describe('TranscriptLanguageGate', () => {
     expect(classifyLanguage('Sí, ok')).toMatchObject({ language: null });
   });
 
+  it('fails closed in strict mode until the expected partner language passes', () => {
+    const gate = new TranscriptLanguageGate('Spanish', 'strict_suppress');
+
+    expect(gate.shouldSuppressOutput()).toBe(true);
+    expect(gate.shouldPassOutput()).toBe(false);
+    expect(gate.observe('I am the operator and this sentence must not be translated.')).toBe('suppress');
+    expect(gate.shouldSuppressOutput()).toBe(true);
+
+    gate.resetTurn();
+    expect(gate.observe('S')).toBe('uncertain');
+    expect(gate.observe('í')).toBe('pass');
+    expect(gate.shouldSuppressOutput()).toBe(false);
+    expect(gate.shouldPassOutput()).toBe(true);
+  });
+
+  it('keeps an ambiguous shared one-word answer fail-closed in strict mode', () => {
+    const gate = new TranscriptLanguageGate('Spanish', 'strict_suppress');
+
+    expect(gate.observe('No')).toBe('uncertain');
+    expect(gate.shouldSuppressOutput()).toBe(true);
+    expect(gate.shouldPassOutput()).toBe(false);
+  });
+
+  it('classifies supported partner languages beyond English and Spanish', () => {
+    expect(classifyLanguage('Bonjour, je voudrais une table pour quatre personnes.')).toMatchObject({ language: 'fr' });
+    expect(classifyLanguage('Hallo, ich brauche bitte einen Termin.')).toMatchObject({ language: 'de' });
+    expect(classifyLanguage('Olá, eu preciso de ajuda por favor.')).toMatchObject({ language: 'pt' });
+    expect(classifyLanguage('Merhaba, bir randevu için yardım istiyorum.')).toMatchObject({ language: 'tr' });
+    expect(classifyLanguage('こんにちは、予約をお願いします。')).toMatchObject({ language: 'ja' });
+    expect(classifyLanguage('你好，我需要帮助。')).toMatchObject({ language: 'zh' });
+  });
+
   it('monitors wrong-language pickup without suppressing output by default', () => {
     const gate = new TranscriptLanguageGate('English', 'monitor');
 
@@ -110,7 +142,7 @@ describe('TranscriptLanguageGate', () => {
   it('classifies rolling transcript deltas instead of only the last fragment', () => {
     const gate = new TranscriptLanguageGate('English', 'soft_suppress');
 
-    expect(gate.observe('Hola, necesito')).toBe('uncertain');
+    expect(gate.observe('Hola, necesito')).toBe('suppress');
     expect(gate.observe(' una mesa para')).toBe('suppress');
     expect(gate.shouldSuppressOutput()).toBe(true);
     expect(gate.diagnostics().lastText).toContain('Hola, necesito una mesa para');
