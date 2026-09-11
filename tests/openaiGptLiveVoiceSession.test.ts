@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/config.js';
 import {
   OpenAiGptLiveVoiceSession,
-  buildGptLiveSessionStart
+  buildGptLiveSessionStart,
+  resolveGptLiveVoice
 } from '../src/openai/gptLiveVoiceSession.js';
 
 const config: AppConfig = {
@@ -35,6 +36,7 @@ function makeSession() {
   const remote: string[] = [];
   const agent: string[] = [];
   const queued = vi.fn();
+  const speechStarted = vi.fn();
   const session = new OpenAiGptLiveVoiceSession({
     config,
     instructions: 'LANGUAGE LOCK: Speak only English. Mission fact: appointment at noon.',
@@ -42,6 +44,7 @@ function makeSession() {
     onAudioDelta: (delta) => audio.push(delta),
     onRemoteTranscriptDelta: (delta) => remote.push(delta),
     onAgentTranscriptDelta: (delta) => agent.push(delta),
+    onUserSpeechStarted: speechStarted,
     onStartupEnvelopeQueued: queued,
     onStatus: () => undefined,
     onError: () => undefined
@@ -54,10 +57,16 @@ function makeSession() {
     readyState: 1,
     send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
   };
-  return { session, mutable, sent, audio, remote, agent, queued };
+  return { session, mutable, sent, audio, remote, agent, queued, speechStarted };
 }
 
 describe('GPT-Live voice session', () => {
+  it('maps the app voice selection onto natural GPT-Live voices', () => {
+    expect(resolveGptLiveVoice('echo')).toBe('meridian');
+    expect(resolveGptLiveVoice('coral')).toBe('gleam');
+    expect(resolveGptLiveVoice('vesper')).toBe('vesper');
+  });
+
   it('uses native 8 kHz PCMU and delegates mission reasoning to Responses', () => {
     expect(
       buildGptLiveSessionStart({
@@ -70,7 +79,7 @@ describe('GPT-Live voice session', () => {
       model: 'gpt-live-1',
       audio: {
         format: { type: 'audio/pcmu', rate: 8000 },
-        output: { voice: 'marin' }
+        output: { voice: 'meridian' }
       },
       delegation: {
         type: 'responses',
@@ -81,6 +90,17 @@ describe('GPT-Live voice session', () => {
         }
       }
     });
+    const instructions = String(
+      buildGptLiveSessionStart({
+        liveModel: 'gpt-live-1',
+        backendModel: 'gpt-5.6-luna',
+        instructions: 'LANGUAGE LOCK: Speak only English. Mission facts.',
+        voice: 'echo'
+      }).instructions
+    );
+    expect(instructions).toContain('Backchannel policy:');
+    expect(instructions).toContain('Interruption policy:');
+    expect(instructions).toContain('Delegate to the backend when:');
   });
 
   it('buffers callee audio until the protected TwiML opener boundary is confirmed', () => {
@@ -107,6 +127,21 @@ describe('GPT-Live voice session', () => {
     expect(audio).toEqual(['pcmu']);
     expect(remote).toEqual(['hello']);
     expect(agent).toEqual(['Hi']);
+  });
+
+  it('signals barge-in once per continuous remote utterance instead of once per transcript fragment', () => {
+    const { mutable, speechStarted } = makeSession();
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Can', start_ms: 1000, end_ms: 1180 })
+    );
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.input_transcript.delta', delta: ' you help', start_ms: 1180, end_ms: 1500 })
+    );
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.input_transcript.delta', delta: 'One more thing', start_ms: 2100, end_ms: 2500 })
+    );
+
+    expect(speechStarted).toHaveBeenCalledTimes(2);
   });
 
   it('sends operator controls as private live instructions without exposing them as call text', () => {

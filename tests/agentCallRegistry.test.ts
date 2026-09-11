@@ -459,7 +459,7 @@ describe('AgentCallRegistry', () => {
     const mutable = session as unknown as {
       twilioWs: { send: (payload: string) => void; close: () => void };
       agent: { status: string; appendPcmuBase64: (payload: string) => void };
-      sendTwilioMedia: (payload: string, markName: string) => void;
+      sendTwilioMedia: (payload: string) => void;
       handleTwilioMessage: (raw: string) => void;
     };
     mutable.twilioWs = {
@@ -470,7 +470,7 @@ describe('AgentCallRegistry', () => {
     session.data.twilioStreamSid = 'MZ123';
 
     const reflectedPayload = makeSpeechPayload(440);
-    mutable.sendTwilioMedia(reflectedPayload, 'agent-test');
+    mutable.sendTwilioMedia(reflectedPayload);
     mutable.handleTwilioMessage(
       JSON.stringify({
         event: 'media',
@@ -479,7 +479,7 @@ describe('AgentCallRegistry', () => {
       })
     );
 
-    expect(sentToTwilio).toHaveLength(2);
+    expect(sentToTwilio).toHaveLength(1);
     expect(appendPcmuBase64).not.toHaveBeenCalled();
     expect(session.diagnostics()).toMatchObject({
       counters: {
@@ -499,7 +499,7 @@ describe('AgentCallRegistry', () => {
     const mutable = session as unknown as {
       twilioWs: { send: () => void; close: () => void };
       agent: { status: string; appendPcmuBase64: (payload: string) => void };
-      sendTwilioMedia: (payload: string, markName: string) => void;
+      sendTwilioMedia: (payload: string) => void;
       handleTwilioMessage: (raw: string) => void;
     };
     mutable.twilioWs = {
@@ -509,7 +509,7 @@ describe('AgentCallRegistry', () => {
     mutable.agent = { status: 'live', appendPcmuBase64 };
     session.data.twilioStreamSid = 'MZ123';
 
-    mutable.sendTwilioMedia(makeSpeechPayload(440), 'agent-test');
+    mutable.sendTwilioMedia(makeSpeechPayload(440));
     const remotePayload = makeSpeechPayload(880);
     mutable.handleTwilioMessage(
       JSON.stringify({
@@ -536,6 +536,7 @@ describe('AgentCallRegistry', () => {
     const sentToTwilio: string[] = [];
     const mutable = session as unknown as {
       twilioWs: { send: (payload: string) => void; close: () => void };
+      lastAgentAudioAt: number;
       clearTwilioAudioForBargeIn: () => void;
     };
     mutable.twilioWs = {
@@ -544,6 +545,7 @@ describe('AgentCallRegistry', () => {
     };
     session.data.twilioStreamSid = 'MZ123';
     session.data.startupDiagnostics.startupEnvelopePlaybackConfirmed = true;
+    mutable.lastAgentAudioAt = Date.now();
 
     mutable.clearTwilioAudioForBargeIn();
 
@@ -625,16 +627,11 @@ describe('AgentCallRegistry', () => {
     const dtmf = session.sendDtmf('3');
 
     expect(dtmf).toMatchObject({ digit: '3', delivered: true });
-    expect(sentToTwilio).toHaveLength(2);
+    expect(sentToTwilio).toHaveLength(1);
     expect(JSON.parse(sentToTwilio[0]) as Record<string, unknown>).toMatchObject({
       event: 'media',
       streamSid: 'MZ123',
       media: { payload: expect.any(String) }
-    });
-    expect(JSON.parse(sentToTwilio[1]) as Record<string, unknown>).toMatchObject({
-      event: 'mark',
-      streamSid: 'MZ123',
-      mark: { name: expect.stringContaining('dtmf-3-') }
     });
     expect(session.diagnostics()).toMatchObject({
       counters: {

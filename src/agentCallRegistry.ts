@@ -13,7 +13,7 @@ import {
   type AgentStartupDiagnostics,
   type AgentVoiceSession
 } from './openai/agentVoiceSession.js';
-import { OpenAiGptLiveVoiceSession } from './openai/gptLiveVoiceSession.js';
+import { OpenAiGptLiveVoiceSession, resolveGptLiveVoice } from './openai/gptLiveVoiceSession.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { AppClientMessage, AppServerMessage, TwilioMediaMessage } from './types/messages.js';
@@ -33,6 +33,7 @@ const IVR_REMOTE_BUFFER_MAX_CHARS = 2200;
 const IVR_HOLD_MS = 45000;
 const IVR_AUTO_CHOICE_DELAY_MS = 8000;
 const IVR_SELECTION_COOLDOWN_MS = 5000;
+const BARGE_IN_PLAYBACK_WINDOW_MS = 4000;
 const DEFAULT_FIRST_UTTERANCE =
   "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 const LEGACY_FIRST_UTTERANCE =
@@ -223,6 +224,13 @@ export interface AgentCallRecord {
     conversationalAiDetections: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
+  timings: {
+    twilioConnectedAt?: string;
+    agentLiveAt?: string;
+    firstRemoteTranscriptAt?: string;
+    firstAgentAudioAt?: string;
+    firstAgentTranscriptAt?: string;
+  };
   takeover?: {
     active: boolean;
     userLanguage: string;
@@ -315,11 +323,13 @@ export class AgentCallRegistry {
         startupEnvelopeQueued: false,
         startupEnvelopePlaybackConfirmed: false,
         bufferedStartupAudio: 0
-      }
+      },
+      timings: {}
     };
 
     const session = new AgentCallSession(this.config, record, (diagnostics) => this.delete(sessionId, diagnostics));
     this.sessions.set(sessionId, session);
+    logAgentCallAudit('created', record, this.config);
     return session;
   }
 
@@ -336,6 +346,8 @@ export class AgentCallRegistry {
       this.recentDiagnostics.unshift(diagnostics);
       this.recentDiagnostics.splice(8);
     }
+    const session = this.sessions.get(sessionId);
+    if (session) logAgentCallAudit('disposed', session.data, this.config);
     this.sessions.delete(sessionId);
   }
 
@@ -644,7 +656,7 @@ export class AgentCallSession {
     }
 
     const payload = makeDtmfMuLaw8kBase64(digit);
-    this.sendTwilioMedia(payload, `dtmf-${digit}-${Date.now()}`);
+    this.sendTwilioMedia(payload);
     entry.delivered = true;
     this.record.counters.dtmfSent += 1;
     if (this.record.ivr?.active) {
@@ -727,6 +739,15 @@ export class AgentCallSession {
         this.record.agentEngine === 'gpt-live-1'
           ? this.config.OPENAI_GPT_LIVE_MODEL
           : this.config.OPENAI_AGENT_MODEL,
+      backendModel:
+        this.record.agentEngine === 'gpt-live-1'
+          ? this.config.OPENAI_GPT_LIVE_BACKEND_MODEL
+          : null,
+      resolvedVoice:
+        this.record.agentEngine === 'gpt-live-1'
+          ? resolveGptLiveVoice(this.record.voice)
+          : this.record.voice,
+      timings: timingDiagnostics(this.record),
       twilioConnected: Boolean(this.twilioWs),
       twilioStreamSid: this.record.twilioStreamSid ?? null,
       agentSession: this.agent?.status ?? 'idle',
@@ -788,6 +809,8 @@ export class AgentCallSession {
     this.record.twilioStreamSid = startMessage.start.streamSid;
     this.record.callSid = startMessage.start.callSid;
     this.record.state = 'twilio-connected';
+    this.record.timings.twilioConnectedAt ??= new Date().toISOString();
+    logAgentCallAudit('twilio_connected', this.record, this.config);
     if (this.record.agentEngine === 'gpt-live-1') {
       // GPT-Live starts after TwiML has played the protected disclosure and
       // prepared purpose. Add those deterministic words to the transcript so
@@ -882,9 +905,11 @@ export class AgentCallSession {
           this.record.counters.ivrAgentAudioSuppressed += 1;
           return;
         }
-        this.sendTwilioMedia(pcmu, `agent-${Date.now()}`);
+        this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
+        this.sendTwilioMedia(pcmu);
       },
       onRemoteTranscriptDelta: (delta) => {
+        this.record.timings.firstRemoteTranscriptAt ??= new Date().toISOString();
         this.record.counters.remoteTranscriptDeltas += 1;
         this.emitTranscript('remote', delta);
         this.observeRemoteTranscript(delta);
@@ -894,6 +919,7 @@ export class AgentCallSession {
           this.record.counters.ivrAgentTranscriptSuppressed += 1;
           return;
         }
+        this.record.timings.firstAgentTranscriptAt ??= new Date().toISOString();
         this.record.counters.agentTranscriptDeltas += 1;
         this.emitTranscript('agent', delta);
       },
@@ -906,6 +932,10 @@ export class AgentCallSession {
       onStatus: (status) => {
         if (status === 'live' && this.twilioWs) {
           this.record.state = 'live';
+          if (!this.record.timings.agentLiveAt) {
+            this.record.timings.agentLiveAt = new Date().toISOString();
+            logAgentCallAudit('agent_live', this.record, this.config);
+          }
         }
         this.touch();
       },
@@ -971,7 +1001,7 @@ export class AgentCallSession {
             return;
           }
           this.record.counters.takeoverOwnerTranslatedAudioChunks += 1;
-          this.sendTwilioMedia(openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k), `takeover-owner-${Date.now()}`);
+          this.sendTwilioMedia(openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k));
         },
         onInputTranscriptDelta: (delta) => this.sendAppTranscript('owner', 'source', delta),
         onOutputTranscriptDelta: (delta) => {
@@ -1203,7 +1233,7 @@ export class AgentCallSession {
     this.ivrAutoChoiceTimer = undefined;
   }
 
-  private sendTwilioMedia(payload: string, markName: string): void {
+  private sendTwilioMedia(payload: string): void {
     if (!this.twilioWs || !this.record.twilioStreamSid) {
       return;
     }
@@ -1213,13 +1243,6 @@ export class AgentCallSession {
         event: 'media',
         streamSid: this.record.twilioStreamSid,
         media: { payload }
-      })
-    );
-    this.twilioWs.send(
-      JSON.stringify({
-        event: 'mark',
-        streamSid: this.record.twilioStreamSid,
-        mark: { name: markName }
       })
     );
     this.broadcastMonitorAudio('agent', twilioMuLaw8kBase64ToOpenAiPcm24kBase64(payload));
@@ -1254,6 +1277,11 @@ export class AgentCallSession {
     // response. Never clear the mandatory disclosure + prepared purpose until
     // Twilio echoes the final envelope marker.
     if (!this.record.startupDiagnostics.startupEnvelopePlaybackConfirmed) {
+      return;
+    }
+    // A transcript fragment by itself does not prove Twilio is still playing
+    // agent audio. Avoid clearing a quiet stream long after the last output.
+    if (this.lastAgentAudioAt === 0 || Date.now() - this.lastAgentAudioAt > BARGE_IN_PLAYBACK_WINDOW_MS) {
       return;
     }
     this.record.counters.bargeInClears += 1;
@@ -1337,6 +1365,7 @@ export class AgentCallSession {
     this.record.state = 'error';
     this.record.error = error.message;
     this.touch();
+    logAgentCallAudit('error', this.record, this.config);
   }
 
   private touch(): void {
@@ -1919,6 +1948,56 @@ function redactPhone(phone: string): string {
 function redactMissionText(text: string): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   return normalized.length > 600 ? `${normalized.slice(0, 600)}...` : normalized;
+}
+
+function timingDiagnostics(record: AgentCallRecord): Record<string, number | string | null> {
+  const elapsed = (from: string | undefined, to: string | undefined): number | null => {
+    if (!from || !to) return null;
+    const value = Date.parse(to) - Date.parse(from);
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  };
+  return {
+    twilioConnectedAt: record.timings.twilioConnectedAt ?? null,
+    agentLiveAt: record.timings.agentLiveAt ?? null,
+    firstRemoteTranscriptAt: record.timings.firstRemoteTranscriptAt ?? null,
+    firstAgentAudioAt: record.timings.firstAgentAudioAt ?? null,
+    firstAgentTranscriptAt: record.timings.firstAgentTranscriptAt ?? null,
+    twilioConnectMs: elapsed(record.createdAt, record.timings.twilioConnectedAt),
+    agentReadyMs: elapsed(record.timings.twilioConnectedAt, record.timings.agentLiveAt),
+    firstAgentAudioFromConnectMs: elapsed(record.timings.twilioConnectedAt, record.timings.firstAgentAudioAt),
+    firstAgentAudioAfterRemoteTranscriptMs: elapsed(
+      record.timings.firstRemoteTranscriptAt,
+      record.timings.firstAgentAudioAt
+    )
+  };
+}
+
+/** Emit operational call provenance without phone numbers, prompts, or transcript text. */
+function logAgentCallAudit(phase: string, record: AgentCallRecord, config: AppConfig): void {
+  if (process.env.NODE_ENV === 'test') return;
+  console.info(
+    JSON.stringify({
+      event: 'agent_call_audit',
+      version: 1,
+      phase,
+      sessionIdSuffix: record.sessionId.slice(-8),
+      callSidSuffix: record.callSid?.slice(-8) ?? null,
+      state: record.state,
+      agentEngine: record.agentEngine,
+      realtimeModel:
+        record.agentEngine === 'gpt-live-1' ? config.OPENAI_GPT_LIVE_MODEL : config.OPENAI_AGENT_MODEL,
+      backendModel:
+        record.agentEngine === 'gpt-live-1' ? config.OPENAI_GPT_LIVE_BACKEND_MODEL : null,
+      requestedVoice: record.voice,
+      resolvedVoice:
+        record.agentEngine === 'gpt-live-1' ? resolveGptLiveVoice(record.voice) : record.voice,
+      languageLock: record.languageLock ?? null,
+      timings: timingDiagnostics(record),
+      counters: { ...record.counters },
+      endedReason: record.endedReason ?? null,
+      hasError: Boolean(record.error)
+    })
+  );
 }
 
 function languageStyleInstruction(languageLock: string | undefined): string {

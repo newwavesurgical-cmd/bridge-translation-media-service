@@ -497,7 +497,8 @@ export function createBridgeMediaServer(config: AppConfig) {
           agentEngine: session.data.agentEngine,
           firstUtterance: session.data.firstUtterance,
           spokenPurpose: session.data.spokenPurpose,
-          languageLock: session.data.languageLock
+          languageLock: session.data.languageLock,
+          voice: session.data.voice
         });
         return sendXml(res, 200, xml);
       }

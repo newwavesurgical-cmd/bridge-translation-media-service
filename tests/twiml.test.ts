@@ -93,12 +93,27 @@ describe('agent call TwiML', () => {
       agentEngine: 'gpt-live-1',
       firstUtterance: disclosure,
       spokenPurpose: purpose,
-      languageLock: 'en-US'
+      languageLock: 'en-US',
+      voice: 'echo'
     });
 
     expect(xml.indexOf(disclosure)).toBeGreaterThan(-1);
     expect(xml.indexOf(disclosure)).toBeLessThan(xml.indexOf(purpose));
     expect(xml.indexOf(purpose)).toBeLessThan(xml.indexOf('<Connect>'));
     expect(xml.match(/<Say/g)).toHaveLength(2);
+    expect(xml.match(/voice="Polly.Matthew-Neural"/g)).toHaveLength(2);
+  });
+
+  it('keeps the protected opening voice aligned with the selected female voice', () => {
+    const xml = buildAgentCallTwiMl({
+      config,
+      sessionId: 'agentcall_live_female',
+      agentEngine: 'gpt-live-1',
+      firstUtterance: 'This is a protected disclosure.',
+      languageLock: 'en-US',
+      voice: 'coral'
+    });
+
+    expect(xml).toContain('voice="Polly.Ruth-Neural"');
   });
 });
