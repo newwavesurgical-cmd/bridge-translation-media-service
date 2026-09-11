@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTranslatedCallTwiMl } from '../src/twilio/twiml.js';
+import { buildAgentCallTwiMl, buildTranslatedCallTwiMl } from '../src/twilio/twiml.js';
 import type { AppConfig } from '../src/config.js';
 
 const config: AppConfig = {
@@ -74,5 +74,31 @@ describe('translated call TwiML', () => {
 
     expect(xml).not.toContain('<Say');
     expect(xml).toContain('<Connect>');
+  });
+});
+
+describe('agent call TwiML', () => {
+  it('keeps the legacy realtime opener inside the existing voice session', () => {
+    const xml = buildAgentCallTwiMl({ config, sessionId: 'agentcall_standard' });
+    expect(xml).not.toContain('<Say');
+    expect(xml).toContain('<Connect>');
+  });
+
+  it('plays the exact protected disclosure and purpose before GPT-Live connects', () => {
+    const disclosure = "I'm not a telemarketer. I'm using a translator app.";
+    const purpose = 'I am calling to confirm the appointment time.';
+    const xml = buildAgentCallTwiMl({
+      config,
+      sessionId: 'agentcall_live',
+      agentEngine: 'gpt-live-1',
+      firstUtterance: disclosure,
+      spokenPurpose: purpose,
+      languageLock: 'en-US'
+    });
+
+    expect(xml.indexOf(disclosure)).toBeGreaterThan(-1);
+    expect(xml.indexOf(disclosure)).toBeLessThan(xml.indexOf(purpose));
+    expect(xml.indexOf(purpose)).toBeLessThan(xml.indexOf('<Connect>'));
+    expect(xml.match(/<Say/g)).toHaveLength(2);
   });
 });

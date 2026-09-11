@@ -21,6 +21,8 @@ const config: AppConfig = {
   OPENAI_API_KEY: 'test-openai-key',
   OPENAI_TRANSLATION_MODEL: 'gpt-realtime-translate',
   OPENAI_AGENT_MODEL: 'gpt-realtime-2.1',
+  OPENAI_GPT_LIVE_MODEL: 'gpt-live-1',
+  OPENAI_GPT_LIVE_BACKEND_MODEL: 'gpt-5.6-luna',
   OPENAI_TTS_MODEL: 'gpt-4o-mini-tts',
   OPENAI_TTS_VOICE: 'cedar',
   OPENAI_FILLER_TTS_VOICE: 'onyx',
@@ -70,6 +72,28 @@ describe('AgentCallRegistry', () => {
         controlsReceived: 1
       }
     });
+  });
+
+  it('records the requested GPT-Live engine and defaults old callers to realtime', () => {
+    const registry = new AgentCallRegistry(config);
+    const live = registry.create({
+      to: '+15551230000',
+      missionPrompt: 'Confirm an appointment.',
+      languageLock: 'English',
+      agentEngine: 'gpt-live-1'
+    });
+    const standard = registry.create({
+      to: '+15551230001',
+      missionPrompt: 'Confirm an appointment.',
+      languageLock: 'English'
+    });
+
+    expect(live.data.agentEngine).toBe('gpt-live-1');
+    expect(live.diagnostics()).toMatchObject({
+      agentEngine: 'gpt-live-1',
+      realtimeModel: 'gpt-live-1'
+    });
+    expect(standard.data.agentEngine).toBe('realtime');
   });
 
   it('builds instructions that prevent operator questions from being spoken aloud', () => {

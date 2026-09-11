@@ -76,6 +76,7 @@ const createAgentCallSchema = z
     goal: z.string().max(2000).optional(),
     callGoal: z.string().max(2000).optional(),
     languageLock: z.string().max(80).optional(),
+    agentEngine: z.enum(['realtime', 'gpt-live-1']).optional(),
     spokenPurpose: z.string().max(600).optional(),
     voice: z.string().max(40).optional(),
     firstUtterance: z.string().max(300).optional(),
@@ -117,6 +118,7 @@ const createAgentCallSchema = z
     ),
     systemPrompt: firstText(body.systemPrompt, body.systemInstructions),
     languageLock: body.languageLock,
+    agentEngine: body.agentEngine,
     spokenPurpose: body.spokenPurpose,
     voice: body.voice,
     firstUtterance: body.firstUtterance,
@@ -489,7 +491,14 @@ export function createBridgeMediaServer(config: AppConfig) {
           forwardedFrom: url.searchParams.get('ForwardedFrom'),
           callStatus: url.searchParams.get('CallStatus')
         });
-        const xml = buildAgentCallTwiMl({ config, sessionId });
+        const xml = buildAgentCallTwiMl({
+          config,
+          sessionId,
+          agentEngine: session.data.agentEngine,
+          firstUtterance: session.data.firstUtterance,
+          spokenPurpose: session.data.spokenPurpose,
+          languageLock: session.data.languageLock
+        });
         return sendXml(res, 200, xml);
       }
 
@@ -696,6 +705,8 @@ function agentCallHealth(config: AppConfig, agentCallRegistry: AgentCallRegistry
     gitCommit: serviceGitCommit(),
     agentCallSupported: true,
     agentRealtimeVoiceBridgeSupported: true,
+    gptLiveVoiceBridgeSupported: true,
+    supportedAgentEngines: ['realtime', 'gpt-live-1'],
     monitorStreamSupported: true,
     twilioConfigured: twilioConfigured(config),
     openAiConfigured: openAiConfigured(config),
@@ -714,6 +725,7 @@ function agentCallCapabilities(config: AppConfig, agentCallRegistry: AgentCallRe
   return {
     ...agentCallHealth(config, agentCallRegistry),
     realtimeModel: config.OPENAI_AGENT_MODEL,
+    gptLiveModel: config.OPENAI_GPT_LIVE_MODEL,
     defaultVoice: 'marin',
     maxCallDurationSecondsDefault: 1800,
     languageLockSupported: true,

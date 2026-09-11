@@ -8,7 +8,12 @@ import {
   twilioMuLaw8kBase64ToOpenAiPcm24kBase64
 } from './audio/codec.js';
 import { decodeMuLaw } from './audio/mulaw.js';
-import { OpenAiAgentVoiceSession, type AgentStartupDiagnostics } from './openai/agentVoiceSession.js';
+import {
+  OpenAiAgentVoiceSession,
+  type AgentStartupDiagnostics,
+  type AgentVoiceSession
+} from './openai/agentVoiceSession.js';
+import { OpenAiGptLiveVoiceSession } from './openai/gptLiveVoiceSession.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { AppClientMessage, AppServerMessage, TwilioMediaMessage } from './types/messages.js';
@@ -51,6 +56,7 @@ export const contextualMicroInterventions = [
 ] as const;
 
 export type ContextualMicroIntervention = (typeof contextualMicroInterventions)[number];
+export type AgentCallEngine = 'realtime' | 'gpt-live-1';
 
 export interface CreateAgentCallRequest {
   to: string;
@@ -60,6 +66,7 @@ export interface CreateAgentCallRequest {
   missionPrompt?: string;
   systemPrompt?: string;
   languageLock?: string;
+  agentEngine?: AgentCallEngine;
   /** Prepared callee-facing purpose, already resolved in the language lock. */
   spokenPurpose?: string;
   voice?: string;
@@ -169,6 +176,7 @@ export interface AgentCallRecord {
   missionPromptWasFallback: boolean;
   systemPrompt?: string;
   languageLock?: string;
+  agentEngine: AgentCallEngine;
   spokenPurpose?: string;
   voice: string;
   firstUtterance: string;
@@ -250,6 +258,7 @@ export class AgentCallRegistry {
       missionPromptWasFallback: mission.wasFallback,
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
+      agentEngine: normalizeAgentEngine(request.agentEngine),
       spokenPurpose: normalizeOptional(request.spokenPurpose),
       voice: normalizeVoice(request.voice, request.languageLock),
       firstUtterance: normalizeFirstUtterance(request.firstUtterance),
@@ -343,7 +352,7 @@ export class AgentCallSession {
   private twilioWs?: WebSocket;
   private appWs?: WebSocket;
   private readonly monitorSockets = new Set<WebSocket>();
-  private agent?: OpenAiAgentVoiceSession;
+  private agent?: AgentVoiceSession;
   private ownerToRemote?: OpenAiTranslationSession;
   private remoteToOwner?: OpenAiTranslationSession;
   private startupEnvelopeMarkName?: string;
@@ -700,6 +709,7 @@ export class AgentCallSession {
       targetName: this.record.targetName ?? null,
       callerName: this.record.callerName ?? null,
       languageLock: this.record.languageLock ?? null,
+      agentEngine: this.record.agentEngine,
       preparedSpokenPurpose: Boolean(this.record.spokenPurpose),
       machineDetection: this.record.machineDetection,
       machineDetectionTimeout: this.record.machineDetectionTimeout,
@@ -713,7 +723,10 @@ export class AgentCallSession {
       missionPromptWasFallback: this.record.missionPromptWasFallback,
       missionPromptPreview: redactMissionText(this.record.systemPrompt ?? this.record.missionPrompt),
       maxCallDurationSeconds: this.record.maxCallDurationSeconds,
-      realtimeModel: this.config.OPENAI_AGENT_MODEL,
+      realtimeModel:
+        this.record.agentEngine === 'gpt-live-1'
+          ? this.config.OPENAI_GPT_LIVE_MODEL
+          : this.config.OPENAI_AGENT_MODEL,
       twilioConnected: Boolean(this.twilioWs),
       twilioStreamSid: this.record.twilioStreamSid ?? null,
       agentSession: this.agent?.status ?? 'idle',
@@ -775,6 +788,13 @@ export class AgentCallSession {
     this.record.twilioStreamSid = startMessage.start.streamSid;
     this.record.callSid = startMessage.start.callSid;
     this.record.state = 'twilio-connected';
+    if (this.record.agentEngine === 'gpt-live-1') {
+      // GPT-Live starts after TwiML has played the protected disclosure and
+      // prepared purpose. Add those deterministic words to the transcript so
+      // the cockpit still contains the complete call opening.
+      this.emitTranscript('agent', this.record.firstUtterance);
+      if (this.record.spokenPurpose) this.emitTranscript('agent', this.record.spokenPurpose);
+    }
     this.touch();
     this.ensureAgentSession();
 
@@ -844,7 +864,11 @@ export class AgentCallSession {
     if (this.agent) {
       return;
     }
-    this.agent = new OpenAiAgentVoiceSession({
+    const SessionClass =
+      this.record.agentEngine === 'gpt-live-1'
+        ? OpenAiGptLiveVoiceSession
+        : OpenAiAgentVoiceSession;
+    this.agent = new SessionClass({
       config: this.config,
       instructions: buildAgentInstructions(this.record),
       firstUtterance: this.record.firstUtterance,
@@ -1867,6 +1891,10 @@ function normalizeVoice(voice: string | undefined, languageLock?: string): strin
     return normalized;
   }
   return 'marin';
+}
+
+function normalizeAgentEngine(engine: AgentCallEngine | undefined): AgentCallEngine {
+  return engine === 'gpt-live-1' ? 'gpt-live-1' : 'realtime';
 }
 
 function clampMaxCallDuration(value: number | undefined): number {

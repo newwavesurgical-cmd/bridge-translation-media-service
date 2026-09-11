@@ -3,7 +3,7 @@ import type { AppConfig } from '../config.js';
 
 export type AgentVoiceSessionStatus = 'idle' | 'connecting' | 'live' | 'closing' | 'closed' | 'error';
 
-interface AgentVoiceSessionOptions {
+export interface AgentVoiceSessionOptions {
   config: AppConfig;
   instructions: string;
   firstUtterance?: string;
@@ -19,6 +19,18 @@ interface AgentVoiceSessionOptions {
   onStatus: (status: AgentVoiceSessionStatus, detail?: string) => void;
   onStartupDiagnostics?: (diagnostics: AgentStartupDiagnostics) => void;
   onError: (error: Error) => void;
+}
+
+/** Common bridge contract implemented by the Realtime and GPT-Live engines. */
+export interface AgentVoiceSession {
+  readonly status: AgentVoiceSessionStatus;
+  connect(): void;
+  appendPcmuBase64(base64Pcmu: string): void;
+  injectInstruction(text: string, semanticControl?: string): void;
+  setRemoteInteractionMode(mode: 'conversational_ai'): void;
+  confirmStartupEnvelopePlayback(): void;
+  suppressActiveOutput(reason?: string): void;
+  close(): void;
 }
 
 export interface AgentStartupDiagnostics {
@@ -37,7 +49,7 @@ const DEFAULT_FIRST_UTTERANCE =
 const LEGACY_FIRST_UTTERANCE =
   "Hey there, just so you know, I am a real person but I'm using an AI translator.";
 
-export class OpenAiAgentVoiceSession {
+export class OpenAiAgentVoiceSession implements AgentVoiceSession {
   private ws?: WebSocket;
   private statusValue: AgentVoiceSessionStatus = 'idle';
   private readonly queuedAudio: string[] = [];

@@ -9,6 +9,8 @@ const envSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_TRANSLATION_MODEL: z.string().default('gpt-realtime-translate'),
   OPENAI_AGENT_MODEL: z.string().default('gpt-realtime-2.1'),
+  OPENAI_GPT_LIVE_MODEL: z.string().default('gpt-live-1'),
+  OPENAI_GPT_LIVE_BACKEND_MODEL: z.string().default('gpt-5.6-luna'),
   OPENAI_TTS_MODEL: z.string().default('gpt-4o-mini-tts'),
   OPENAI_TTS_VOICE: z.string().default('cedar'),
   OPENAI_FILLER_TTS_VOICE: z.string().default('onyx'),

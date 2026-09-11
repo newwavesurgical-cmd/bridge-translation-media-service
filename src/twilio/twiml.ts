@@ -17,6 +17,10 @@ interface BuildTwiMlOptions {
 interface BuildAgentCallTwiMlOptions {
   config: AppConfig;
   sessionId: string;
+  agentEngine?: 'realtime' | 'gpt-live-1';
+  firstUtterance?: string;
+  spokenPurpose?: string;
+  languageLock?: string;
 }
 
 export function buildTranslatedCallTwiMl(options: BuildTwiMlOptions): string {
@@ -51,6 +55,15 @@ export function buildAgentCallTwiMl(options: BuildAgentCallTwiMlOptions): string
   }
 
   const response = new twiml.VoiceResponse();
+  if (options.agentEngine === 'gpt-live-1') {
+    // Exact, application-controlled opener. GPT-Live begins only after these
+    // blocks finish, so background noise cannot interrupt or skip them.
+    const language = twilioSayLanguage(options.languageLock ?? 'English') as 'en-US';
+    const firstUtterance = normalizeIntroText(options.firstUtterance);
+    const spokenPurpose = normalizeIntroText(options.spokenPurpose);
+    if (firstUtterance) response.say({ language }, firstUtterance);
+    if (spokenPurpose) response.say({ language }, spokenPurpose);
+  }
   const connect = response.connect();
   const stream = connect.stream({
     url: agentCallTwilioStreamUrl(options.config)
