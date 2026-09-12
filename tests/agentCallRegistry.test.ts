@@ -155,9 +155,104 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('Only speak to an IVR if it explicitly requires a spoken phrase');
     expect(instructions).toContain('A conversational AI answering service is different from a keypad IVR');
     expect(instructions).toContain('Never narrate private reasoning or plans');
+    expect(instructions).toContain('HARD COMMITMENT GATE');
+    expect(instructions).toContain('as soon as possible');
+    expect(instructions).toContain('stop. Do not pick the most convenient option');
     expect(instructions).toContain('continue to the next missing detail instead of restating the purpose');
     expect(instructions).not.toContain('You may say you are calling on behalf of a client or customer');
     expect(instructions).not.toContain('You may say you are calling on behalf');
+  });
+
+  it('holds an unapproved scheduling choice until an answer control arrives', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Get the earliest available appointment.',
+      languageLock: 'English'
+    });
+    const suppressActiveOutput = vi.fn();
+    const injectInstruction = vi.fn();
+    const mutable = session as unknown as {
+      agent: {
+        suppressActiveOutput: (reason: string) => void;
+        injectInstruction: (text: string, semanticControl?: string) => void;
+      };
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput, injectInstruction };
+
+    mutable.considerOperatorQuestion('Um, we have 12 p.m. or');
+    const first = session.diagnostics().pendingOperatorQuestion as { id: string };
+    mutable.considerOperatorQuestion('Um, we have 12 p.m. or 1 p.m.');
+
+    expect(session.diagnostics()).toMatchObject({
+      operatorQuestionTrackingSupported: true,
+      pendingOperatorQuestion: {
+        id: first.id,
+        text: 'Um, we have 12 p.m. or 1 p.m.',
+        kind: 'choice',
+        blocking: true
+      },
+      counters: {
+        operatorQuestionsDetected: 1,
+        operatorQuestionsBlocked: 1,
+        operatorQuestionsResolved: 0
+      }
+    });
+    expect(suppressActiveOutput).toHaveBeenCalledTimes(1);
+
+    await session.receiveControl({ control: 'one_moment' });
+    expect(session.diagnostics().pendingOperatorQuestion).not.toBeNull();
+
+    await session.receiveControl({ control: 'yes' });
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: null,
+      counters: { operatorQuestionsResolved: 1 }
+    });
+  });
+
+  it('replaces an old unresolved alert when the callee asks a new blocking question', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Schedule an appointment.',
+      languageLock: 'English'
+    });
+    const mutable = session as unknown as {
+      agent: { suppressActiveOutput: (reason: string) => void };
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: () => undefined };
+
+    mutable.considerOperatorQuestion('Can we do next Wednesday');
+    const oldId = (session.diagnostics().pendingOperatorQuestion as { id: string }).id;
+    mutable.considerOperatorQuestion('We have 12 p.m. or 1 p.m.');
+    const pending = session.diagnostics().pendingOperatorQuestion as { id: string; text: string };
+
+    expect(pending.id).not.toBe(oldId);
+    expect(pending.text).toBe('We have 12 p.m. or 1 p.m.');
+  });
+
+  it('dismisses a false-positive pending question without speaking to the callee', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Handle a routine call.',
+      languageLock: 'English'
+    });
+    const injectInstruction = vi.fn();
+    const mutable = session as unknown as {
+      agent: {
+        suppressActiveOutput: (reason: string) => void;
+        injectInstruction: (text: string, semanticControl?: string) => void;
+      };
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: () => undefined, injectInstruction };
+    mutable.considerOperatorQuestion('Are you sure you can do twelve');
+
+    const result = await session.receiveControl({ kind: 'dismiss_pending_question' });
+
+    expect(result).toMatchObject({ delivered: true });
+    expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
+    expect(injectInstruction).not.toHaveBeenCalled();
   });
 
   it('does not invite customer/client framing even when caller identity is supplied', () => {

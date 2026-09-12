@@ -17,6 +17,10 @@ import {
 import { OpenAiGptLiveVoiceSession, resolveGptLiveVoice } from './openai/gptLiveVoiceSession.js';
 import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
+import {
+  classifyOperatorQuestion,
+  type OperatorQuestionKind
+} from './operatorQuestion.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { AppClientMessage, AppServerMessage, TwilioMediaMessage } from './types/messages.js';
 
@@ -36,6 +40,7 @@ const IVR_HOLD_MS = 45000;
 const IVR_AUTO_CHOICE_DELAY_MS = 8000;
 const IVR_SELECTION_COOLDOWN_MS = 5000;
 const BARGE_IN_PLAYBACK_WINDOW_MS = 4000;
+const OPERATOR_QUESTION_SETTLE_MS = 650;
 const DEFAULT_FIRST_UTTERANCE =
   "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 const LEGACY_FIRST_UTTERANCE =
@@ -172,6 +177,16 @@ export interface AgentRemotePartyState {
   updatedAt: string | null;
 }
 
+export interface AgentPendingOperatorQuestion {
+  id: string;
+  text: string;
+  kind: OperatorQuestionKind;
+  blocking: boolean;
+  reason: string;
+  detectedAt: string;
+  updatedAt: string;
+}
+
 export interface AgentCallRecord {
   sessionId: string;
   callSid: string | null;
@@ -209,6 +224,8 @@ export interface AgentCallRecord {
   dtmf: AgentDtmfEntry[];
   ivr?: AgentIvrState;
   remoteParty?: AgentRemotePartyState;
+  pendingOperatorQuestion?: AgentPendingOperatorQuestion;
+  lastOperatorQuestionResolvedAt?: string;
   counters: {
     twilioMediaChunks: number;
     agentAudioChunks: number;
@@ -227,6 +244,9 @@ export interface AgentCallRecord {
     ivrAgentTranscriptSuppressed: number;
     ivrAutoDtmfSent: number;
     conversationalAiDetections: number;
+    operatorQuestionsDetected: number;
+    operatorQuestionsBlocked: number;
+    operatorQuestionsResolved: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   timings: {
@@ -317,7 +337,10 @@ export class AgentCallRegistry {
         ivrAgentAudioSuppressed: 0,
         ivrAgentTranscriptSuppressed: 0,
         ivrAutoDtmfSent: 0,
-        conversationalAiDetections: 0
+        conversationalAiDetections: 0,
+        operatorQuestionsDetected: 0,
+        operatorQuestionsBlocked: 0,
+        operatorQuestionsResolved: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -385,6 +408,10 @@ export class AgentCallSession {
   private verbatimSpeechReleaseTimer?: NodeJS.Timeout;
   private verbatimSpeechGeneration = 0;
   private verbatimSpeechActive = false;
+  private currentRemoteUtterance = '';
+  private operatorQuestionTimer?: NodeJS.Timeout;
+  private operatorQuestionSequence = 0;
+  private holdDeliveredForQuestionId?: string;
 
   constructor(
     private readonly config: AppConfig,
@@ -478,6 +505,7 @@ export class AgentCallSession {
     // snapshot must never be able to turn a Spanish call into English↔English
     // takeover by overriding the remote side of the pair.
     const remoteLanguage = normalizeOptional(this.record.languageLock) ?? normalizeOptional(options.remoteLanguage) ?? 'English';
+    this.resolvePendingOperatorQuestion('operator_takeover');
     this.record.takeover = {
       active: true,
       userLanguage,
@@ -623,7 +651,20 @@ export class AgentCallSession {
       return entry;
     }
 
+    if (request.kind === 'dismiss_pending_question') {
+      this.lastOperatorDecisionAt = Date.now();
+      this.resolvePendingOperatorQuestion('operator_dismissed');
+      entry.text = 'Dismissed pending operator question without sending speech to the callee.';
+      entry.delivered = true;
+      this.record.counters.controlsDelivered += 1;
+      this.touch();
+      return entry;
+    }
+
     this.lastOperatorDecisionAt = Date.now();
+    if (controlResolvesPendingQuestion(request)) {
+      this.resolvePendingOperatorQuestion('operator_control');
+    }
     this.emitTranscript('operator', operatorTranscriptText(request, text));
 
     // The cockpit labels force_say / human_say as exact words. Keep that
@@ -664,7 +705,10 @@ export class AgentCallSession {
    * agent. The app has already localized the text to the locked call language;
    * the TTS endpoint reads that text as audio and cannot change the wording.
    */
-  private async deliverVerbatimText(text: string): Promise<{ ok: boolean; error?: string }> {
+  private async deliverVerbatimText(
+    text: string,
+    shouldDeliver: () => boolean = () => true
+  ): Promise<{ ok: boolean; error?: string }> {
     if (!this.twilioWs || !this.record.twilioStreamSid || this.record.state !== 'live') {
       return { ok: false, error: 'The live phone media stream is not ready for exact speech.' };
     }
@@ -689,7 +733,13 @@ export class AgentCallSession {
         ].join(' '),
         speed: 1.02
       });
-      if (generation !== this.verbatimSpeechGeneration || !this.twilioWs || !this.record.twilioStreamSid) {
+      if (
+        generation !== this.verbatimSpeechGeneration ||
+        !shouldDeliver() ||
+        !this.twilioWs ||
+        !this.record.twilioStreamSid
+      ) {
+        if (generation === this.verbatimSpeechGeneration) this.verbatimSpeechActive = false;
         return { ok: false, error: 'The call changed before exact speech was ready.' };
       }
 
@@ -783,6 +833,7 @@ export class AgentCallSession {
     this.monitorSockets.clear();
     this.twilioWs?.close();
     this.clearIvrAutoChoiceTimer();
+    this.clearOperatorQuestionTimer();
     this.verbatimSpeechGeneration += 1;
     this.verbatimSpeechActive = false;
     if (this.verbatimSpeechReleaseTimer) clearTimeout(this.verbatimSpeechReleaseTimer);
@@ -840,6 +891,9 @@ export class AgentCallSession {
       monitorStreamUrl: this.monitorStreamUrl(),
       monitorConnected: this.monitorSockets.size > 0,
       directVoiceTakeoverSupported: true,
+      operatorQuestionTrackingSupported: true,
+      pendingOperatorQuestion: this.record.pendingOperatorQuestion ?? null,
+      lastOperatorQuestionResolvedAt: this.record.lastOperatorQuestionResolvedAt ?? null,
       ivrMenuDetectionSupported: true,
       ivrOptionDisplaySupported: true,
       ivrDtmfFallbackSupported: true,
@@ -914,6 +968,7 @@ export class AgentCallSession {
           this.record.state = 'ended';
           this.record.endedAt = new Date().toISOString();
           this.record.endedReason = 'twilio_stream_closed';
+          this.clearOperatorQuestionTimer();
           this.agent?.close();
           this.onDispose(this.diagnostics());
         }
@@ -983,6 +1038,7 @@ export class AgentCallSession {
       spokenPurpose: this.record.spokenPurpose,
       voice: this.record.voice,
       onAudioDelta: (pcmu) => {
+        this.flushRemoteUtterance();
         if (this.record.takeover?.active) {
           return;
         }
@@ -991,6 +1047,9 @@ export class AgentCallSession {
         }
         if (this.isIvrHoldActive()) {
           this.record.counters.ivrAgentAudioSuppressed += 1;
+          return;
+        }
+        if (this.record.pendingOperatorQuestion?.blocking) {
           return;
         }
         this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
@@ -1003,9 +1062,16 @@ export class AgentCallSession {
         this.observeRemoteTranscript(delta);
       },
       onAgentTranscriptDelta: (delta) => {
+        this.flushRemoteUtterance();
         if (this.isIvrHoldActive()) {
           this.record.counters.ivrAgentTranscriptSuppressed += 1;
           return;
+        }
+        if (this.record.pendingOperatorQuestion?.blocking) {
+          return;
+        }
+        if (this.record.pendingOperatorQuestion) {
+          this.resolvePendingOperatorQuestion('mission_answered');
         }
         this.record.timings.firstAgentTranscriptAt ??= new Date().toISOString();
         this.record.counters.agentTranscriptDeltas += 1;
@@ -1167,6 +1233,11 @@ export class AgentCallSession {
     }
 
     const now = Date.now();
+    this.currentRemoteUtterance = appendSpokenDelta(this.currentRemoteUtterance, normalized);
+    this.considerOperatorQuestion(this.currentRemoteUtterance);
+    this.clearOperatorQuestionTimer();
+    this.operatorQuestionTimer = setTimeout(() => this.flushRemoteUtterance(), OPERATOR_QUESTION_SETTLE_MS);
+    this.operatorQuestionTimer.unref();
     for (const signal of conversationalAnsweringServiceSignals(normalized)) {
       this.conversationalAiSignals.add(signal);
     }
@@ -1253,12 +1324,82 @@ export class AgentCallSession {
     this.touch();
   }
 
+  private considerOperatorQuestion(text: string): void {
+    const classification = classifyOperatorQuestion(text, this.callPurposeText());
+    if (!classification) return;
+
+    const current = this.record.pendingOperatorQuestion;
+    const sameQuestion = current ? questionsShareGrowingText(current.text, classification.text) : false;
+    if (current?.blocking && !classification.blocking && !sameQuestion) {
+      return;
+    }
+
+    const timestamp = new Date().toISOString();
+    const next: AgentPendingOperatorQuestion = {
+      id: sameQuestion && current ? current.id : `operator-question-${++this.operatorQuestionSequence}`,
+      text: classification.text,
+      kind: classification.kind,
+      blocking: classification.blocking,
+      reason: classification.reason,
+      detectedAt: sameQuestion && current ? current.detectedAt : timestamp,
+      updatedAt: timestamp
+    };
+    const newlyDetected = !current || !sameQuestion;
+    const newlyBlocking = next.blocking && (!current?.blocking || !sameQuestion);
+    this.record.pendingOperatorQuestion = next;
+    if (newlyDetected) this.record.counters.operatorQuestionsDetected += 1;
+    if (newlyBlocking) this.record.counters.operatorQuestionsBlocked += 1;
+    this.touch();
+    this.sendAppStatus();
+
+    if (newlyBlocking) this.activateOperatorDecisionHold(next);
+  }
+
+  private flushRemoteUtterance(): void {
+    const utterance = this.currentRemoteUtterance.trim();
+    if (!utterance) return;
+    this.clearOperatorQuestionTimer();
+    this.currentRemoteUtterance = '';
+    this.considerOperatorQuestion(utterance);
+  }
+
+  private activateOperatorDecisionHold(question: AgentPendingOperatorQuestion): void {
+    this.agent?.suppressActiveOutput?.(
+      `Operator approval is required before answering this callee question: ${question.text}`
+    );
+    this.clearTwilioAudioForForcedSpeech();
+    if (this.holdDeliveredForQuestionId === question.id) return;
+    this.holdDeliveredForQuestionId = question.id;
+    void this.deliverVerbatimText(
+      operatorDecisionHoldPhrase(this.record.languageLock),
+      () => this.record.pendingOperatorQuestion?.id === question.id
+    );
+  }
+
+  private resolvePendingOperatorQuestion(
+    _source: 'operator_control' | 'operator_takeover' | 'operator_dismissed' | 'mission_answered'
+  ): void {
+    if (!this.record.pendingOperatorQuestion) return;
+    this.record.pendingOperatorQuestion = undefined;
+    this.record.lastOperatorQuestionResolvedAt = new Date().toISOString();
+    this.record.counters.operatorQuestionsResolved += 1;
+    this.holdDeliveredForQuestionId = undefined;
+    this.touch();
+    this.sendAppStatus();
+  }
+
+  private clearOperatorQuestionTimer(): void {
+    if (!this.operatorQuestionTimer) return;
+    clearTimeout(this.operatorQuestionTimer);
+    this.operatorQuestionTimer = undefined;
+  }
+
   private remoteTranscriptWindow(): string {
     return this.recentRemoteTranscriptDeltas.map((entry) => entry.delta).join(' ').replace(/\s+/g, ' ').trim();
   }
 
   private callPurposeText(): string {
-    return [this.record.targetName, this.record.missionPrompt, this.record.systemPrompt]
+    return [this.record.callerName, this.record.targetName, this.record.missionPrompt, this.record.systemPrompt]
       .filter(Boolean)
       .join(' ')
       .replace(/\s+/g, ' ')
@@ -1480,6 +1621,50 @@ function isFirstUtteranceContractEnforcement(text: string): boolean {
   return text.trim().toUpperCase().startsWith('FIRST UTTERANCE CONTRACT ENFORCEMENT');
 }
 
+function appendSpokenDelta(previous: string, delta: string): string {
+  if (!previous) return delta;
+  const needsSpace = /[\p{L}\p{N}]$/u.test(previous) && /^[\p{L}\p{N}]/u.test(delta);
+  return `${previous}${needsSpace ? ' ' : ''}${delta}`.replace(/\s+/g, ' ').trim();
+}
+
+function normalizedQuestionText(text: string): string {
+  return text
+    .normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function questionsShareGrowingText(left: string, right: string): boolean {
+  const a = normalizedQuestionText(left);
+  const b = normalizedQuestionText(right);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.length >= 8 && longer.startsWith(`${shorter} `);
+}
+
+function controlResolvesPendingQuestion(request: AgentControlRequest): boolean {
+  if (normalizeOptional(request.text ?? request.note)) return true;
+  return Boolean(
+    request.control &&
+      !new Set<ContextualMicroIntervention>([
+        'one_moment',
+        'let_me_think',
+        'repeat_that',
+        'ask_for_clarification'
+      ]).has(request.control)
+  );
+}
+
+function operatorDecisionHoldPhrase(languageLock?: string): string {
+  const language = languageLock?.toLocaleLowerCase() ?? '';
+  if (language.includes('spanish') || language.startsWith('es')) return 'Un momento, por favor.';
+  if (language.includes('portuguese') || language.startsWith('pt')) return 'Um momento, por favor.';
+  return 'One moment, please.';
+}
+
 export function buildAgentInstructions(record: AgentCallRecord): string {
   const languageLock = record.languageLock
     ? `Language lock: speak only in ${record.languageLock}, unless the remote callee explicitly cannot understand and the mission permits switching.`
@@ -1511,6 +1696,9 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'Do not treat a known relationship or caller category as missing information. If the mission says the appointment, call, pickup, reservation, or issue is for my son, daughter, child, spouse, mother, father, patient, or another known relationship, answer with that known relationship when asked who it is for. Example: if asked "Who is the appointment for?" and the mission says it is for my son, say "It is for my son." If they need the name, date of birth, or another specific identifier and it is not in the mission, then use one allowed hold phrase and wait for private operator control.',
     'Only use a hold phrase for caller-side facts that are truly absent from the mission and prior private controls. If a partial answer is known, give the known part first, then ask a narrow follow-up only if useful, such as "It is for my son. Do you need his name?"',
     'If the remote callee asks for a caller-side fact you do not have, say one allowed hold phrase and stop speaking until a private operator control supplies it. Never ask the remote callee to tell you the caller-side fact.',
+    'HARD COMMITMENT GATE: never choose, accept, confirm, or imply approval of a date, time, appointment, reservation, price, payment, purchase, cancellation, consent, or authorization unless that exact decision is explicitly approved in the Mission or a fresh private operator control.',
+    'When the remote callee proposes options or asks for any commitment that is not explicitly approved, say one allowed hold phrase and stop. Do not pick the most convenient option, infer approval from urgency, or continue negotiating on the operator\'s behalf.',
+    'A request to schedule as soon as possible does not authorize a specific day or time. Ask privately through the application and wait for the operator before accepting an offered slot.',
     'Never say or imply: "the user", "the operator", "I am getting details from the user", "I am retrieving information from the user", "while I get the details", or any equivalent phrase.',
     'Do not begin the call with a hold phrase. Your first spoken turn must use the mission: greet naturally, confirm the contact if useful, state the concrete reason for the call before any role explanation, and ask the first mission-specific question.',
     holdPhrase,
