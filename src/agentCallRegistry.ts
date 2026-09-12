@@ -3,6 +3,7 @@ import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
 import {
   base64ToBytes,
+  bytesToBase64,
   makeDtmfMuLaw8kBase64,
   openAiPcm24kBase64ToTwilioMuLaw8kBase64,
   twilioMuLaw8kBase64ToOpenAiPcm24kBase64
@@ -14,6 +15,7 @@ import {
   type AgentVoiceSession
 } from './openai/agentVoiceSession.js';
 import { OpenAiGptLiveVoiceSession, resolveGptLiveVoice } from './openai/gptLiveVoiceSession.js';
+import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import type { AppClientMessage, AppServerMessage, TwilioMediaMessage } from './types/messages.js';
@@ -89,6 +91,8 @@ export interface AgentControlRequest {
   control?: ContextualMicroIntervention;
   text?: string;
   note?: string;
+  /** Distinct wire intent for the cockpit's callee-facing exact-words box. */
+  kind?: string;
 }
 
 export type AgentCallState = 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
@@ -116,6 +120,7 @@ interface AgentControlEntry {
   control?: ContextualMicroIntervention;
   text: string;
   delivered: boolean;
+  error?: string;
 }
 
 interface AgentDtmfEntry {
@@ -377,6 +382,9 @@ export class AgentCallSession {
   private lastOperatorDecisionAt = 0;
   private ivrAutoChoiceTimer?: NodeJS.Timeout;
   private lastIvrSelection?: { signature: string; at: number };
+  private verbatimSpeechReleaseTimer?: NodeJS.Timeout;
+  private verbatimSpeechGeneration = 0;
+  private verbatimSpeechActive = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -589,7 +597,7 @@ export class AgentCallSession {
     return true;
   }
 
-  receiveControl(request: AgentControlRequest): AgentControlEntry {
+  async receiveControl(request: AgentControlRequest): Promise<AgentControlEntry> {
     const text = controlInstruction(request);
     const duplicate = this.isDuplicateControl(request.control, text);
     const entry: AgentControlEntry = {
@@ -618,6 +626,20 @@ export class AgentCallSession {
     this.lastOperatorDecisionAt = Date.now();
     this.emitTranscript('operator', operatorTranscriptText(request, text));
 
+    // The cockpit labels force_say / human_say as exact words. Keep that
+    // contract deterministic: synthesize the already-localized text directly
+    // instead of asking either conversational model to paraphrase it. This is
+    // deliberately separate from the proven contextual micro-button path.
+    if ((request.kind === 'force_say' || request.kind === 'human_say') && normalizeOptional(request.text)) {
+      const exactText = normalizeOptional(request.text) ?? '';
+      const outcome = await this.deliverVerbatimText(exactText);
+      entry.delivered = outcome.ok;
+      if (!outcome.ok) entry.error = outcome.error;
+      if (entry.delivered) this.record.counters.controlsDelivered += 1;
+      this.touch();
+      return entry;
+    }
+
     if (request.control === 'end_politely') {
       this.agent?.injectInstruction(text, request.control);
       entry.delivered = Boolean(this.agent && this.record.state === 'live');
@@ -635,6 +657,66 @@ export class AgentCallSession {
     }
     this.touch();
     return entry;
+  }
+
+  /**
+   * Speak operator-authored text without passing it through the autonomous
+   * agent. The app has already localized the text to the locked call language;
+   * the TTS endpoint reads that text as audio and cannot change the wording.
+   */
+  private async deliverVerbatimText(text: string): Promise<{ ok: boolean; error?: string }> {
+    if (!this.twilioWs || !this.record.twilioStreamSid || this.record.state !== 'live') {
+      return { ok: false, error: 'The live phone media stream is not ready for exact speech.' };
+    }
+
+    const generation = ++this.verbatimSpeechGeneration;
+    this.verbatimSpeechActive = true;
+    if (this.verbatimSpeechReleaseTimer) clearTimeout(this.verbatimSpeechReleaseTimer);
+    this.agent?.suppressActiveOutput(
+      'A deterministic operator-authored utterance is being played. Remain silent and wait for fresh remote speech after it finishes.'
+    );
+    this.clearTwilioAudioForForcedSpeech();
+
+    try {
+      const language = this.record.languageLock ?? 'English';
+      const pcm24k = await createSpeechPcm24kBase64(this.config, {
+        text,
+        language,
+        instructions: [
+          `Read the supplied text naturally in ${language}.`,
+          'Speak exactly the supplied words in the supplied order.',
+          'Do not add, remove, paraphrase, translate, explain, or acknowledge anything.'
+        ].join(' '),
+        speed: 1.02
+      });
+      if (generation !== this.verbatimSpeechGeneration || !this.twilioWs || !this.record.twilioStreamSid) {
+        return { ok: false, error: 'The call changed before exact speech was ready.' };
+      }
+
+      const muLaw8k = openAiPcm24kBase64ToTwilioMuLaw8kBase64(pcm24k);
+      const bytes = base64ToBytes(muLaw8k);
+      const chunkSize = 160;
+      for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        this.sendTwilioMedia(bytesToBase64(bytes.slice(offset, offset + chunkSize)));
+      }
+      this.emitTranscript('agent', text);
+
+      // Twilio buffers outbound media. Keep autonomous model output gated until
+      // the deterministic audio has had time to play, then fresh callee speech
+      // resumes the normal agent path.
+      const playbackMs = Math.ceil((bytes.length / 8000) * 1000) + 180;
+      this.verbatimSpeechReleaseTimer = setTimeout(() => {
+        if (generation === this.verbatimSpeechGeneration) this.verbatimSpeechActive = false;
+      }, playbackMs);
+      this.verbatimSpeechReleaseTimer.unref();
+      return { ok: true };
+    } catch (error) {
+      if (generation === this.verbatimSpeechGeneration) this.verbatimSpeechActive = false;
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'Exact speech synthesis failed.'
+      };
+    }
   }
 
   sendDtmf(digit: string): AgentDtmfEntry {
@@ -701,6 +783,9 @@ export class AgentCallSession {
     this.monitorSockets.clear();
     this.twilioWs?.close();
     this.clearIvrAutoChoiceTimer();
+    this.verbatimSpeechGeneration += 1;
+    this.verbatimSpeechActive = false;
+    if (this.verbatimSpeechReleaseTimer) clearTimeout(this.verbatimSpeechReleaseTimer);
     if (this.timeout) {
       clearTimeout(this.timeout);
     }
@@ -899,6 +984,9 @@ export class AgentCallSession {
       voice: this.record.voice,
       onAudioDelta: (pcmu) => {
         if (this.record.takeover?.active) {
+          return;
+        }
+        if (this.verbatimSpeechActive) {
           return;
         }
         if (this.isIvrHoldActive()) {
@@ -1284,6 +1372,19 @@ export class AgentCallSession {
     if (this.lastAgentAudioAt === 0 || Date.now() - this.lastAgentAudioAt > BARGE_IN_PLAYBACK_WINDOW_MS) {
       return;
     }
+    this.record.counters.bargeInClears += 1;
+    this.twilioWs.send(
+      JSON.stringify({
+        event: 'clear',
+        streamSid: this.record.twilioStreamSid
+      })
+    );
+    this.touch();
+  }
+
+  /** Exact speech is an explicit operator interrupt, so clear queued agent audio unconditionally. */
+  private clearTwilioAudioForForcedSpeech(): void {
+    if (!this.twilioWs || !this.record.twilioStreamSid) return;
     this.record.counters.bargeInClears += 1;
     this.twilioWs.send(
       JSON.stringify({

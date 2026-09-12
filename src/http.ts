@@ -136,7 +136,8 @@ const createAgentCallSchema = z
 const agentControlSchema = z.object({
   control: z.enum(contextualMicroInterventions).optional(),
   text: z.string().max(2000).optional(),
-  note: z.string().max(2000).optional()
+  note: z.string().max(2000).optional(),
+  kind: z.string().max(80).optional()
 });
 
 const dtmfSchema = z.object({
@@ -303,8 +304,22 @@ export function createBridgeMediaServer(config: AppConfig) {
           return sendJson(res, 404, { error: 'agent call not found' });
         }
         const body = agentControlSchema.parse(await readJson(req));
-        const control = session.receiveControl(body);
-        return sendJson(res, 200, { ok: true, control, diagnostics: session.diagnostics() });
+        const control = await session.receiveControl(body);
+        if (control.error) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: control.error,
+            delivery: 'failed',
+            control,
+            diagnostics: session.diagnostics()
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          delivery: control.delivered ? 'delivered' : 'queued',
+          control,
+          diagnostics: session.diagnostics()
+        });
       }
 
       if (req.method === 'POST' && url.pathname.startsWith('/agent-call/') && url.pathname.endsWith('/takeover/start')) {

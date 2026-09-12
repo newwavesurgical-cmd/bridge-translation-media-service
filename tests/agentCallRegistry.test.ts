@@ -48,7 +48,7 @@ function makeSpeechPayload(frequency = 440): string {
 }
 
 describe('AgentCallRegistry', () => {
-  it('creates agent-call sessions with language lock and control diagnostics', () => {
+  it('creates agent-call sessions with language lock and control diagnostics', async () => {
     const registry = new AgentCallRegistry(config);
     const session = registry.create({
       to: '+15551230000',
@@ -59,7 +59,7 @@ describe('AgentCallRegistry', () => {
       spokenPurpose: "I'm calling about a problem with my electric bill."
     });
 
-    const control = session.receiveControl({ control: 'yes' });
+    const control = await session.receiveControl({ control: 'yes' });
 
     expect(control.text).toContain('Resolve the active question as yes');
     expect(session.diagnostics()).toMatchObject({
@@ -71,6 +71,24 @@ describe('AgentCallRegistry', () => {
       counters: {
         controlsReceived: 1
       }
+    });
+  });
+
+  it('routes force_say into the deterministic exact-speech path', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Confirm an appointment.',
+      languageLock: 'English'
+    });
+
+    const control = await session.receiveControl({
+      kind: 'force_say',
+      text: 'Tuesday at three works for me.'
+    });
+
+    expect(control).toMatchObject({
+      delivered: false,
+      error: 'The live phone media stream is not ready for exact speech.'
     });
   });
 
@@ -174,14 +192,14 @@ describe('AgentCallRegistry', () => {
     );
   });
 
-  it('ignores duplicate first-utterance enforcement controls from the caller app', () => {
+  it('ignores duplicate first-utterance enforcement controls from the caller app', async () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
       missionPrompt: 'Ask whether the car is still available.',
       languageLock: 'English'
     });
 
-    const control = session.receiveControl({
+    const control = await session.receiveControl({
       text:
         'FIRST UTTERANCE CONTRACT ENFORCEMENT. Your previous response was off-script; say the exact first words again.'
     });
@@ -205,7 +223,7 @@ describe('AgentCallRegistry', () => {
     });
   });
 
-  it('ignores identical operator controls that arrive twice in the debounce window', () => {
+  it('ignores identical operator controls that arrive twice in the debounce window', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-08-24T04:55:30.000Z'));
     const session = new AgentCallRegistry(config).create({
@@ -214,10 +232,10 @@ describe('AgentCallRegistry', () => {
       languageLock: 'English'
     });
 
-    const first = session.receiveControl({ text: 'Pause briefly and continue naturally.' });
-    const duplicate = session.receiveControl({ text: 'Pause briefly and continue naturally.' });
+    const first = await session.receiveControl({ text: 'Pause briefly and continue naturally.' });
+    const duplicate = await session.receiveControl({ text: 'Pause briefly and continue naturally.' });
     vi.advanceTimersByTime(1501);
-    const later = session.receiveControl({ text: 'Pause briefly and continue naturally.' });
+    const later = await session.receiveControl({ text: 'Pause briefly and continue naturally.' });
 
     expect(first.text).toBe('Pause briefly and continue naturally.');
     expect(duplicate.text).toBe('Ignored duplicate operator control: Pause briefly and continue naturally.');
@@ -231,14 +249,14 @@ describe('AgentCallRegistry', () => {
     });
   });
 
-  it('shows operator-supplied values instead of internal control wrappers in the transcript', () => {
+  it('shows operator-supplied values instead of internal control wrappers in the transcript', async () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
       missionPrompt: 'Complete the intake.'
     });
 
-    session.receiveControl({ text: '202-555-0147' });
-    session.receiveControl({ control: 'yes' });
+    await session.receiveControl({ text: '202-555-0147' });
+    await session.receiveControl({ control: 'yes' });
 
     expect(session.diagnostics()).toMatchObject({
       transcriptTail: [
