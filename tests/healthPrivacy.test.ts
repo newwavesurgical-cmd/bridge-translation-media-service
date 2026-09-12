@@ -64,6 +64,8 @@ describe('health endpoint privacy', () => {
     expect(payload).toMatchObject({
       ok: true,
       agentCallSupported: true,
+      gptLiveVoiceBridgeSupported: true,
+      supportedAgentEngines: ['realtime', 'gpt-live-1'],
       activeAgentCallCount: 1
     });
     expect(payload).not.toHaveProperty('activeAgentCalls');

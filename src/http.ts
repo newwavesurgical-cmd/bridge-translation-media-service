@@ -218,6 +218,8 @@ export function createBridgeMediaServer(config: AppConfig) {
           mediaRouterConfigured: mediaRouterConfigured(config),
           agentCallSupported: true,
           agentRealtimeVoiceBridgeSupported: true,
+          gptLiveVoiceBridgeSupported: true,
+          supportedAgentEngines: ['realtime', 'gpt-live-1'],
           directVoiceTakeoverSupported: true,
           monitorStreamSupported: true,
           dryRunCalls: config.DRY_RUN_CALLS,
