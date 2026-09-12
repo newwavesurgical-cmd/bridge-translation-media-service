@@ -6,6 +6,8 @@ export type AgentVoiceSessionStatus = 'idle' | 'connecting' | 'live' | 'closing'
 export interface AgentVoiceSessionOptions {
   config: AppConfig;
   instructions: string;
+  /** Whether the operator enabled the guaranteed first-message disclosure. */
+  disclosureEnabled?: boolean;
   firstUtterance?: string;
   /** Prepared callee-facing purpose, already resolved in the language lock. */
   spokenPurpose?: string;

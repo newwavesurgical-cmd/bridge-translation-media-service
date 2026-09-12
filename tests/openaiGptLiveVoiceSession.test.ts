@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/config.js';
 import {
   OpenAiGptLiveVoiceSession,
+  buildGptLiveOpeningDirective,
   buildGptLiveSessionStart,
   resolveGptLiveVoice
 } from '../src/openai/gptLiveVoiceSession.js';
@@ -30,7 +31,7 @@ const config: AppConfig = {
   DRY_RUN_CALLS: true
 };
 
-function makeSession() {
+function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: string; spokenPurpose?: string }) {
   const sent: Array<Record<string, unknown>> = [];
   const audio: string[] = [];
   const remote: string[] = [];
@@ -40,6 +41,9 @@ function makeSession() {
   const session = new OpenAiGptLiveVoiceSession({
     config,
     instructions: 'LANGUAGE LOCK: Speak only English. Mission fact: appointment at noon.',
+    disclosureEnabled: input?.disclosureEnabled ?? true,
+    firstUtterance: input?.firstUtterance ?? "I'm not a telemarketer.",
+    spokenPurpose: input?.spokenPurpose ?? 'I am calling to confirm the appointment time.',
     voice: 'echo',
     onAudioDelta: (delta) => audio.push(delta),
     onRemoteTranscriptDelta: (delta) => remote.push(delta),
@@ -135,17 +139,24 @@ describe('GPT-Live voice session', () => {
     expect(instructions).toContain('Never invent vague framing such as a team the callee contacted');
   });
 
-  it('buffers callee audio until the protected TwiML opener boundary is confirmed', () => {
+  it('buffers callee audio until the single GPT-Live opener playback boundary is confirmed', () => {
     const { session, mutable, sent, queued } = makeSession();
     session.appendPcmuBase64('before');
     expect(sent).toEqual([]);
 
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    expect(queued).not.toHaveBeenCalled();
+    expect(sent.map((payload) => payload.type)).toEqual([
+      'session.instructions.append',
+      'session.commentary.append'
+    ]);
+
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
     expect(queued).toHaveBeenCalledOnce();
-    expect(sent).toEqual([]);
 
     session.confirmStartupEnvelopePlayback();
-    expect(sent).toEqual([{ type: 'session.input_audio.append', audio: 'before' }]);
+    expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'before' });
 
     session.appendPcmuBase64('after');
     expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'after' });
@@ -179,6 +190,10 @@ describe('GPT-Live voice session', () => {
   it('sends operator controls as private live instructions without exposing them as call text', () => {
     const { session, mutable, sent } = makeSession();
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    session.confirmStartupEnvelopePlayback();
+    sent.splice(0);
     session.injectInstruction('Yes, Tuesday works.', 'yes');
     expect(sent[0]).toMatchObject({
       type: 'session.instructions.append',
@@ -190,5 +205,31 @@ describe('GPT-Live voice session', () => {
       delegation_id: null
     });
     expect(String(sent[1].content)).toContain('Yes, Tuesday works.');
+  });
+
+  it('uses one GPT-Live voice turn for disclosure plus purpose when the toggle is on', () => {
+    const directive = buildGptLiveOpeningDirective({
+      disclosure: "I'm not a telemarketer.",
+      purpose: 'I am calling about the car you listed.'
+    });
+
+    expect(directive).toContain("I'm not a telemarketer.");
+    expect(directive).toContain('I am calling about the car you listed.');
+    expect(directive).toContain('one natural spoken turn');
+    expect(directive).toContain('Do not add a greeting');
+  });
+
+  it('starts directly with the mission purpose and no disclosure when the toggle is off', () => {
+    const { mutable, sent } = makeSession({
+      disclosureEnabled: false,
+      firstUtterance: "I'm not a telemarketer.",
+      spokenPurpose: 'I am calling about the car you listed.'
+    });
+
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+
+    expect(String(sent[1]?.content)).toContain('I am calling about the car you listed.');
+    expect(String(sent[1]?.content)).toContain('There is no disclosure');
+    expect(String(sent[1]?.content)).not.toContain("I'm not a telemarketer.");
   });
 });

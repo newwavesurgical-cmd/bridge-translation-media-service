@@ -75,6 +75,7 @@ export interface CreateAgentCallRequest {
   systemPrompt?: string;
   languageLock?: string;
   agentEngine?: AgentCallEngine;
+  disclosureEnabled?: boolean;
   /** Prepared callee-facing purpose, already resolved in the language lock. */
   spokenPurpose?: string;
   voice?: string;
@@ -198,6 +199,7 @@ export interface AgentCallRecord {
   systemPrompt?: string;
   languageLock?: string;
   agentEngine: AgentCallEngine;
+  disclosureEnabled: boolean;
   spokenPurpose?: string;
   voice: string;
   firstUtterance: string;
@@ -292,6 +294,7 @@ export class AgentCallRegistry {
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
       agentEngine: normalizeAgentEngine(request.agentEngine),
+      disclosureEnabled: request.disclosureEnabled ?? true,
       spokenPurpose: normalizeOptional(request.spokenPurpose),
       voice: normalizeVoice(request.voice, request.languageLock),
       firstUtterance: normalizeFirstUtterance(request.firstUtterance),
@@ -858,6 +861,7 @@ export class AgentCallSession {
       callerName: this.record.callerName ?? null,
       languageLock: this.record.languageLock ?? null,
       agentEngine: this.record.agentEngine,
+      disclosureEnabled: this.record.disclosureEnabled,
       preparedSpokenPurpose: Boolean(this.record.spokenPurpose),
       machineDetection: this.record.machineDetection,
       machineDetectionTimeout: this.record.machineDetectionTimeout,
@@ -950,13 +954,6 @@ export class AgentCallSession {
     this.record.state = 'twilio-connected';
     this.record.timings.twilioConnectedAt ??= new Date().toISOString();
     logAgentCallAudit('twilio_connected', this.record, this.config);
-    if (this.record.agentEngine === 'gpt-live-1') {
-      // GPT-Live starts after TwiML has played the protected disclosure and
-      // prepared purpose. Add those deterministic words to the transcript so
-      // the cockpit still contains the complete call opening.
-      this.emitTranscript('agent', this.record.firstUtterance);
-      if (this.record.spokenPurpose) this.emitTranscript('agent', this.record.spokenPurpose);
-    }
     this.touch();
     this.ensureAgentSession();
 
@@ -1034,6 +1031,7 @@ export class AgentCallSession {
     this.agent = new SessionClass({
       config: this.config,
       instructions: buildAgentInstructions(this.record),
+      disclosureEnabled: this.record.disclosureEnabled,
       firstUtterance: this.record.firstUtterance,
       spokenPurpose: this.record.spokenPurpose,
       voice: this.record.voice,
@@ -1677,15 +1675,23 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
   const spokenStyle = languageStyleInstruction(record.languageLock);
   const holdPhrase = holdPhraseInstruction(record.languageLock);
 
+  const openingRule = record.disclosureEnabled
+    ? `Your first spoken words must be exactly: "${record.firstUtterance}"`
+    : record.spokenPurpose
+      ? `No disclosure is enabled. Begin the call once with this prepared purpose: "${record.spokenPurpose}" Do not add a greeting, announcement, or other preamble before it.`
+      : 'No disclosure is enabled. Begin directly from the active Mission with no greeting, announcement, or other preamble.';
+
   return [
     'You are a live outbound phone-call voice agent.',
     caller,
     target,
     languageLock,
     spokenStyle,
-    `Your first spoken words must be exactly: "${record.firstUtterance}"`,
+    openingRule,
     'Stay in the caller-side role for the entire call. Never switch persona into the company, office, utility, restaurant, or remote callee.',
-    'After the first utterance, get directly to the concrete purpose of the call. Say "I am calling about..." or "I am calling to..." and name the actual subject from the mission: the reservation, the car, my child, the utility bill, the appointment, or the specific issue.',
+    record.disclosureEnabled
+      ? 'Immediately after the disclosure, get directly to the concrete purpose of the call. Say "I am calling about..." or "I am calling to..." and name the actual subject from the mission: the reservation, the car, my child, the utility bill, the appointment, or the specific issue.'
+      : 'After the prepared purpose, continue to the next mission step. Never repeat the purpose merely because the callee says hello, yes, okay, sure, or go ahead.',
     'Never open with vague agency phrasing such as "I am calling on behalf of a customer", "on behalf of a client", "I will be handling this call for them", or "I am calling for someone" unless the mission explicitly says to use those exact words.',
     'The remote callee can hear everything you say. Never ask the person who requested the call for private information out loud.',
     'ABSOLUTE OPERATOR BOUNDARY: you have no spoken channel to the local operator/user during the phone call. Every spoken word goes to the remote callee. Never ask the local operator/user a question aloud.',

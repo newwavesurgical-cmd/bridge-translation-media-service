@@ -56,16 +56,9 @@ export function buildAgentCallTwiMl(options: BuildAgentCallTwiMlOptions): string
   }
 
   const response = new twiml.VoiceResponse();
-  if (options.agentEngine === 'gpt-live-1') {
-    // Exact, application-controlled opener. GPT-Live begins only after these
-    // blocks finish, so background noise cannot interrupt or skip them.
-    const language = twilioSayLanguage(options.languageLock ?? 'English') as 'en-US';
-    const voice = protectedOpeningVoice(language, options.voice);
-    const firstUtterance = normalizeIntroText(options.firstUtterance);
-    const spokenPurpose = normalizeIntroText(options.spokenPurpose);
-    if (firstUtterance) response.say({ language, voice }, firstUtterance);
-    if (spokenPurpose) response.say({ language, voice }, spokenPurpose);
-  }
+  // Keep the Twilio leg silent. Both GPT-Live and the standard Realtime
+  // engine own their audible opening, so the callee never hears a second TTS
+  // voice or duplicated purpose before the media stream connects.
   const connect = response.connect();
   const stream = connect.stream({
     url: agentCallTwilioStreamUrl(options.config)
@@ -74,26 +67,6 @@ export function buildAgentCallTwiMl(options: BuildAgentCallTwiMlOptions): string
   stream.parameter({ name: 'streamToken', value: makeStreamToken(options.config.BRIDGE_MEDIA_SHARED_SECRET, options.sessionId) });
 
   return response.toString();
-}
-
-/** Use a production neural voice for the protected, non-interruptible opener. */
-type ProtectedOpeningVoice =
-  | 'Polly.Ruth-Neural'
-  | 'Polly.Matthew-Neural'
-  | 'Polly.Lucia-Neural'
-  | 'Polly.Sergio-Neural'
-  | 'Polly.Camila-Neural'
-  | 'Polly.Thiago-Neural'
-  | 'woman'
-  | 'man';
-
-export function protectedOpeningVoice(language: string, requestedVoice?: string): ProtectedOpeningVoice {
-  const feminine = new Set(['coral', 'sage', 'shimmer', 'nova', 'alloy', 'gleam', 'quartz', 'willow', 'delta']);
-  const isFeminine = feminine.has((requestedVoice ?? '').trim().toLowerCase());
-  if (language === 'en-US') return isFeminine ? 'Polly.Ruth-Neural' : 'Polly.Matthew-Neural';
-  if (language === 'es-ES') return isFeminine ? 'Polly.Lucia-Neural' : 'Polly.Sergio-Neural';
-  if (language === 'pt-BR') return isFeminine ? 'Polly.Camila-Neural' : 'Polly.Thiago-Neural';
-  return isFeminine ? 'woman' : 'man';
 }
 
 export function agentCallTwilioStreamUrl(config: AppConfig): string {

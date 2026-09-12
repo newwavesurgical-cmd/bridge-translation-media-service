@@ -84,7 +84,7 @@ describe('agent call TwiML', () => {
     expect(xml).toContain('<Connect>');
   });
 
-  it('plays the exact protected disclosure and purpose before GPT-Live connects', () => {
+  it('keeps GPT-Live TwiML silent so the selected Live voice owns the whole opening', () => {
     const disclosure = "I'm not a telemarketer. I'm using a translator app.";
     const purpose = 'I am calling to confirm the appointment time.';
     const xml = buildAgentCallTwiMl({
@@ -97,14 +97,13 @@ describe('agent call TwiML', () => {
       voice: 'echo'
     });
 
-    expect(xml.indexOf(disclosure)).toBeGreaterThan(-1);
-    expect(xml.indexOf(disclosure)).toBeLessThan(xml.indexOf(purpose));
-    expect(xml.indexOf(purpose)).toBeLessThan(xml.indexOf('<Connect>'));
-    expect(xml.match(/<Say/g)).toHaveLength(2);
-    expect(xml.match(/voice="Polly.Matthew-Neural"/g)).toHaveLength(2);
+    expect(xml).not.toContain(disclosure);
+    expect(xml).not.toContain(purpose);
+    expect(xml).not.toContain('<Say');
+    expect(xml).toContain('<Connect>');
   });
 
-  it('keeps the protected opening voice aligned with the selected female voice', () => {
+  it('does not add a second Twilio voice for a selected female GPT-Live voice', () => {
     const xml = buildAgentCallTwiMl({
       config,
       sessionId: 'agentcall_live_female',
@@ -114,6 +113,7 @@ describe('agent call TwiML', () => {
       voice: 'coral'
     });
 
-    expect(xml).toContain('voice="Polly.Ruth-Neural"');
+    expect(xml).not.toContain('<Say');
+    expect(xml).not.toContain('Polly.');
   });
 });
