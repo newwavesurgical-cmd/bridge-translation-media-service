@@ -133,6 +133,9 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('ABSOLUTE OPERATOR BOUNDARY');
     expect(instructions).toContain('Caller-side facts include patient or child names');
     expect(instructions).toContain('Treat the Mission section as your working call memory');
+    expect(instructions).toContain('SINGLE ACTIVE MISSION BOUNDARY');
+    expect(instructions).toContain('Never import or continue a subject, identity, business, warranty, offer, or storyline');
+    expect(instructions).toContain('Never invent that you are from a team, support department, company, or prior inquiry');
     expect(instructions).toContain('For symptom or medical-context questions');
     expect(instructions).toContain('use every relevant symptom');
     expect(instructions).toContain('Do not treat a known relationship or caller category as missing information');

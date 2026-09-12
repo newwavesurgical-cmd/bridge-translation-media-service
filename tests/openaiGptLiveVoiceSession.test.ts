@@ -101,6 +101,38 @@ describe('GPT-Live voice session', () => {
     expect(instructions).toContain('Backchannel policy:');
     expect(instructions).toContain('Interruption policy:');
     expect(instructions).toContain('Delegate to the backend when:');
+    expect(instructions).toContain('Single active mission:');
+    expect(instructions).toContain('Never borrow a subject, identity, business, warranty, offer, or scenario');
+    expect(instructions).toContain('Mission: LANGUAGE LOCK: Speak only English. Mission facts.');
+  });
+
+  it('gives the fast voice layer the active mission without replaying the completed opener contract', () => {
+    const instructions = String(
+      buildGptLiveSessionStart({
+        liveModel: 'gpt-live-1',
+        backendModel: 'gpt-5.6-luna',
+        instructions: [
+          'You are a live outbound phone-call voice agent.',
+          'Caller identity: Alex. Use this only if asked.',
+          'Remote callee/contact: Pamela.',
+          'Your first spoken words must be exactly: "Protected opener."',
+          'Mission:',
+          '=== MISSION (operator brief) ===',
+          'Call Pamela to discuss her move to North Carolina.',
+          '=== END MISSION ===',
+          '=== GENERIC EXAMPLE ===',
+          'Secret unrelated appliance warranty example.'
+        ].join('\n'),
+        voice: 'echo'
+      }).instructions
+    );
+
+    expect(instructions).toContain('Caller identity: Alex');
+    expect(instructions).toContain('Remote callee/contact: Pamela');
+    expect(instructions).toContain('Mission: Call Pamela to discuss her move to North Carolina.');
+    expect(instructions).not.toContain('Your first spoken words must be exactly: "Protected opener."');
+    expect(instructions).not.toContain('Secret unrelated appliance warranty example.');
+    expect(instructions).toContain('Never invent vague framing such as a team the callee contacted');
   });
 
   it('buffers callee audio until the protected TwiML opener boundary is confirmed', () => {
