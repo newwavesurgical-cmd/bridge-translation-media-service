@@ -213,6 +213,50 @@ describe('AgentCallRegistry', () => {
     });
   });
 
+  it('latches the real implicit day proposal until the operator explicitly resolves it', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Find out if the car is available and schedule a time to come see it.',
+      languageLock: 'English',
+      agentEngine: 'gpt-live-1'
+    });
+    const suppressActiveOutput = vi.fn();
+    const injectInstruction = vi.fn();
+    const mutable = session as unknown as {
+      agent: {
+        suppressActiveOutput: (reason: string) => void;
+        injectInstruction: (text: string, semanticControl?: string) => void;
+      };
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput, injectInstruction };
+
+    mutable.considerOperatorQuestion('Yeah, it sure would. Um, Wednesday would be great');
+
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: {
+        text: 'Yeah, it sure would. Um, Wednesday would be great',
+        kind: 'commitment',
+        blocking: true
+      },
+      counters: {
+        operatorQuestionsDetected: 1,
+        operatorQuestionsBlocked: 1,
+        operatorQuestionsResolved: 0
+      }
+    });
+    expect(suppressActiveOutput).toHaveBeenCalledTimes(1);
+
+    await session.receiveControl({ control: 'one_moment' });
+    expect(session.diagnostics().pendingOperatorQuestion).not.toBeNull();
+
+    await session.receiveControl({ text: 'Wednesday does not work. Ask whether Thursday is available.' });
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: null,
+      counters: { operatorQuestionsResolved: 1 }
+    });
+  });
+
   it('replaces an old unresolved alert when the callee asks a new blocking question', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

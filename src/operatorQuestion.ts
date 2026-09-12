@@ -17,7 +17,13 @@ const SPANISH_QUESTION_START =
   /^[¿\s]*(?:qué|que|cómo|como|cuál|cual|cuáles|cuando|cuándo|cuánto|cuanto|dónde|donde|de dónde|quién|quien|por qué|para qué|es|está|esta|están|tiene|tienen|puede|podría|podria|hay|me puede|me podría|le puedo|se encuentra|sería|seria|desea|quiere)\b/i;
 
 const SCHEDULING =
-  /\b(?:appointment|schedule|scheduling|book|booking|reservation|available|availability|days?|dates?|times?|today|tomorrow|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|a\.?m\.?|p\.?m\.?|cita|agenda|agendar|programar|reservar|disponible|disponibilidad|días?|dias?|fechas?|horas?|hoy|mañana|manana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/i;
+  /\b(?:appointment|schedule|scheduling|book|booking|reservation|meet|meeting|visit|showing|test drive|available|availability|days?|dates?|times?|today|tomorrow|tonight|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|a\.?m\.?|p\.?m\.?|cita|agenda|agendar|programar|reservar|reunión|reunion|visita|disponible|disponibilidad|días?|dias?|fechas?|horas?|hoy|mañana|manana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/i;
+
+const SCHEDULING_CONTEXT =
+  /\b(?:appointment|schedule|scheduling|book|booking|reservation|meet|meeting|visit|showing|test drive|come (?:see|by|in)|stop by|pick ?up|cita|agenda|agendar|programar|reservar|reunión|reunion|visita|venir|pasar|recoger)\b/i;
+
+const CONCRETE_SCHEDULING_SLOT =
+  /(?:\b(?:today|tomorrow|tonight|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|hoy|mañana|manana|esta noche|por la mañana|por la manana|por la tarde|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b|\b(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?::\s*\d{2})?\s*(?:a\s*\.?\s*m|p\s*\.?\s*m)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b)/i;
 
 const COMMITMENT =
   /\b(?:accept|agree|approve|authorize|authorization|consent|confirm|commit|cancel|reschedule|purchase|order|reserve|price|cost|fee|rate|payment|are you sure|works? for you|okay with you|acept|acepta|aprobar|autorizar|autorización|autorizacion|consentimiento|confirmar|confirma|segur[oa]|comprometer|cancelar|reprogramar|comprar|pedido|reservar|precio|costo|tarifa|pago|le sirve|está bien|esta bien)\b/i;
@@ -52,7 +58,7 @@ function looksLikeSchedulingProposal(text: string): boolean {
   if (!SCHEDULING.test(text)) return false;
   return (
     CHOICE.test(text) ||
-    /\b(?:can we|could we|would .* work|does .* work|how about|what about|we have|we can do|next\s+(?:week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|podemos|le queda|qué tal|que tal|tenemos)\b/i.test(
+    /\b(?:can we|could we|would (?:be|work|do|fit|suit)|does .* work|works? for|is (?:great|good|fine|okay|ok)|sounds? (?:great|good|fine|okay|ok)|let'?s do|how about|what about|we have|i have|we can do|i can do|next\s+(?:week|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|podemos|estaría bien|estaria bien|sería bueno|seria bueno|le queda|le sirve|qué tal|que tal|tenemos)\b/i.test(
       text,
     )
   );
@@ -75,18 +81,25 @@ export function classifyOperatorQuestion(
   if (!core || NON_ACTIONABLE.test(core)) return null;
 
   const schedulingProposal = looksLikeSchedulingProposal(core);
+  const schedulingContext = SCHEDULING_CONTEXT.test(missionContext);
+  const concreteSchedulingSlot = CONCRETE_SCHEDULING_SLOT.test(core);
   const question = looksQuestionLike(core);
   const schedulingQuestion =
     question &&
-    /\b(?:what|which)\s+(?:days?|dates?|times?)|\bwhen\b.*\b(?:come|schedule|book|available)|\b(?:can|could)\s+(?:you|we)\s+(?:come|do|schedule|book)|\b(?:are you|is .*?)\s+available|\b(?:qué|que|cuál|cual)\s+(?:día|dia|fecha|hora)|\bcuándo\b.*\b(?:venir|agendar|programar|reservar)|\b(?:puede|podemos)\b.*\b(?:venir|agendar|programar|reservar)|\b(?:está|esta)\b.*\bdisponible/i.test(
+    /\b(?:what|which)\s+(?:days?|dates?|times?)|\bwhen\b.*\b(?:come|schedule|book|meet|meeting|visit|available)|\b(?:can|could)\s+(?:you|we)\s+(?:come|do|schedule|book|meet|visit)|\b(?:are you|is .*?)\s+available|\b(?:qué|que|cuál|cual)\s+(?:día|dia|fecha|hora)|\bcuándo\b.*\b(?:venir|agendar|programar|reservar|reunir|visitar)|\b(?:puede|podemos)\b.*\b(?:venir|agendar|programar|reservar|reunir|visitar)|\b(?:está|esta)\b.*\bdisponible/i.test(
       core,
     );
+  // Live transcripts frequently deliver a proposed slot as a statement or a
+  // fragment ("Wednesday would be great", then "1 p.m."). Once the mission is
+  // a scheduling mission, a concrete day/date/time is itself a decision that
+  // requires operator approval even without question punctuation.
+  const schedulingDecision = concreteSchedulingSlot && schedulingContext;
   const choice = CHOICE.test(core) && (question || schedulingProposal || COMMITMENT.test(core));
-  const commitment = COMMITMENT.test(core) || schedulingProposal || schedulingQuestion;
+  const commitment = COMMITMENT.test(core) || schedulingProposal || schedulingQuestion || schedulingDecision;
   const callerFactQuestion = CALLER_FACT.test(core) && question;
   const missingCallerFact = callerFactQuestion && !missionContainsCallerFact(core, missionContext);
 
-  if (!question && !schedulingProposal && !choice) return null;
+  if (!question && !schedulingProposal && !schedulingDecision && !choice) return null;
 
   if (choice) {
     return {

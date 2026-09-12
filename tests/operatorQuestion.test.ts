@@ -23,6 +23,47 @@ describe('operator question classifier', () => {
     });
   });
 
+  it('blocks the implicit day and bare time from the real car-showing exchange', () => {
+    const mission = 'Find out if the car is available and schedule a time to come see it.';
+
+    expect(classifyOperatorQuestion('Yeah, it sure would. Um, Wednesday', mission)).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+    expect(classifyOperatorQuestion('Yeah, it sure would. Um, Wednesday would be great', mission)).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+    expect(classifyOperatorQuestion('Uh. 1 p.m.', mission)).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+  });
+
+  it('blocks direct meeting availability questions', () => {
+    expect(classifyOperatorQuestion('When do you want to do the meeting?')).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+    expect(classifyOperatorQuestion('Are you available on Wednesday?')).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+  });
+
+  it('blocks Spanish day and time proposals in a scheduling mission', () => {
+    const mission = 'Llama para agendar una reunión.';
+
+    expect(classifyOperatorQuestion('El miércoles estaría bien.', mission)).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+    expect(classifyOperatorQuestion('A la 1 p. m.', mission)).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+  });
+
   it('blocks a confirmation challenge even when twelve is transcribed as a word', () => {
     expect(classifyOperatorQuestion('Um, are you sure you can do twelve')).toMatchObject({
       kind: 'commitment',
@@ -53,6 +94,10 @@ describe('operator question classifier', () => {
   it('ignores ordinary statements and acknowledgements', () => {
     expect(classifyOperatorQuestion('That sounds good.')).toBeNull();
     expect(classifyOperatorQuestion('Okay.')).toBeNull();
+  });
+
+  it('does not treat product availability as a scheduling authorization', () => {
+    expect(classifyOperatorQuestion('It will be available Wednesday.', 'Ask whether the car is available.')).toBeNull();
   });
 
   it('strips repeated English and Spanish fillers', () => {
