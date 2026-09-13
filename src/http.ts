@@ -139,7 +139,12 @@ const agentControlSchema = z.object({
   control: z.enum(contextualMicroInterventions).optional(),
   text: z.string().max(2000).optional(),
   note: z.string().max(2000).optional(),
-  kind: z.string().max(80).optional()
+  kind: z.string().max(80).optional(),
+  // Current cockpit wire metadata. Keep this separate from `control` so the
+  // bridge can improve delivery/fallback without changing the instruction
+  // wording of the short buttons that already works well.
+  semantic_control: z.string().max(80).nullable().optional(),
+  microId: z.string().max(80).nullable().optional()
 });
 
 const dtmfSchema = z.object({

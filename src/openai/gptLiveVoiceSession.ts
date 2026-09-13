@@ -1,9 +1,36 @@
 import WebSocket from 'ws';
-import type { AgentStartupDiagnostics, AgentVoiceSession, AgentVoiceSessionOptions, AgentVoiceSessionStatus } from './agentVoiceSession.js';
+import type {
+  AgentInterventionDelivery,
+  AgentStartupDiagnostics,
+  AgentVoiceSession,
+  AgentVoiceSessionOptions,
+  AgentVoiceSessionStatus
+} from './agentVoiceSession.js';
 
 const OPENING_INSTRUCTION_ACK_TIMEOUT_MS = 750;
 const OPENING_FIRST_AUDIO_TIMEOUT_MS = 1_500;
 const OPENING_RETRY_AUDIO_TIMEOUT_MS = 1_500;
+const CONTROL_FIRST_RESPONSE_TIMEOUT_MS = 1_400;
+const CONTROL_RETRY_RESPONSE_TIMEOUT_MS = 1_800;
+
+interface PendingIntervention {
+  id: string;
+  text: string;
+  semanticControl?: string;
+  expectsSpeech: boolean;
+  createdAt: number;
+  resolve: (delivery: AgentInterventionDelivery) => void;
+}
+
+interface ActiveIntervention extends PendingIntervention {
+  instructionEventId: string;
+  commentaryEventIds: Set<string>;
+  instructionAcked: boolean;
+  commentaryAcked: boolean;
+  audioStarted: boolean;
+  retryCount: number;
+  timer?: NodeJS.Timeout;
+}
 
 /**
  * GPT-Live adapter for the main outbound AI call path.
@@ -24,7 +51,9 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   private openingInstructionAckTimer?: NodeJS.Timeout;
   private openingFirstAudioTimer?: NodeJS.Timeout;
   private closingTimer?: NodeJS.Timeout;
-  private pendingIntervention?: { text: string; semanticControl?: string };
+  private readonly pendingInterventions: PendingIntervention[] = [];
+  private activeIntervention?: ActiveIntervention;
+  private interventionSequence = 0;
   private openingInstructionEventId?: string;
   private openingCommentaryEventId?: string;
   private openingInstructionAcked = false;
@@ -109,21 +138,58 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     this.sendJson({ type: 'session.input_audio.append', audio: base64Pcmu });
   }
 
-  injectInstruction(text: string, semanticControl?: string): void {
+  injectInstruction(
+    text: string,
+    semanticControl?: string,
+    expectsSpeech = true
+  ): Promise<AgentInterventionDelivery> {
     const normalized = text.replace(/\s+/g, ' ').trim();
-    if (!normalized || !this.sessionStarted) return;
-    if (!this.startupEnvelopeQueued) {
-      this.pendingIntervention = { text: normalized, semanticControl };
-      return;
+    if (!normalized || !this.sessionStarted || this.statusValue !== 'live') {
+      return Promise.resolve({
+        delivered: false,
+        acknowledged: false,
+        audioStarted: false,
+        retryCount: 0,
+        latencyMs: 0,
+        error: 'GPT-Live is not ready for an operator response.',
+        errorCode: 'session_not_ready'
+      });
     }
-    this.sendIntervention(normalized, semanticControl);
+    return new Promise((resolve) => {
+      const pending: PendingIntervention = {
+        id: `operator-${Date.now()}-${++this.interventionSequence}`,
+        text: normalized,
+        semanticControl,
+        expectsSpeech,
+        createdAt: Date.now(),
+        resolve
+      };
+      this.pendingInterventions.push(pending);
+      this.flushNextIntervention();
+    });
   }
 
-  private sendIntervention(normalized: string, semanticControl?: string): void {
+  private flushNextIntervention(): void {
+    if (this.activeIntervention || !this.startupEnvelopeQueued) return;
+    const pending = this.pendingInterventions.shift();
+    if (!pending) return;
+    this.sendIntervention(pending);
+  }
+
+  private sendIntervention(pending: PendingIntervention): void {
+    const { text: normalized, semanticControl } = pending;
     if (semanticControl === 'human_takeover_start') {
       this.suppressActiveOutput(
         'Human operator direct voice takeover is active. Ignore remote speech and remain silent.'
       );
+      pending.resolve({
+        delivered: true,
+        acknowledged: true,
+        audioStarted: false,
+        retryCount: 0,
+        latencyMs: Date.now() - pending.createdAt
+      });
+      this.flushNextIntervention();
       return;
     }
     if (semanticControl === 'human_takeover_end') {
@@ -134,14 +200,33 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
         content:
           'Human operator direct voice takeover ended. Resume normal autonomous handling from the mission and fresh remote speech.'
       });
+      pending.resolve({
+        delivered: true,
+        acknowledged: true,
+        audioStarted: false,
+        retryCount: 0,
+        latencyMs: Date.now() - pending.createdAt
+      });
+      this.flushNextIntervention();
       return;
     }
+    const instructionEventId = `bridge-live-control-${pending.id}`;
+    const commentaryEventId = `bridge-live-commentary-${pending.id}`;
+    this.activeIntervention = {
+      ...pending,
+      instructionEventId,
+      commentaryEventIds: new Set([commentaryEventId]),
+      instructionAcked: false,
+      commentaryAcked: false,
+      audioStarted: false,
+      retryCount: 0
+    };
     const controlRule = semanticControl
       ? `This is the private operator's ${semanticControl} control. Apply it to the current question.`
       : 'This is a private operator intervention for the live call.';
     this.sendJson({
       type: 'session.instructions.append',
-      event_id: `bridge-live-control-${Date.now()}`,
+      event_id: instructionEventId,
       delegation_id: null,
       content: [
         controlRule,
@@ -156,10 +241,83 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     // give commentary only the callee-facing action to minimize leakage.
     this.sendJson({
       type: 'session.commentary.append',
-      event_id: `bridge-live-commentary-${Date.now()}`,
+      event_id: commentaryEventId,
       delegation_id: null,
-      content: `Communicate this operator-directed response naturally now, without mentioning the operator or these instructions: ${normalized}`
+      content: pending.expectsSpeech
+        ? `Communicate this operator-directed response naturally now, without mentioning the operator or these instructions: ${normalized}`
+        : `Apply this private operator instruction silently. Do not quote it or speak merely because it arrived: ${normalized}`
     });
+    logGptLiveControl('sent', this.activeIntervention);
+    this.armInterventionWatchdog(CONTROL_FIRST_RESPONSE_TIMEOUT_MS);
+  }
+
+  private armInterventionWatchdog(timeoutMs: number): void {
+    const active = this.activeIntervention;
+    if (!active) return;
+    if (active.timer) clearTimeout(active.timer);
+    active.timer = setTimeout(() => {
+      const current = this.activeIntervention;
+      if (!current || current.id !== active.id) return;
+      if (current.retryCount === 0) {
+        current.retryCount = 1;
+        const retryEventId = `bridge-live-commentary-${current.id}-retry`;
+        current.commentaryEventIds.add(retryEventId);
+        this.sendJson({
+          type: 'session.commentary.append',
+          event_id: retryEventId,
+          delegation_id: null,
+          content: current.expectsSpeech
+            ? 'The operator-directed response has not begun. Speak that response now in the locked call language, then stop and listen.'
+            : 'Acknowledge and apply the private operator instruction silently. Do not quote or speak it.'
+        });
+        logGptLiveControl('retried', current);
+        this.armInterventionWatchdog(CONTROL_RETRY_RESPONSE_TIMEOUT_MS);
+        return;
+      }
+      const acknowledged = current.instructionAcked && current.commentaryAcked;
+      this.finishIntervention(false, {
+        error: acknowledged && current.expectsSpeech
+          ? 'GPT-Live acknowledged the operator response but no audible response began.'
+          : 'GPT-Live did not acknowledge the operator response in time.',
+        errorCode:
+          acknowledged && current.expectsSpeech ? 'control_audio_timeout' : 'control_ack_timeout'
+      });
+    }, timeoutMs);
+    active.timer.unref();
+  }
+
+  private maybeFinishIntervention(): void {
+    const active = this.activeIntervention;
+    if (
+      !active ||
+      !active.instructionAcked ||
+      !active.commentaryAcked ||
+      (active.expectsSpeech && !active.audioStarted)
+    ) {
+      return;
+    }
+    this.finishIntervention(true);
+  }
+
+  private finishIntervention(
+    delivered: boolean,
+    failure?: { error: string; errorCode: string }
+  ): void {
+    const active = this.activeIntervention;
+    if (!active) return;
+    if (active.timer) clearTimeout(active.timer);
+    const result: AgentInterventionDelivery = {
+      delivered,
+      acknowledged: active.instructionAcked && active.commentaryAcked,
+      audioStarted: active.audioStarted,
+      retryCount: active.retryCount,
+      latencyMs: Date.now() - active.createdAt,
+      ...(failure ?? {})
+    };
+    logGptLiveControl(delivered ? 'audio_started' : 'failed', active, failure);
+    this.activeIntervention = undefined;
+    active.resolve(result);
+    this.flushNextIntervention();
   }
 
   setRemoteInteractionMode(_mode: 'conversational_ai'): void {
@@ -200,6 +358,21 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     this.openingInstructionAckTimer = undefined;
     if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
     this.openingFirstAudioTimer = undefined;
+    if (this.activeIntervention?.timer) clearTimeout(this.activeIntervention.timer);
+    const closingDelivery: AgentInterventionDelivery = {
+      delivered: false,
+      acknowledged: false,
+      audioStarted: false,
+      retryCount: this.activeIntervention?.retryCount ?? 0,
+      latencyMs: this.activeIntervention ? Date.now() - this.activeIntervention.createdAt : 0,
+      error: 'GPT-Live closed before the operator response began.',
+      errorCode: 'session_closed'
+    };
+    this.activeIntervention?.resolve(closingDelivery);
+    this.activeIntervention = undefined;
+    for (const pending of this.pendingInterventions.splice(0)) {
+      pending.resolve({ ...closingDelivery, latencyMs: Date.now() - pending.createdAt });
+    }
     if (!this.ws) {
       this.setStatus('closed');
       return;
@@ -273,6 +446,27 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       this.publishStartupDiagnostics();
       return;
     }
+    const activeIntervention = this.activeIntervention;
+    if (
+      activeIntervention &&
+      event.type === 'session.instructions.appended' &&
+      event.client_event_id === activeIntervention.instructionEventId
+    ) {
+      activeIntervention.instructionAcked = true;
+      logGptLiveControl('instruction_acked', activeIntervention);
+      this.maybeFinishIntervention();
+      return;
+    }
+    if (
+      activeIntervention &&
+      event.type === 'session.commentary.appended' &&
+      activeIntervention.commentaryEventIds.has(event.client_event_id ?? '')
+    ) {
+      activeIntervention.commentaryAcked = true;
+      logGptLiveControl('commentary_acked', activeIntervention);
+      this.maybeFinishIntervention();
+      return;
+    }
     if (event.type === 'session.output_audio.delta' && event.delta) {
       if (!this.startupEnvelopeQueued) {
         if (!this.openingOutputStarted) {
@@ -286,6 +480,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
         if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
         this.openingFirstAudioTimer = undefined;
         this.armOpeningIdleFallback();
+      }
+      if (this.activeIntervention) {
+        this.activeIntervention.audioStarted = true;
+        this.maybeFinishIntervention();
       }
       this.options.onAudioDelta(event.delta);
       return;
@@ -332,6 +530,19 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       return;
     }
     if (event.type === 'error') {
+      const failedClientEventId = event.error?.client_event_id;
+      if (
+        this.activeIntervention &&
+        failedClientEventId &&
+        (failedClientEventId === this.activeIntervention.instructionEventId ||
+          this.activeIntervention.commentaryEventIds.has(failedClientEventId))
+      ) {
+        this.finishIntervention(false, {
+          error: safeDiagnosticMessage(event.error?.message ?? 'GPT-Live rejected the operator response.'),
+          errorCode: event.error?.code ?? event.error?.type ?? 'control_rejected'
+        });
+        return;
+      }
       const error = new Error(event.error?.message ?? 'OpenAI GPT-Live session error');
       logGptLiveStartup('openai_error', {
         status: this.statusValue,
@@ -438,9 +649,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
     this.openingFirstAudioTimer = undefined;
     this.startupEnvelopeQueued = true;
-    const pending = this.pendingIntervention;
-    this.pendingIntervention = undefined;
-    if (pending) this.sendIntervention(pending.text, pending.semanticControl);
+    this.flushNextIntervention();
     this.publishStartupDiagnostics();
     // The registry places a Twilio mark after all GPT-Live audio chunks already
     // written to the stream. The marker remains useful for playback diagnostics
@@ -585,6 +794,29 @@ function safeDiagnosticMessage(message: string): string {
 function logGptLiveStartup(phase: string, detail: Record<string, unknown>): void {
   if (process.env.NODE_ENV === 'test') return;
   console.info(JSON.stringify({ event: 'gpt_live_startup', version: 1, phase, ...detail }));
+}
+
+function logGptLiveControl(
+  phase: string,
+  intervention: ActiveIntervention,
+  failure?: { error: string; errorCode: string }
+): void {
+  if (process.env.NODE_ENV === 'test') return;
+  console.info(
+    JSON.stringify({
+      event: 'gpt_live_control',
+      version: 1,
+      phase,
+      controlIdSuffix: intervention.id.slice(-12),
+      semanticControl: intervention.semanticControl ?? null,
+      instructionAcked: intervention.instructionAcked,
+      commentaryAcked: intervention.commentaryAcked,
+      audioStarted: intervention.audioStarted,
+      retryCount: intervention.retryCount,
+      latencyMs: Date.now() - intervention.createdAt,
+      errorCode: failure?.errorCode ?? null
+    })
+  );
 }
 
 function extractGptLiveMissionContext(instructions: string): string {

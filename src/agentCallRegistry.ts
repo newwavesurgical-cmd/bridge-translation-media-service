@@ -11,6 +11,7 @@ import {
 import { decodeMuLaw } from './audio/mulaw.js';
 import {
   OpenAiAgentVoiceSession,
+  type AgentInterventionDelivery,
   type AgentStartupDiagnostics,
   type AgentVoiceSession
 } from './openai/agentVoiceSession.js';
@@ -99,6 +100,9 @@ export interface AgentControlRequest {
   note?: string;
   /** Distinct wire intent for the cockpit's callee-facing exact-words box. */
   kind?: string;
+  /** Cockpit semantic metadata used for confirmation/fallback only. */
+  semantic_control?: string | null;
+  microId?: string | null;
 }
 
 export type AgentCallState = 'created' | 'calling' | 'twilio-connected' | 'live' | 'ended' | 'error';
@@ -126,6 +130,12 @@ interface AgentControlEntry {
   control?: ContextualMicroIntervention;
   text: string;
   delivered: boolean;
+  acknowledged?: boolean;
+  audioStarted?: boolean;
+  fallbackUsed?: boolean;
+  retryCount?: number;
+  latencyMs?: number;
+  errorCode?: string;
   error?: string;
 }
 
@@ -235,6 +245,10 @@ export interface AgentCallRecord {
     agentTranscriptDeltas: number;
     controlsReceived: number;
     controlsDelivered: number;
+    controlsAcknowledged: number;
+    controlsAudioStarted: number;
+    controlsFallbackUsed: number;
+    controlsFailed: number;
     dtmfSent: number;
     agentEchoAudioSuppressed: number;
     bargeInClears: number;
@@ -330,6 +344,10 @@ export class AgentCallRegistry {
         agentTranscriptDeltas: 0,
         controlsReceived: 0,
         controlsDelivered: 0,
+        controlsAcknowledged: 0,
+        controlsAudioStarted: 0,
+        controlsFallbackUsed: 0,
+        controlsFailed: 0,
         dtmfSent: 0,
         agentEchoAudioSuppressed: 0,
         bargeInClears: 0,
@@ -415,6 +433,7 @@ export class AgentCallSession {
   private operatorQuestionTimer?: NodeJS.Timeout;
   private operatorQuestionSequence = 0;
   private holdDeliveredForQuestionId?: string;
+  private operatorControlResponseActive = false;
 
   constructor(
     private readonly config: AppConfig,
@@ -656,6 +675,7 @@ export class AgentCallSession {
 
     if (request.kind === 'dismiss_pending_question') {
       this.lastOperatorDecisionAt = Date.now();
+      this.interruptOperatorDecisionHold();
       this.resolvePendingOperatorQuestion('operator_dismissed');
       entry.text = 'Dismissed pending operator question without sending speech to the callee.';
       entry.delivered = true;
@@ -665,9 +685,8 @@ export class AgentCallSession {
     }
 
     this.lastOperatorDecisionAt = Date.now();
-    if (controlResolvesPendingQuestion(request)) {
-      this.resolvePendingOperatorQuestion('operator_control');
-    }
+    const resolvesPendingQuestion = controlResolvesPendingQuestion(request);
+    if (this.record.pendingOperatorQuestion) this.interruptOperatorDecisionHold();
     this.emitTranscript('operator', operatorTranscriptText(request, text));
 
     // The cockpit labels force_say / human_say as exact words. Keep that
@@ -678,29 +697,122 @@ export class AgentCallSession {
       const exactText = normalizeOptional(request.text) ?? '';
       const outcome = await this.deliverVerbatimText(exactText);
       entry.delivered = outcome.ok;
-      if (!outcome.ok) entry.error = outcome.error;
-      if (entry.delivered) this.record.counters.controlsDelivered += 1;
+      entry.audioStarted = outcome.ok;
+      if (!outcome.ok) {
+        entry.error = outcome.error;
+        entry.errorCode = 'exact_speech_failed';
+        this.record.counters.controlsFailed += 1;
+      }
+      if (entry.delivered) {
+        this.record.counters.controlsDelivered += 1;
+        this.record.counters.controlsAudioStarted += 1;
+        if (resolvesPendingQuestion) this.resolvePendingOperatorQuestion('operator_control');
+      }
       this.touch();
       return entry;
     }
 
     if (request.control === 'end_politely') {
-      this.agent?.injectInstruction(text, request.control);
-      entry.delivered = Boolean(this.agent && this.record.state === 'live');
-      if (entry.delivered) {
-        this.record.counters.controlsDelivered += 1;
-      }
+      await this.deliverAgentControl(request, text, entry, resolvesPendingQuestion);
       setTimeout(() => void this.end('operator_end_politely'), 4000).unref();
       return entry;
     }
 
-    this.agent?.injectInstruction(text, request.control);
-    entry.delivered = Boolean(this.agent && this.record.state === 'live');
-    if (entry.delivered) {
-      this.record.counters.controlsDelivered += 1;
-    }
+    await this.deliverAgentControl(request, text, entry, resolvesPendingQuestion);
     this.touch();
     return entry;
+  }
+
+  private async deliverAgentControl(
+    request: AgentControlRequest,
+    instruction: string,
+    entry: AgentControlEntry,
+    resolvesPendingQuestion: boolean
+  ): Promise<void> {
+    if (!this.agent || this.record.state !== 'live') {
+      entry.error = 'The live agent session is not ready for an operator response.';
+      entry.errorCode = 'session_not_ready';
+      this.record.counters.controlsFailed += 1;
+      return;
+    }
+
+    this.operatorControlResponseActive = true;
+    let delivery: AgentInterventionDelivery | undefined;
+    try {
+      const result = this.agent.injectInstruction(
+        instruction,
+        request.control ?? semanticControlFromRequest(request) ?? request.kind,
+        operatorControlExpectsSpeech(request)
+      );
+      if (result && typeof (result as Promise<AgentInterventionDelivery>).then === 'function') {
+        delivery = await result;
+      }
+    } catch (error) {
+      delivery = {
+        delivered: false,
+        acknowledged: false,
+        audioStarted: false,
+        retryCount: 0,
+        latencyMs: 0,
+        error: error instanceof Error ? error.message : 'Operator response delivery failed.',
+        errorCode: 'control_delivery_error'
+      };
+    }
+
+    if (!delivery) {
+      // The legacy Realtime bridge has its own response/correction guard and
+      // does not yet expose GPT-Live-style append acknowledgments.
+      entry.delivered = true;
+      this.record.counters.controlsDelivered += 1;
+      if (resolvesPendingQuestion) this.resolvePendingOperatorQuestion('operator_control');
+      this.operatorControlResponseActive = false;
+      return;
+    }
+
+    entry.acknowledged = delivery.acknowledged;
+    entry.audioStarted = delivery.audioStarted;
+    entry.retryCount = delivery.retryCount;
+    entry.latencyMs = delivery.latencyMs;
+    entry.errorCode = delivery.errorCode;
+    if (delivery.acknowledged) this.record.counters.controlsAcknowledged += 1;
+    if (delivery.audioStarted) this.record.counters.controlsAudioStarted += 1;
+
+    if (delivery.delivered) {
+      entry.delivered = true;
+      this.record.counters.controlsDelivered += 1;
+      if (resolvesPendingQuestion) this.resolvePendingOperatorQuestion('operator_control');
+      this.operatorControlResponseActive = false;
+      return;
+    }
+
+    // A rejected or silent GPT-Live control must not freeze the call. Suppress
+    // any late model output and speak a concise, already-safe answer through
+    // deterministic TTS. The pending question remains visible until one of
+    // these two paths actually starts audible delivery.
+    this.operatorControlResponseActive = false;
+    if (!operatorControlExpectsSpeech(request)) {
+      entry.error = delivery.error ?? 'The private operator instruction was not acknowledged.';
+      entry.errorCode = delivery.errorCode ?? 'control_delivery_failed';
+      this.record.counters.controlsFailed += 1;
+      return;
+    }
+    const fallback = await this.deliverVerbatimText(
+      operatorFallbackSpokenText(request, this.record.languageLock),
+      () => this.record.state === 'live'
+    );
+    if (fallback.ok) {
+      entry.delivered = true;
+      entry.fallbackUsed = true;
+      entry.error = undefined;
+      this.record.counters.controlsDelivered += 1;
+      this.record.counters.controlsFallbackUsed += 1;
+      if (resolvesPendingQuestion) this.resolvePendingOperatorQuestion('operator_control');
+      return;
+    }
+
+    entry.error = delivery.error ?? fallback.error ?? 'Operator response was not delivered.';
+    entry.errorCode = delivery.errorCode ?? 'control_delivery_failed';
+    this.record.counters.controlsFailed += 1;
   }
 
   /**
@@ -710,7 +822,8 @@ export class AgentCallSession {
    */
   private async deliverVerbatimText(
     text: string,
-    shouldDeliver: () => boolean = () => true
+    shouldDeliver: () => boolean = () => true,
+    suppressAgent = true
   ): Promise<{ ok: boolean; error?: string }> {
     if (!this.twilioWs || !this.record.twilioStreamSid || this.record.state !== 'live') {
       return { ok: false, error: 'The live phone media stream is not ready for exact speech.' };
@@ -719,9 +832,11 @@ export class AgentCallSession {
     const generation = ++this.verbatimSpeechGeneration;
     this.verbatimSpeechActive = true;
     if (this.verbatimSpeechReleaseTimer) clearTimeout(this.verbatimSpeechReleaseTimer);
-    this.agent?.suppressActiveOutput(
-      'A deterministic operator-authored utterance is being played. Remain silent and wait for fresh remote speech after it finishes.'
-    );
+    if (suppressAgent) {
+      this.agent?.suppressActiveOutput(
+        'A deterministic operator-authored utterance is being played. Remain silent and wait for fresh remote speech after it finishes.'
+      );
+    }
     this.clearTwilioAudioForForcedSpeech();
 
     try {
@@ -1047,7 +1162,7 @@ export class AgentCallSession {
           this.record.counters.ivrAgentAudioSuppressed += 1;
           return;
         }
-        if (this.record.pendingOperatorQuestion?.blocking) {
+        if (this.record.pendingOperatorQuestion?.blocking && !this.operatorControlResponseActive) {
           return;
         }
         this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
@@ -1065,10 +1180,10 @@ export class AgentCallSession {
           this.record.counters.ivrAgentTranscriptSuppressed += 1;
           return;
         }
-        if (this.record.pendingOperatorQuestion?.blocking) {
+        if (this.record.pendingOperatorQuestion?.blocking && !this.operatorControlResponseActive) {
           return;
         }
-        if (this.record.pendingOperatorQuestion) {
+        if (this.record.pendingOperatorQuestion && !this.operatorControlResponseActive) {
           this.resolvePendingOperatorQuestion('mission_answered');
         }
         this.record.timings.firstAgentTranscriptAt ??= new Date().toISOString();
@@ -1365,13 +1480,22 @@ export class AgentCallSession {
     this.agent?.suppressActiveOutput?.(
       `Operator approval is required before answering this callee question: ${question.text}`
     );
-    this.clearTwilioAudioForForcedSpeech();
     if (this.holdDeliveredForQuestionId === question.id) return;
     this.holdDeliveredForQuestionId = question.id;
     void this.deliverVerbatimText(
       operatorDecisionHoldPhrase(this.record.languageLock),
-      () => this.record.pendingOperatorQuestion?.id === question.id
+      () => this.record.pendingOperatorQuestion?.id === question.id,
+      false
     );
+  }
+
+  private interruptOperatorDecisionHold(): void {
+    if (!this.verbatimSpeechActive && !this.verbatimSpeechReleaseTimer) return;
+    this.verbatimSpeechGeneration += 1;
+    this.verbatimSpeechActive = false;
+    if (this.verbatimSpeechReleaseTimer) clearTimeout(this.verbatimSpeechReleaseTimer);
+    this.verbatimSpeechReleaseTimer = undefined;
+    this.clearTwilioAudioForForcedSpeech();
   }
 
   private resolvePendingOperatorQuestion(
@@ -1644,16 +1768,42 @@ function questionsShareGrowingText(left: string, right: string): boolean {
 }
 
 function controlResolvesPendingQuestion(request: AgentControlRequest): boolean {
+  const semantic = semanticControlFromRequest(request);
+  if (
+    semantic &&
+    new Set(['one_moment', 'let_me_think', 'repeat_that', 'ask_for_clarification']).has(semantic)
+  ) {
+    return false;
+  }
+  if (request.kind === 'whisper_guidance' || request.kind === 'hold') return false;
   if (normalizeOptional(request.text ?? request.note)) return true;
   return Boolean(
-    request.control &&
+    semantic &&
       !new Set<ContextualMicroIntervention>([
         'one_moment',
         'let_me_think',
         'repeat_that',
         'ask_for_clarification'
-      ]).has(request.control)
+      ]).has(semantic as ContextualMicroIntervention)
   );
+}
+
+function semanticControlFromRequest(request: AgentControlRequest): string | undefined {
+  const semantic = normalizeOptional(
+    request.control ?? request.semantic_control ?? request.microId ?? undefined
+  );
+  if (semantic === 'ask_clarification') return 'ask_for_clarification';
+  return semantic;
+}
+
+function operatorControlExpectsSpeech(request: AgentControlRequest): boolean {
+  return !new Set([
+    'whisper_guidance',
+    'resume_hold',
+    'resume_autonomy',
+    'human_takeover_start',
+    'human_takeover_end'
+  ]).has(request.kind ?? '');
 }
 
 function operatorDecisionHoldPhrase(languageLock?: string): string {
@@ -1661,6 +1811,76 @@ function operatorDecisionHoldPhrase(languageLock?: string): string {
   if (language.includes('spanish') || language.startsWith('es')) return 'Un momento, por favor.';
   if (language.includes('portuguese') || language.startsWith('pt')) return 'Um momento, por favor.';
   return 'One moment, please.';
+}
+
+function operatorFallbackSpokenText(request: AgentControlRequest, languageLock?: string): string {
+  const supplied = normalizeOptional(request.text ?? request.note);
+  if (
+    supplied &&
+    (request.kind === 'force_say' ||
+      request.kind === 'human_say' ||
+      request.kind === 'value_relay')
+  ) {
+    return supplied;
+  }
+
+  const language = languageLock?.toLocaleLowerCase() ?? '';
+  const spanish = language.includes('spanish') || language.startsWith('es');
+  const portuguese = language.includes('portuguese') || language.startsWith('pt');
+  const english: Record<ContextualMicroIntervention, string> = {
+    yes: 'Yes, that works.',
+    no: 'No, that does not work.',
+    one_moment: 'One moment, please.',
+    let_me_think: 'Let me think about that for a moment.',
+    repeat_that: 'Could you please repeat that?',
+    ask_for_clarification: 'Could you please clarify that?',
+    earlier: 'Is there an earlier option?',
+    later: 'Is there a later option?',
+    today: 'Today works.',
+    tomorrow: 'Tomorrow works.',
+    accept: 'Yes, I accept that option.',
+    decline: 'No, thank you. I will decline that option.',
+    do_not_commit: 'I need to keep the options open for now.',
+    end_politely: 'Thank you for your help. Goodbye.'
+  };
+  const spanishText: Record<ContextualMicroIntervention, string> = {
+    yes: 'Sí, está bien.',
+    no: 'No, eso no funciona.',
+    one_moment: 'Un momento, por favor.',
+    let_me_think: 'Déjeme pensarlo un momento.',
+    repeat_that: '¿Podría repetirlo, por favor?',
+    ask_for_clarification: '¿Podría aclararlo, por favor?',
+    earlier: '¿Hay una opción más temprano?',
+    later: '¿Hay una opción más tarde?',
+    today: 'Hoy está bien.',
+    tomorrow: 'Mañana está bien.',
+    accept: 'Sí, acepto esa opción.',
+    decline: 'No, gracias. Rechazo esa opción.',
+    do_not_commit: 'Por ahora necesito mantener abiertas las opciones.',
+    end_politely: 'Gracias por su ayuda. Adiós.'
+  };
+  const portugueseText: Record<ContextualMicroIntervention, string> = {
+    yes: 'Sim, está bem.',
+    no: 'Não, isso não funciona.',
+    one_moment: 'Um momento, por favor.',
+    let_me_think: 'Deixe-me pensar um momento.',
+    repeat_that: 'Pode repetir, por favor?',
+    ask_for_clarification: 'Pode esclarecer, por favor?',
+    earlier: 'Há uma opção mais cedo?',
+    later: 'Há uma opção mais tarde?',
+    today: 'Hoje está bem.',
+    tomorrow: 'Amanhã está bem.',
+    accept: 'Sim, aceito essa opção.',
+    decline: 'Não, obrigado. Recuso essa opção.',
+    do_not_commit: 'Por enquanto, preciso manter as opções em aberto.',
+    end_politely: 'Obrigado pela ajuda. Até logo.'
+  };
+  const semantic = semanticControlFromRequest(request);
+  if (semantic && semantic in english) {
+    const control = semantic as ContextualMicroIntervention;
+    return portuguese ? portugueseText[control] : spanish ? spanishText[control] : english[control];
+  }
+  return supplied ?? operatorDecisionHoldPhrase(languageLock);
 }
 
 export function buildAgentInstructions(record: AgentCallRecord): string {

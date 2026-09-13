@@ -173,7 +173,15 @@ describe('AgentCallRegistry', () => {
       languageLock: 'English'
     });
     const suppressActiveOutput = vi.fn();
-    const injectInstruction = vi.fn();
+    const injectInstruction = vi.fn(() =>
+      Promise.resolve({
+        delivered: true,
+        acknowledged: true,
+        audioStarted: true,
+        retryCount: 0,
+        latencyMs: 25
+      })
+    );
     const mutable = session as unknown as {
       agent: {
         suppressActiveOutput: (reason: string) => void;
@@ -182,6 +190,7 @@ describe('AgentCallRegistry', () => {
       considerOperatorQuestion: (text: string) => void;
     };
     mutable.agent = { suppressActiveOutput, injectInstruction };
+    session.data.state = 'live';
 
     mutable.considerOperatorQuestion('Um, we have 12 p.m. or');
     const first = session.diagnostics().pendingOperatorQuestion as { id: string };
@@ -221,7 +230,15 @@ describe('AgentCallRegistry', () => {
       agentEngine: 'gpt-live-1'
     });
     const suppressActiveOutput = vi.fn();
-    const injectInstruction = vi.fn();
+    const injectInstruction = vi.fn(() =>
+      Promise.resolve({
+        delivered: true,
+        acknowledged: true,
+        audioStarted: true,
+        retryCount: 0,
+        latencyMs: 25
+      })
+    );
     const mutable = session as unknown as {
       agent: {
         suppressActiveOutput: (reason: string) => void;
@@ -230,6 +247,7 @@ describe('AgentCallRegistry', () => {
       considerOperatorQuestion: (text: string) => void;
     };
     mutable.agent = { suppressActiveOutput, injectInstruction };
+    session.data.state = 'live';
 
     mutable.considerOperatorQuestion('Yeah, it sure would. Um, Wednesday would be great');
 
@@ -254,6 +272,134 @@ describe('AgentCallRegistry', () => {
     expect(session.diagnostics()).toMatchObject({
       pendingOperatorQuestion: null,
       counters: { operatorQuestionsResolved: 1 }
+    });
+  });
+
+  it('keeps a blocking question pending until GPT-Live confirms response audio', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Schedule an appointment.',
+      languageLock: 'English',
+      agentEngine: 'gpt-live-1'
+    });
+    let confirmDelivery!: (delivery: {
+      delivered: boolean;
+      acknowledged: boolean;
+      audioStarted: boolean;
+      retryCount: number;
+      latencyMs: number;
+    }) => void;
+    const injectInstruction = vi.fn(
+      () =>
+        new Promise<{
+          delivered: boolean;
+          acknowledged: boolean;
+          audioStarted: boolean;
+          retryCount: number;
+          latencyMs: number;
+        }>((resolve) => {
+          confirmDelivery = resolve;
+        })
+    );
+    const mutable = session as unknown as {
+      agent: {
+        suppressActiveOutput: (reason: string) => void;
+        injectInstruction: typeof injectInstruction;
+      };
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: () => undefined, injectInstruction };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you do Wednesday at noon?');
+
+    const request = session.receiveControl({ control: 'yes' });
+    await Promise.resolve();
+    expect(session.diagnostics().pendingOperatorQuestion).not.toBeNull();
+
+    confirmDelivery({
+      delivered: true,
+      acknowledged: true,
+      audioStarted: true,
+      retryCount: 0,
+      latencyMs: 40
+    });
+    await expect(request).resolves.toMatchObject({
+      delivered: true,
+      acknowledged: true,
+      audioStarted: true
+    });
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: null,
+      counters: {
+        controlsAcknowledged: 1,
+        controlsAudioStarted: 1,
+        controlsDelivered: 1,
+        operatorQuestionsResolved: 1
+      }
+    });
+  });
+
+  it('falls back to deterministic speech when GPT-Live accepts no audible response', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Schedule an appointment.',
+      languageLock: 'English',
+      agentEngine: 'gpt-live-1'
+    });
+    const injectInstruction = vi.fn(() =>
+      Promise.resolve({
+        delivered: false,
+        acknowledged: true,
+        audioStarted: false,
+        retryCount: 1,
+        latencyMs: 3200,
+        error: 'No audio began.',
+        errorCode: 'control_audio_timeout'
+      })
+    );
+    const deliverVerbatimText = vi.fn(() => Promise.resolve({ ok: true }));
+    const mutable = session as unknown as {
+      agent: {
+        suppressActiveOutput: (reason: string) => void;
+        injectInstruction: typeof injectInstruction;
+      };
+      considerOperatorQuestion: (text: string) => void;
+      deliverVerbatimText: typeof deliverVerbatimText;
+    };
+    mutable.agent = { suppressActiveOutput: () => undefined, injectInstruction };
+    mutable.deliverVerbatimText = deliverVerbatimText;
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you do Wednesday at noon?');
+
+    const result = await session.receiveControl({
+      kind: 'contextual_micro_intervention',
+      semantic_control: 'yes',
+      text: 'Answer the remote party affirmatively in the locked language.'
+    });
+
+    expect(deliverVerbatimText).toHaveBeenCalledWith('Yes, that works.', expect.any(Function));
+    expect(injectInstruction).toHaveBeenCalledWith(
+      expect.any(String),
+      'yes',
+      true
+    );
+    expect(result).toMatchObject({
+      delivered: true,
+      acknowledged: true,
+      audioStarted: false,
+      fallbackUsed: true,
+      retryCount: 1,
+      errorCode: 'control_audio_timeout'
+    });
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: null,
+      counters: {
+        controlsAcknowledged: 1,
+        controlsFallbackUsed: 1,
+        controlsFailed: 0,
+        controlsDelivered: 1,
+        operatorQuestionsResolved: 1
+      }
     });
   });
 

@@ -23,12 +23,32 @@ export interface AgentVoiceSessionOptions {
   onError: (error: Error) => void;
 }
 
+/**
+ * Evidence that a private operator intervention actually reached the live
+ * voice session. A successful WebSocket write alone is not delivery proof:
+ * GPT-Live acknowledges each append separately and audible output can still
+ * fail to begin after the acknowledgment.
+ */
+export interface AgentInterventionDelivery {
+  delivered: boolean;
+  acknowledged: boolean;
+  audioStarted: boolean;
+  retryCount: number;
+  latencyMs: number;
+  error?: string;
+  errorCode?: string;
+}
+
 /** Common bridge contract implemented by the Realtime and GPT-Live engines. */
 export interface AgentVoiceSession {
   readonly status: AgentVoiceSessionStatus;
   connect(): void;
   appendPcmuBase64(base64Pcmu: string): void;
-  injectInstruction(text: string, semanticControl?: string): void;
+  injectInstruction(
+    text: string,
+    semanticControl?: string,
+    expectsSpeech?: boolean
+  ): void | Promise<AgentInterventionDelivery>;
   setRemoteInteractionMode(mode: 'conversational_ai'): void;
   confirmStartupEnvelopePlayback(): void;
   suppressActiveOutput(reason?: string): void;

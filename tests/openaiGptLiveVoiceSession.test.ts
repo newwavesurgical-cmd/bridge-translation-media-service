@@ -198,14 +198,18 @@ describe('GPT-Live voice session', () => {
     expect(speechStarted).toHaveBeenCalledTimes(2);
   });
 
-  it('sends operator controls as private live instructions without exposing them as call text', () => {
+  it('confirms operator delivery only after correlated acknowledgments and response audio', async () => {
     const { session, mutable, sent } = makeSession();
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
     session.confirmStartupEnvelopePlayback();
     sent.splice(0);
-    session.injectInstruction('Yes, Tuesday works.', 'yes');
+    const delivery = session.injectInstruction('Yes, Tuesday works.', 'yes');
+    let settled = false;
+    void delivery.then(() => {
+      settled = true;
+    });
     expect(sent[0]).toMatchObject({
       type: 'session.instructions.append',
       delegation_id: null
@@ -216,6 +220,116 @@ describe('GPT-Live voice session', () => {
       delegation_id: null
     });
     expect(String(sent[1].content)).toContain('Yes, Tuesday works.');
+
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'session.instructions.appended',
+        client_event_id: sent[0]?.event_id
+      })
+    );
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'session.commentary.appended',
+        client_event_id: sent[1]?.event_id
+      })
+    );
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'answer-audio' }));
+    await expect(delivery).resolves.toMatchObject({
+      delivered: true,
+      acknowledged: true,
+      audioStarted: true,
+      retryCount: 0
+    });
+  });
+
+  it('retries an acknowledged operator response once when no audio begins', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mutable, sent } = makeSession();
+      mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+      sent.splice(0);
+
+      const delivery = session.injectInstruction('No, Thursday is better.', 'no');
+      mutable.handleMessage(
+        JSON.stringify({ type: 'session.instructions.appended', client_event_id: sent[0]?.event_id })
+      );
+      mutable.handleMessage(
+        JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
+      );
+
+      vi.advanceTimersByTime(1_400);
+      expect(sent.filter((payload) => payload.type === 'session.commentary.append')).toHaveLength(2);
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'retry-audio' }));
+
+      await expect(delivery).resolves.toMatchObject({
+        delivered: true,
+        acknowledged: true,
+        audioStarted: true,
+        retryCount: 1
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('confirms a private non-speech control after acknowledgments without waiting for audio', async () => {
+    const { session, mutable, sent } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    sent.splice(0);
+
+    const delivery = session.injectInstruction(
+      'Keep the next response especially concise.',
+      'whisper_guidance',
+      false
+    );
+    expect(String(sent[1]?.content)).toContain('Apply this private operator instruction silently');
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.instructions.appended', client_event_id: sent[0]?.event_id })
+    );
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
+    );
+
+    await expect(delivery).resolves.toMatchObject({
+      delivered: true,
+      acknowledged: true,
+      audioStarted: false,
+      retryCount: 0
+    });
+  });
+
+  it('treats a correlated control rejection as recoverable without killing the live session', async () => {
+    const { session, mutable, sent } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    sent.splice(0);
+
+    const delivery = session.injectInstruction('Yes.', 'yes');
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'error',
+        error: {
+          type: 'invalid_request_error',
+          code: 'control_rejected',
+          message: 'Control could not be applied.',
+          client_event_id: sent[1]?.event_id
+        }
+      })
+    );
+
+    await expect(delivery).resolves.toMatchObject({
+      delivered: false,
+      errorCode: 'control_rejected'
+    });
+    expect(session.status).toBe('live');
   });
 
   it('uses one GPT-Live voice turn for disclosure plus purpose when the toggle is on', () => {
