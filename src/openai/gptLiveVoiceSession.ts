@@ -1,6 +1,11 @@
 import WebSocket from 'ws';
 import type { AgentStartupDiagnostics, AgentVoiceSession, AgentVoiceSessionOptions, AgentVoiceSessionStatus } from './agentVoiceSession.js';
 
+const OPENING_INSTRUCTION_ACK_TIMEOUT_MS = 750;
+const OPENING_FIRST_AUDIO_TIMEOUT_MS = 1_500;
+const OPENING_RETRY_AUDIO_TIMEOUT_MS = 1_500;
+const PCMU_SILENCE_BYTE = 0xff;
+
 /**
  * GPT-Live adapter for the main outbound AI call path.
  *
@@ -17,8 +22,16 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   private openingOutputStarted = false;
   private preArmedAudio = 0;
   private openingIdleTimer?: NodeJS.Timeout;
+  private openingInstructionAckTimer?: NodeJS.Timeout;
+  private openingFirstAudioTimer?: NodeJS.Timeout;
   private closingTimer?: NodeJS.Timeout;
   private pendingIntervention?: { text: string; semanticControl?: string };
+  private openingInstructionEventId?: string;
+  private openingCommentaryEventId?: string;
+  private openingInstructionAcked = false;
+  private openingCommentaryAcked = false;
+  private openingRetryCount = 0;
+  private openingFallbackReleased = false;
   private lastRemoteTranscriptAt = 0;
   private lastRemoteTranscriptEndMs?: number;
 
@@ -65,9 +78,17 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       this.ws = undefined;
       if (this.closingTimer) clearTimeout(this.closingTimer);
       if (this.openingIdleTimer) clearTimeout(this.openingIdleTimer);
+      if (this.openingInstructionAckTimer) clearTimeout(this.openingInstructionAckTimer);
+      if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
       if (this.statusValue !== 'closing') this.setStatus('closed');
     });
     ws.on('error', (error) => {
+      if (this.statusValue === 'closing') {
+        logGptLiveStartup('socket_error_while_closing', {
+          message: safeDiagnosticMessage(error.message)
+        });
+        return;
+      }
       this.setStatus('error', error.message);
       this.options.onError(error);
     });
@@ -75,10 +96,22 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
 
   appendPcmuBase64(base64Pcmu: string): void {
     if (this.statusValue === 'idle') this.connect();
-    if (!this.sessionStarted || !this.startupEnvelopePlaybackConfirmed) {
+    if (!this.sessionStarted) {
       this.preArmedAudio += 1;
       this.queuedAudio.push(base64Pcmu);
       if (this.queuedAudio.length > 800) this.queuedAudio.shift();
+      this.publishStartupDiagnostics();
+      return;
+    }
+    if (!this.startupEnvelopePlaybackConfirmed) {
+      this.preArmedAudio += 1;
+      this.queuedAudio.push(base64Pcmu);
+      if (this.queuedAudio.length > 800) this.queuedAudio.shift();
+      // GPT-Live advances appended instructions and commentary on the media
+      // timeline. Keep that timeline moving with same-duration PCMU silence
+      // while retaining the real callee audio for replay after the protected
+      // opener. Buffering without sending any frames deadlocks the greeting.
+      this.sendJson({ type: 'session.input_audio.append', audio: pcmuSilenceMatching(base64Pcmu) });
       this.publishStartupDiagnostics();
       return;
     }
@@ -176,6 +209,12 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   }
 
   close(): void {
+    if (this.openingIdleTimer) clearTimeout(this.openingIdleTimer);
+    this.openingIdleTimer = undefined;
+    if (this.openingInstructionAckTimer) clearTimeout(this.openingInstructionAckTimer);
+    this.openingInstructionAckTimer = undefined;
+    if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
+    this.openingFirstAudioTimer = undefined;
     if (!this.ws) {
       this.setStatus('closed');
       return;
@@ -195,7 +234,14 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       delta?: string;
       start_ms?: number;
       end_ms?: number;
-      error?: { message?: string };
+      client_event_id?: string;
+      error?: {
+        message?: string;
+        type?: string;
+        code?: string;
+        param?: string;
+        client_event_id?: string;
+      };
     };
     try {
       event = JSON.parse(message) as typeof event;
@@ -208,11 +254,52 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       this.setStatus('live');
       this.publishStartupDiagnostics();
       this.beginOpening();
+      // Frames may have arrived between the Twilio stream opening and the Live
+      // session acknowledgment. Prime the Live timeline with matching silence;
+      // the original audio remains queued until the opening playback boundary.
+      for (const audio of this.queuedAudio) {
+        this.sendJson({ type: 'session.input_audio.append', audio: pcmuSilenceMatching(audio) });
+      }
+      return;
+    }
+    if (
+      event.type === 'session.instructions.appended' &&
+      event.client_event_id === this.openingInstructionEventId
+    ) {
+      this.openingInstructionAcked = true;
+      if (this.openingInstructionAckTimer) clearTimeout(this.openingInstructionAckTimer);
+      this.openingInstructionAckTimer = undefined;
+      logGptLiveStartup('opening_instruction_acked', {
+        clientEventId: event.client_event_id
+      });
+      this.sendOpeningCommentary();
+      this.publishStartupDiagnostics();
+      return;
+    }
+    if (
+      event.type === 'session.commentary.appended' &&
+      event.client_event_id === this.openingCommentaryEventId
+    ) {
+      this.openingCommentaryAcked = true;
+      logGptLiveStartup('opening_commentary_acked', {
+        clientEventId: event.client_event_id,
+        retryCount: this.openingRetryCount
+      });
+      this.publishStartupDiagnostics();
       return;
     }
     if (event.type === 'session.output_audio.delta' && event.delta) {
       if (!this.startupEnvelopeQueued) {
+        if (!this.openingOutputStarted) {
+          logGptLiveStartup('opening_audio_started', {
+            instructionAcked: this.openingInstructionAcked,
+            commentaryAcked: this.openingCommentaryAcked,
+            retryCount: this.openingRetryCount
+          });
+        }
         this.openingOutputStarted = true;
+        if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
+        this.openingFirstAudioTimer = undefined;
         this.armOpeningIdleFallback();
       }
       this.options.onAudioDelta(event.delta);
@@ -261,6 +348,17 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     }
     if (event.type === 'error') {
       const error = new Error(event.error?.message ?? 'OpenAI GPT-Live session error');
+      logGptLiveStartup('openai_error', {
+        status: this.statusValue,
+        type: event.error?.type,
+        code: event.error?.code,
+        param: event.error?.param,
+        clientEventId: event.error?.client_event_id,
+        message: safeDiagnosticMessage(error.message)
+      });
+      // Closing a session with a still-pending append can produce a recoverable
+      // API error. Do not turn a normal remote hangup into a failed call.
+      if (this.statusValue === 'closing') return;
       this.setStatus('error', error.message);
       this.options.onError(error);
     }
@@ -272,18 +370,72 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       : '';
     const purpose = normalizeOpeningText(this.options.spokenPurpose);
     const directive = buildGptLiveOpeningDirective({ disclosure, purpose });
+    const eventId = `bridge-live-opening-rule-${Date.now()}`;
+    this.openingInstructionEventId = eventId;
     this.sendJson({
       type: 'session.instructions.append',
-      event_id: `bridge-live-opening-rule-${Date.now()}`,
+      event_id: eventId,
       delegation_id: null,
       content: directive
     });
+    logGptLiveStartup('opening_instruction_sent', { clientEventId: eventId });
+    this.openingInstructionAckTimer = setTimeout(() => {
+      if (this.openingInstructionAcked || this.openingOutputStarted || this.startupEnvelopeQueued) return;
+      logGptLiveStartup('opening_instruction_ack_timeout', { clientEventId: eventId });
+      // Keep the caller from sitting in silence if an acknowledgment is delayed.
+      // The instruction was already sent, so this is a best-effort trigger, not
+      // a second opening contract.
+      this.sendOpeningCommentary();
+    }, OPENING_INSTRUCTION_ACK_TIMEOUT_MS);
+    this.openingInstructionAckTimer.unref();
+  }
+
+  private sendOpeningCommentary(): void {
+    if (this.openingCommentaryEventId || this.openingOutputStarted || this.startupEnvelopeQueued) return;
+    const eventId = `bridge-live-opening-${Date.now()}`;
+    this.openingCommentaryEventId = eventId;
     this.sendJson({
       type: 'session.commentary.append',
-      event_id: `bridge-live-opening-${Date.now()}`,
+      event_id: eventId,
       delegation_id: null,
-      content: directive
+      content: 'Begin the conversation now, following the opening instructions provided. Then stop and listen.'
     });
+    logGptLiveStartup('opening_commentary_sent', { clientEventId: eventId, retryCount: 0 });
+    this.armFirstAudioWatchdog(OPENING_FIRST_AUDIO_TIMEOUT_MS);
+  }
+
+  private armFirstAudioWatchdog(timeoutMs: number): void {
+    if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
+    this.openingFirstAudioTimer = setTimeout(() => {
+      if (this.openingOutputStarted || this.startupEnvelopeQueued) return;
+      if (this.openingRetryCount === 0) {
+        this.openingRetryCount = 1;
+        const eventId = `bridge-live-opening-retry-${Date.now()}`;
+        this.openingCommentaryEventId = eventId;
+        this.openingCommentaryAcked = false;
+        this.sendJson({
+          type: 'session.commentary.append',
+          event_id: eventId,
+          delegation_id: null,
+          content: 'Speak the configured opening now. Do not wait for the caller. Then stop and listen.'
+        });
+        logGptLiveStartup('opening_commentary_retried', { clientEventId: eventId, retryCount: 1 });
+        this.publishStartupDiagnostics();
+        this.armFirstAudioWatchdog(OPENING_RETRY_AUDIO_TIMEOUT_MS);
+        return;
+      }
+      // Last-resort fail-open: release the retained callee audio so GPT-Live
+      // can immediately react to "hello" under the original opening policy.
+      // This prevents an indefinitely silent connected call.
+      this.openingFallbackReleased = true;
+      logGptLiveStartup('opening_fallback_released', {
+        instructionAcked: this.openingInstructionAcked,
+        commentaryAcked: this.openingCommentaryAcked,
+        retryCount: this.openingRetryCount
+      });
+      this.finishOpeningOutput();
+    }, timeoutMs);
+    this.openingFirstAudioTimer.unref();
   }
 
   private armOpeningIdleFallback(): void {
@@ -296,6 +448,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     if (this.startupEnvelopeQueued) return;
     if (this.openingIdleTimer) clearTimeout(this.openingIdleTimer);
     this.openingIdleTimer = undefined;
+    if (this.openingInstructionAckTimer) clearTimeout(this.openingInstructionAckTimer);
+    this.openingInstructionAckTimer = undefined;
+    if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
+    this.openingFirstAudioTimer = undefined;
     this.startupEnvelopeQueued = true;
     this.publishStartupDiagnostics();
     // The registry places a Twilio mark after all GPT-Live audio chunks already
@@ -320,12 +476,17 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       firstUtteranceArmed: Boolean(
         this.options.disclosureEnabled && normalizeOpeningText(this.options.firstUtterance)
       ),
-      firstUtteranceDelivered: this.startupEnvelopeQueued,
+      firstUtteranceDelivered:
+        this.startupEnvelopeQueued && this.openingOutputStarted && !this.openingFallbackReleased,
       preArmedAudio: this.preArmedAudio,
       firstUtteranceCorrectionSent: false,
       startupEnvelopeQueued: this.startupEnvelopeQueued,
       startupEnvelopePlaybackConfirmed: this.startupEnvelopePlaybackConfirmed,
-      bufferedStartupAudio: this.queuedAudio.length
+      bufferedStartupAudio: this.queuedAudio.length,
+      openingInstructionAcked: this.openingInstructionAcked,
+      openingCommentaryAcked: this.openingCommentaryAcked,
+      openingRetryCount: this.openingRetryCount,
+      openingFallbackReleased: this.openingFallbackReleased
     };
     this.options.onStartupDiagnostics?.(diagnostics);
   }
@@ -427,6 +588,20 @@ export function buildGptLiveOpeningDirective(input: {
 
 function normalizeOpeningText(text: string | undefined): string {
   return (text ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function pcmuSilenceMatching(base64Pcmu: string): string {
+  const byteLength = Buffer.from(base64Pcmu, 'base64').length;
+  return Buffer.alloc(byteLength, PCMU_SILENCE_BYTE).toString('base64');
+}
+
+function safeDiagnosticMessage(message: string): string {
+  return message.replace(/\s+/g, ' ').trim().slice(0, 240);
+}
+
+function logGptLiveStartup(phase: string, detail: Record<string, unknown>): void {
+  if (process.env.NODE_ENV === 'test') return;
+  console.info(JSON.stringify({ event: 'gpt_live_startup', version: 1, phase, ...detail }));
 }
 
 function extractGptLiveMissionContext(instructions: string): string {

@@ -148,8 +148,17 @@ describe('GPT-Live voice session', () => {
     expect(queued).not.toHaveBeenCalled();
     expect(sent.map((payload) => payload.type)).toEqual([
       'session.instructions.append',
-      'session.commentary.append'
+      'session.input_audio.append'
     ]);
+    expect(sent[1]?.audio).not.toBe('before');
+
+    mutable.handleMessage(
+      JSON.stringify({
+        type: 'session.instructions.appended',
+        client_event_id: sent[0]?.event_id
+      })
+    );
+    expect(sent.at(-1)?.type).toBe('session.commentary.append');
 
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
@@ -228,8 +237,57 @@ describe('GPT-Live voice session', () => {
 
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
 
-    expect(String(sent[1]?.content)).toContain('I am calling about the car you listed.');
-    expect(String(sent[1]?.content)).toContain('There is no disclosure');
-    expect(String(sent[1]?.content)).not.toContain("I'm not a telemarketer.");
+    expect(String(sent[0]?.content)).toContain('I am calling about the car you listed.');
+    expect(String(sent[0]?.content)).toContain('There is no disclosure');
+    expect(String(sent[0]?.content)).not.toContain("I'm not a telemarketer.");
+  });
+
+  it('retries once and releases retained callee audio instead of deadlocking in silence', () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mutable, sent, queued } = makeSession();
+      session.appendPcmuBase64('before');
+      mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+      mutable.handleMessage(
+        JSON.stringify({
+          type: 'session.instructions.appended',
+          client_event_id: sent[0]?.event_id
+        })
+      );
+
+      vi.advanceTimersByTime(1_500);
+      expect(sent.filter((payload) => payload.type === 'session.commentary.append')).toHaveLength(2);
+      expect(queued).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(1_500);
+      expect(queued).toHaveBeenCalledOnce();
+
+      session.confirmStartupEnvelopePlayback();
+      expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'before' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses the post-audio idle boundary when Live emits no output-done event', () => {
+    vi.useFakeTimers();
+    try {
+      const { mutable, sent, queued } = makeSession();
+      mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+      mutable.handleMessage(
+        JSON.stringify({
+          type: 'session.instructions.appended',
+          client_event_id: sent[0]?.event_id
+        })
+      );
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+
+      vi.advanceTimersByTime(1_499);
+      expect(queued).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(queued).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

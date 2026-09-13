@@ -16,7 +16,7 @@ export interface AgentVoiceSessionOptions {
   onRemoteTranscriptDelta: (delta: string) => void;
   onAgentTranscriptDelta: (delta: string) => void;
   onUserSpeechStarted?: () => void;
-  /** Called only after the literal disclosure and prepared purpose have both been queued for Twilio. */
+  /** Called after startup audio is queued, or when the bounded no-audio failsafe releases the opening gate. */
   onStartupEnvelopeQueued?: () => void;
   onStatus: (status: AgentVoiceSessionStatus, detail?: string) => void;
   onStartupDiagnostics?: (diagnostics: AgentStartupDiagnostics) => void;
@@ -44,6 +44,10 @@ export interface AgentStartupDiagnostics {
   startupEnvelopeQueued: boolean;
   startupEnvelopePlaybackConfirmed: boolean;
   bufferedStartupAudio: number;
+  openingInstructionAcked?: boolean;
+  openingCommentaryAcked?: boolean;
+  openingRetryCount?: number;
+  openingFallbackReleased?: boolean;
 }
 
 const DEFAULT_FIRST_UTTERANCE =
