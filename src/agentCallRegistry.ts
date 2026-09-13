@@ -679,12 +679,38 @@ export class AgentCallSession {
     }
 
     if (request.kind === 'dismiss_pending_question') {
+      const dismissedBlockingQuestion = this.record.pendingOperatorQuestion?.blocking === true;
       this.lastOperatorDecisionAt = Date.now();
       this.interruptOperatorDecisionHold();
       this.resolvePendingOperatorQuestion('operator_dismissed');
       entry.text = 'Dismissed pending operator question without sending speech to the callee.';
       entry.delivered = true;
       this.record.counters.controlsDelivered += 1;
+      if (dismissedBlockingQuestion && this.agent && this.record.state === 'live') {
+        const resume = this.agent.injectInstruction(
+          [
+            'The temporary operator-decision hold has been dismissed without an answer.',
+            'Remove the output suppression and resume the live conversation now.',
+            'Dismissal is not approval: do not invent, accept, confirm, or commit to the missing detail.',
+            'Use only known mission facts and the latest remote speech; if the detail is still needed, say it must be confirmed later.'
+          ].join(' '),
+          'resume_autonomy',
+          true
+        );
+        if (resume && typeof (resume as Promise<AgentInterventionDelivery>).then === 'function') {
+          const delivery = await resume;
+          entry.acknowledged = delivery.acknowledged;
+          entry.audioStarted = delivery.audioStarted;
+          entry.retryCount = delivery.retryCount;
+          if (delivery.acknowledged) this.record.counters.controlsAcknowledged += 1;
+          if (delivery.audioStarted) this.record.counters.controlsAudioStarted += 1;
+          entry.text += delivery.delivered
+            ? ' Agent autonomy resumed and response audio began.'
+            : ' Agent autonomy resume was requested; no response audio was confirmed.';
+        } else {
+          entry.text += ' Agent autonomy resume was requested.';
+        }
+      }
       this.touch();
       return entry;
     }
@@ -1427,7 +1453,11 @@ export class AgentCallSession {
   }
 
   private considerOperatorQuestion(text: string): void {
-    const classification = classifyOperatorQuestion(text, this.callPurposeText());
+    const classification = classifyOperatorQuestion(
+      text,
+      this.callPurposeText(),
+      this.previousAgentUtterance()
+    );
     if (!classification) return;
 
     const current = this.record.pendingOperatorQuestion;
@@ -1524,6 +1554,19 @@ export class AgentCallSession {
 
   private remoteTranscriptWindow(): string {
     return this.recentRemoteTranscriptDeltas.map((entry) => entry.delta).join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /** The consecutive agent turn immediately before the current remote speech. */
+  private previousAgentUtterance(): string {
+    const parts: string[] = [];
+    let index = this.record.transcripts.length - 1;
+    while (index >= 0 && this.record.transcripts[index]?.speaker === 'remote') index -= 1;
+    while (index >= 0 && this.record.transcripts[index]?.speaker === 'agent') {
+      const delta = this.record.transcripts[index]?.delta;
+      if (delta) parts.unshift(delta);
+      index -= 1;
+    }
+    return parts.reduce((utterance, delta) => appendSpokenDelta(utterance, delta), '').slice(-400);
   }
 
   private callPurposeText(): string {

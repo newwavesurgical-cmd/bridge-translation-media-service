@@ -43,7 +43,13 @@ describe('operator question classifier', () => {
   it('blocks a bare streamed hour before a.m. or p.m. arrives', () => {
     const mission = 'Schedule a meeting on Wednesday.';
 
-    for (const fragment of ['Twelve?', 'At twelve?', 'How about twelve?', '12', 'At 12']) {
+    for (const fragment of ['Twelve?', '12']) {
+      expect(classifyOperatorQuestion(fragment, mission, 'What time would work for you?'), fragment).toMatchObject({
+        kind: 'commitment',
+        blocking: true
+      });
+    }
+    for (const fragment of ['At twelve?', 'How about twelve?', 'At 12']) {
       expect(classifyOperatorQuestion(fragment, mission), fragment).toMatchObject({
         kind: 'commitment',
         blocking: true
@@ -123,6 +129,13 @@ describe('operator question classifier', () => {
       kind: 'question',
       blocking: false
     });
+  });
+
+  it('does not reinterpret a quantity answer as an hour merely because the mission includes scheduling', () => {
+    const mission = 'Ask about the car and schedule a time to see it.';
+
+    expect(classifyOperatorQuestion('One', mission, 'How many owners has it had so far?')).toBeNull();
+    expect(classifyOperatorQuestion('12', mission, 'How many miles does it have?')).toBeNull();
   });
 
   it('strips repeated English and Spanish fillers', () => {

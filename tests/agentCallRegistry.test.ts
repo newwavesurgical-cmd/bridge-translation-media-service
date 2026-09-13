@@ -482,6 +482,59 @@ describe('AgentCallRegistry', () => {
     expect(injectInstruction).not.toHaveBeenCalled();
   });
 
+  it('does not hold a quantity answer in a scheduling mission and explicitly resumes after a real hold is dismissed', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask about the car and schedule a time to see it.',
+      languageLock: 'English',
+      agentEngine: 'gpt-live-1'
+    });
+    const injectInstruction = vi.fn(() =>
+      Promise.resolve({
+        delivered: true,
+        acknowledged: true,
+        audioStarted: true,
+        retryCount: 0,
+        latencyMs: 30
+      })
+    );
+    const mutable = session as unknown as {
+      agent: {
+        suppressActiveOutput: (reason: string) => void;
+        injectInstruction: typeof injectInstruction;
+      };
+      emitTranscript: (speaker: 'agent' | 'remote', delta: string) => void;
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction };
+    session.data.state = 'live';
+
+    for (const delta of ['How', 'many', 'owners', 'has', 'it', 'had', 'so', 'far?']) {
+      mutable.emitTranscript('agent', delta);
+    }
+    mutable.emitTranscript('remote', 'One');
+    mutable.considerOperatorQuestion('One');
+    expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
+
+    mutable.emitTranscript('agent', 'What time works for you?');
+    mutable.emitTranscript('remote', 'Twelve');
+    mutable.considerOperatorQuestion('Twelve');
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+
+    const result = await session.receiveControl({ kind: 'dismiss_pending_question' });
+
+    expect(injectInstruction).toHaveBeenCalledWith(
+      expect.stringContaining('Dismissal is not approval'),
+      'resume_autonomy',
+      true
+    );
+    expect(result).toMatchObject({ delivered: true, acknowledged: true, audioStarted: true });
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: null,
+      counters: { controlsAcknowledged: 1, controlsAudioStarted: 1 }
+    });
+  });
+
   it('does not invite customer/client framing even when caller identity is supplied', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

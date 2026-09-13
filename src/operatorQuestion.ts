@@ -30,8 +30,19 @@ const CONCRETE_SCHEDULING_SLOT =
 // "p.m."). In a scheduling mission, that first fragment is already a new
 // commitment and must be held for the operator instead of being treated as a
 // harmless general question.
-const BARE_SCHEDULING_HOUR =
-  /^[¿\s]*(?:(?:how|what)\s+about\s+|(?:at|around|about|by|from)\s+|(?:a\s+las?|alrededor\s+de|como\s+a)\s+)?(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;
+const EXPLICIT_BARE_SCHEDULING_HOUR =
+  /^[¿\s]*(?:(?:how|what)\s+about\s+|(?:at|around|about|by|from)\s+|(?:a\s+las?|alrededor\s+de|como\s+a)\s+)(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;
+
+const NAKED_HOUR =
+  /^[¿\s]*(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;
+
+// A naked number is too ambiguous by itself: in the real failure, the agent
+// asked "How many owners?" and the answer "One" was mistaken for 1:00 merely
+// because the broader mission also involved scheduling. Require the immediately
+// preceding agent turn to be about scheduling before treating that fragment as
+// an hour. Explicit phrases such as "at twelve" remain self-identifying.
+const ACTIVE_SCHEDULING_TURN =
+  /\b(?:appointment|schedule|scheduling|book|booking|reservation|meet|meeting|visit|showing|test drive|come (?:see|by|in)|stop by|pick ?up|available|availability|what time|which time|when|today|tomorrow|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|cita|agenda|agendar|programar|reservar|reunión|reunion|visita|venir|pasar|recoger|disponible|disponibilidad|qué hora|que hora|cuándo|cuando|hoy|mañana|manana|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b/i;
 
 const COMMITMENT =
   /\b(?:accept|agree|approve|authorize|authorization|consent|confirm|commit|cancel|reschedule|purchase|order|reserve|price|cost|fee|rate|payment|are you sure|works? for you|okay with you|acept|acepta|aprobar|autorizar|autorización|autorizacion|consentimiento|confirmar|confirma|segur[oa]|comprometer|cancelar|reprogramar|comprar|pedido|reservar|precio|costo|tarifa|pago|le sirve|está bien|esta bien)\b/i;
@@ -83,6 +94,7 @@ function looksLikeSchedulingProposal(text: string): boolean {
 export function classifyOperatorQuestion(
   rawText: string,
   missionContext = '',
+  precedingAgentTurn = '',
 ): OperatorQuestionClassification | null {
   const text = normalize(rawText);
   const core = stripQuestionFillers(text);
@@ -91,7 +103,10 @@ export function classifyOperatorQuestion(
   const schedulingProposal = looksLikeSchedulingProposal(core);
   const schedulingContext = SCHEDULING_CONTEXT.test(missionContext);
   const concreteSchedulingSlot = CONCRETE_SCHEDULING_SLOT.test(core);
-  const bareSchedulingHour = schedulingContext && BARE_SCHEDULING_HOUR.test(core);
+  const bareSchedulingHour =
+    schedulingContext &&
+    (EXPLICIT_BARE_SCHEDULING_HOUR.test(core) ||
+      (NAKED_HOUR.test(core) && ACTIVE_SCHEDULING_TURN.test(precedingAgentTurn)));
   const question = looksQuestionLike(core);
   const schedulingQuestion =
     question &&

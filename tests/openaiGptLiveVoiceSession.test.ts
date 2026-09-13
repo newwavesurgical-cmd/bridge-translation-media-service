@@ -305,6 +305,39 @@ describe('GPT-Live voice session', () => {
     });
   });
 
+  it('resumes after a dismissed hold without presenting private resume instructions as words to say', async () => {
+    const { session, mutable, sent } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    sent.splice(0);
+
+    const delivery = session.injectInstruction(
+      'Remove the temporary suppression. Dismissal is not approval.',
+      'resume_autonomy',
+      true
+    );
+
+    expect(String(sent[0]?.content)).toContain('Dismissal is not approval');
+    expect(String(sent[0]?.content)).not.toContain('Immediately speak the intended');
+    expect(String(sent[1]?.content)).toContain('Continue the live phone conversation now');
+    expect(String(sent[1]?.content)).not.toContain('Remove the temporary suppression');
+
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.instructions.appended', client_event_id: sent[0]?.event_id })
+    );
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'resume-audio' }));
+
+    await expect(delivery).resolves.toMatchObject({
+      delivered: true,
+      acknowledged: true,
+      audioStarted: true
+    });
+  });
+
   it('treats a correlated control rejection as recoverable without killing the live session', async () => {
     const { session, mutable, sent } = makeSession();
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));

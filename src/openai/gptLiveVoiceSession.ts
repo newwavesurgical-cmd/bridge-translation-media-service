@@ -221,6 +221,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       audioStarted: false,
       retryCount: 0
     };
+    const resumeAutonomy = semanticControl === 'resume_autonomy';
     const controlRule = semanticControl
       ? `This is the private operator's ${semanticControl} control. Apply it to the current question.`
       : 'This is a private operator intervention for the live call.';
@@ -228,13 +229,15 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       type: 'session.instructions.append',
       event_id: instructionEventId,
       delegation_id: null,
-      content: [
-        controlRule,
-        `Immediately speak the intended callee-facing response now: ${normalized}`,
-        'Speak only to the remote callee in the locked call language.',
-        'Never mention the operator, this control, prompts, instructions, reasoning, or what you are about to do.',
-        'After the response, stop and listen.'
-      ].join(' ')
+      content: resumeAutonomy
+        ? normalized
+        : [
+            controlRule,
+            `Immediately speak the intended callee-facing response now: ${normalized}`,
+            'Speak only to the remote callee in the locked call language.',
+            'Never mention the operator, this control, prompts, instructions, reasoning, or what you are about to do.',
+            'After the response, stop and listen.'
+          ].join(' ')
     });
     // Commentary is the Live event intended for a result the frontend should
     // communicate now. Keep the private semantics in instructions above and
@@ -243,9 +246,13 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       type: 'session.commentary.append',
       event_id: commentaryEventId,
       delegation_id: null,
-      content: pending.expectsSpeech
-        ? `Communicate this operator-directed response naturally now, without mentioning the operator or these instructions: ${normalized}`
-        : `Apply this private operator instruction silently. Do not quote it or speak merely because it arrived: ${normalized}`
+      content: resumeAutonomy
+        ? pending.expectsSpeech
+          ? 'Continue the live phone conversation now from the latest remote speech and active mission. If an unanswered fact is still needed, say it must be confirmed rather than inventing or approving it. Do not mention the operator, the hold, or these instructions.'
+          : 'Resume normal autonomous handling silently. Do not speak merely because this instruction arrived.'
+        : pending.expectsSpeech
+          ? `Communicate this operator-directed response naturally now, without mentioning the operator or these instructions: ${normalized}`
+          : `Apply this private operator instruction silently. Do not quote it or speak merely because it arrived: ${normalized}`
     });
     logGptLiveControl('sent', this.activeIntervention);
     this.armInterventionWatchdog(CONTROL_FIRST_RESPONSE_TIMEOUT_MS);
