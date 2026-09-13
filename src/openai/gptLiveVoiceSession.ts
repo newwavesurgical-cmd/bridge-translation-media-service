@@ -4,7 +4,6 @@ import type { AgentStartupDiagnostics, AgentVoiceSession, AgentVoiceSessionOptio
 const OPENING_INSTRUCTION_ACK_TIMEOUT_MS = 750;
 const OPENING_FIRST_AUDIO_TIMEOUT_MS = 1_500;
 const OPENING_RETRY_AUDIO_TIMEOUT_MS = 1_500;
-const PCMU_SILENCE_BYTE = 0xff;
 
 /**
  * GPT-Live adapter for the main outbound AI call path.
@@ -103,25 +102,17 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       this.publishStartupDiagnostics();
       return;
     }
-    if (!this.startupEnvelopePlaybackConfirmed) {
-      this.preArmedAudio += 1;
-      this.queuedAudio.push(base64Pcmu);
-      if (this.queuedAudio.length > 800) this.queuedAudio.shift();
-      // GPT-Live advances appended instructions and commentary on the media
-      // timeline. Keep that timeline moving with same-duration PCMU silence
-      // while retaining the real callee audio for replay after the protected
-      // opener. Buffering without sending any frames deadlocks the greeting.
-      this.sendJson({ type: 'session.input_audio.append', audio: pcmuSilenceMatching(base64Pcmu) });
-      this.publishStartupDiagnostics();
-      return;
-    }
+    // GPT-Live is full duplex. Its primary WebSocket must receive the real,
+    // continuously paced caller stream even while the opening is playing.
+    // Substituting silence until a downstream Twilio playback marker returns
+    // can permanently mute the caller when that marker is delayed or lost.
     this.sendJson({ type: 'session.input_audio.append', audio: base64Pcmu });
   }
 
   injectInstruction(text: string, semanticControl?: string): void {
     const normalized = text.replace(/\s+/g, ' ').trim();
     if (!normalized || !this.sessionStarted) return;
-    if (!this.startupEnvelopePlaybackConfirmed) {
+    if (!this.startupEnvelopeQueued) {
       this.pendingIntervention = { text: normalized, semanticControl };
       return;
     }
@@ -189,12 +180,6 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   confirmStartupEnvelopePlayback(): void {
     if (!this.sessionStarted || !this.startupEnvelopeQueued || this.startupEnvelopePlaybackConfirmed) return;
     this.startupEnvelopePlaybackConfirmed = true;
-    for (const audio of this.queuedAudio.splice(0)) {
-      this.sendJson({ type: 'session.input_audio.append', audio });
-    }
-    const pending = this.pendingIntervention;
-    this.pendingIntervention = undefined;
-    if (pending) this.sendIntervention(pending.text, pending.semanticControl);
     this.publishStartupDiagnostics();
   }
 
@@ -254,11 +239,11 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       this.setStatus('live');
       this.publishStartupDiagnostics();
       this.beginOpening();
-      // Frames may have arrived between the Twilio stream opening and the Live
-      // session acknowledgment. Prime the Live timeline with matching silence;
-      // the original audio remains queued until the opening playback boundary.
-      for (const audio of this.queuedAudio) {
-        this.sendJson({ type: 'session.input_audio.append', audio: pcmuSilenceMatching(audio) });
+      // Frames may arrive between the Twilio stream opening and session.started.
+      // Forward the real audio as soon as Live accepts input; after this point
+      // Twilio continues supplying the stream at its native real-time cadence.
+      for (const audio of this.queuedAudio.splice(0)) {
+        this.sendJson({ type: 'session.input_audio.append', audio });
       }
       return;
     }
@@ -453,10 +438,13 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
     this.openingFirstAudioTimer = undefined;
     this.startupEnvelopeQueued = true;
+    const pending = this.pendingIntervention;
+    this.pendingIntervention = undefined;
+    if (pending) this.sendIntervention(pending.text, pending.semanticControl);
     this.publishStartupDiagnostics();
     // The registry places a Twilio mark after all GPT-Live audio chunks already
-    // written to the stream. Callee audio stays buffered until that exact
-    // playback boundary returns.
+    // written to the stream. The marker remains useful for playback diagnostics
+    // and protected barge-in clearing, but never gates caller audio or controls.
     this.options.onStartupEnvelopeQueued?.();
   }
 
@@ -588,11 +576,6 @@ export function buildGptLiveOpeningDirective(input: {
 
 function normalizeOpeningText(text: string | undefined): string {
   return (text ?? '').replace(/\s+/g, ' ').trim();
-}
-
-function pcmuSilenceMatching(base64Pcmu: string): string {
-  const byteLength = Buffer.from(base64Pcmu, 'base64').length;
-  return Buffer.alloc(byteLength, PCMU_SILENCE_BYTE).toString('base64');
 }
 
 function safeDiagnosticMessage(message: string): string {

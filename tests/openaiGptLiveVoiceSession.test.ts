@@ -139,7 +139,7 @@ describe('GPT-Live voice session', () => {
     expect(instructions).toContain('Never invent vague framing such as a team the callee contacted');
   });
 
-  it('buffers callee audio until the single GPT-Live opener playback boundary is confirmed', () => {
+  it('streams real callee audio continuously while the single GPT-Live opener is playing', () => {
     const { session, mutable, sent, queued } = makeSession();
     session.appendPcmuBase64('before');
     expect(sent).toEqual([]);
@@ -150,7 +150,10 @@ describe('GPT-Live voice session', () => {
       'session.instructions.append',
       'session.input_audio.append'
     ]);
-    expect(sent[1]?.audio).not.toBe('before');
+    expect(sent[1]?.audio).toBe('before');
+
+    session.appendPcmuBase64('during-opening');
+    expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'during-opening' });
 
     mutable.handleMessage(
       JSON.stringify({
@@ -165,7 +168,6 @@ describe('GPT-Live voice session', () => {
     expect(queued).toHaveBeenCalledOnce();
 
     session.confirmStartupEnvelopePlayback();
-    expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'before' });
 
     session.appendPcmuBase64('after');
     expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'after' });
@@ -242,12 +244,13 @@ describe('GPT-Live voice session', () => {
     expect(String(sent[0]?.content)).not.toContain("I'm not a telemarketer.");
   });
 
-  it('retries once and releases retained callee audio instead of deadlocking in silence', () => {
+  it('retries the opener once without ever replacing the live caller stream with silence', () => {
     vi.useFakeTimers();
     try {
       const { session, mutable, sent, queued } = makeSession();
       session.appendPcmuBase64('before');
       mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+      expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'before' });
       mutable.handleMessage(
         JSON.stringify({
           type: 'session.instructions.appended',
@@ -263,10 +266,26 @@ describe('GPT-Live voice session', () => {
       expect(queued).toHaveBeenCalledOnce();
 
       session.confirmStartupEnvelopePlayback();
-      expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'before' });
+      expect(sent.filter((payload) => payload.type === 'session.input_audio.append')).toEqual([
+        { type: 'session.input_audio.append', audio: 'before' }
+      ]);
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('releases an operator control when opening audio is queued even if the Twilio mark never returns', () => {
+    const { session, mutable, sent } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    session.injectInstruction('Yes, that works.', 'yes');
+    expect(sent.some((payload) => String(payload.content ?? '').includes('Yes, that works.'))).toBe(false);
+
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+
+    expect(sent.some((payload) => String(payload.content ?? '').includes('Yes, that works.'))).toBe(true);
+    expect(sent.filter((payload) => payload.type === 'session.commentary.append').at(-1)?.content)
+      .toContain('Yes, that works.');
   });
 
   it('uses the post-audio idle boundary when Live emits no output-done event', () => {

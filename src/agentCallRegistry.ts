@@ -2293,6 +2293,16 @@ function logAgentCallAudit(phase: string, record: AgentCallRecord, config: AppCo
         record.agentEngine === 'gpt-live-1' ? resolveGptLiveVoice(record.voice) : record.voice,
       languageLock: record.languageLock ?? null,
       timings: timingDiagnostics(record),
+      startupDiagnostics: {
+        sessionUpdateAcked: record.startupDiagnostics.sessionUpdateAcked,
+        startupEnvelopeQueued: record.startupDiagnostics.startupEnvelopeQueued,
+        startupEnvelopePlaybackConfirmed: record.startupDiagnostics.startupEnvelopePlaybackConfirmed,
+        openingInstructionAcked: record.startupDiagnostics.openingInstructionAcked ?? false,
+        openingCommentaryAcked: record.startupDiagnostics.openingCommentaryAcked ?? false,
+        openingRetryCount: record.startupDiagnostics.openingRetryCount ?? 0,
+        openingFallbackReleased: record.startupDiagnostics.openingFallbackReleased ?? false,
+        bufferedStartupAudio: record.startupDiagnostics.bufferedStartupAudio
+      },
       counters: { ...record.counters },
       endedReason: record.endedReason ?? null,
       hasError: Boolean(record.error)
