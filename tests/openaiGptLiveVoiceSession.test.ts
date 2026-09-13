@@ -237,10 +237,14 @@ describe('GPT-Live voice session', () => {
     expect(settled).toBe(false);
 
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'answer-audio' }));
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
     await expect(delivery).resolves.toMatchObject({
       delivered: true,
       acknowledged: true,
       audioStarted: true,
+      audioCompleted: true,
       retryCount: 0
     });
   });
@@ -265,11 +269,13 @@ describe('GPT-Live voice session', () => {
       vi.advanceTimersByTime(1_400);
       expect(sent.filter((payload) => payload.type === 'session.commentary.append')).toHaveLength(2);
       mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'retry-audio' }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
 
       await expect(delivery).resolves.toMatchObject({
         delivered: true,
         acknowledged: true,
         audioStarted: true,
+        audioCompleted: true,
         retryCount: 1
       });
     } finally {
@@ -330,11 +336,13 @@ describe('GPT-Live voice session', () => {
       JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
     );
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'resume-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
 
     await expect(delivery).resolves.toMatchObject({
       delivered: true,
       acknowledged: true,
-      audioStarted: true
+      audioStarted: true,
+      audioCompleted: true
     });
   });
 

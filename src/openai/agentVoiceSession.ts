@@ -33,6 +33,8 @@ export interface AgentInterventionDelivery {
   delivered: boolean;
   acknowledged: boolean;
   audioStarted: boolean;
+  /** True when GPT-Live confirmed that the directed spoken turn finished. */
+  audioCompleted?: boolean;
   retryCount: number;
   latencyMs: number;
   error?: string;

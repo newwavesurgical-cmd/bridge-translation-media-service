@@ -12,6 +12,7 @@ const OPENING_FIRST_AUDIO_TIMEOUT_MS = 1_500;
 const OPENING_RETRY_AUDIO_TIMEOUT_MS = 1_500;
 const CONTROL_FIRST_RESPONSE_TIMEOUT_MS = 1_400;
 const CONTROL_RETRY_RESPONSE_TIMEOUT_MS = 1_800;
+const CONTROL_AUDIO_COMPLETION_TIMEOUT_MS = 10_000;
 
 interface PendingIntervention {
   id: string;
@@ -28,6 +29,7 @@ interface ActiveIntervention extends PendingIntervention {
   instructionAcked: boolean;
   commentaryAcked: boolean;
   audioStarted: boolean;
+  audioCompleted: boolean;
   retryCount: number;
   timer?: NodeJS.Timeout;
 }
@@ -219,6 +221,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       instructionAcked: false,
       commentaryAcked: false,
       audioStarted: false,
+      audioCompleted: false,
       retryCount: 0
     };
     const resumeAutonomy = semanticControl === 'resume_autonomy';
@@ -293,13 +296,29 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     active.timer.unref();
   }
 
+  private armInterventionCompletionWatchdog(): void {
+    const active = this.activeIntervention;
+    if (!active) return;
+    if (active.timer) clearTimeout(active.timer);
+    active.timer = setTimeout(() => {
+      const current = this.activeIntervention;
+      if (!current || current.id !== active.id || !current.audioStarted) return;
+      // Current Live builds normally emit output_audio.done. Keep a bounded
+      // escape hatch for a missing terminal event so one malformed turn can
+      // never strand all later operator controls.
+      logGptLiveControl('audio_completion_timeout', current);
+      this.finishIntervention(true);
+    }, CONTROL_AUDIO_COMPLETION_TIMEOUT_MS);
+    active.timer.unref();
+  }
+
   private maybeFinishIntervention(): void {
     const active = this.activeIntervention;
     if (
       !active ||
       !active.instructionAcked ||
       !active.commentaryAcked ||
-      (active.expectsSpeech && !active.audioStarted)
+      (active.expectsSpeech && (!active.audioStarted || !active.audioCompleted))
     ) {
       return;
     }
@@ -317,6 +336,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       delivered,
       acknowledged: active.instructionAcked && active.commentaryAcked,
       audioStarted: active.audioStarted,
+      audioCompleted: active.audioCompleted,
       retryCount: active.retryCount,
       latencyMs: Date.now() - active.createdAt,
       ...(failure ?? {})
@@ -493,7 +513,9 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
         this.armOpeningIdleFallback();
       }
       if (this.activeIntervention) {
+        const firstControlAudio = !this.activeIntervention.audioStarted;
         this.activeIntervention.audioStarted = true;
+        if (firstControlAudio) this.armInterventionCompletionWatchdog();
         this.maybeFinishIntervention();
       }
       this.options.onAudioDelta(event.delta);
@@ -501,6 +523,16 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     }
     if (event.type === 'session.output_transcript.delta' && event.delta) {
       this.options.onAgentTranscriptDelta(event.delta);
+      return;
+    }
+    if (
+      this.activeIntervention?.audioStarted &&
+      (event.type === 'session.output_audio.done' ||
+        event.type === 'session.output_item.done' ||
+        event.type === 'session.output.done')
+    ) {
+      this.activeIntervention.audioCompleted = true;
+      this.maybeFinishIntervention();
       return;
     }
     if (

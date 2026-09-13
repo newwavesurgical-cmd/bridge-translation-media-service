@@ -275,7 +275,7 @@ describe('AgentCallRegistry', () => {
     });
   });
 
-  it('keeps a surfaced non-blocking question visible after the agent answers', () => {
+  it('does not surface a non-blocking question that the agent can answer from the mission', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',
       missionPrompt: 'Ask about store hours.',
@@ -287,20 +287,46 @@ describe('AgentCallRegistry', () => {
     };
 
     mutable.considerOperatorQuestion('What would you like to know?');
-    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({
-      text: 'What would you like to know?',
-      blocking: false
-    });
+    expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
 
     mutable.handleAgentTranscriptDelta('I am calling to ask about your store hours.');
 
     expect(session.diagnostics()).toMatchObject({
-      pendingOperatorQuestion: {
-        text: 'What would you like to know?',
-        blocking: false
-      },
-      counters: { operatorQuestionsResolved: 0 }
+      pendingOperatorQuestion: null,
+      counters: { operatorQuestionsDetected: 0, operatorQuestionsResolved: 0 }
     });
+  });
+
+  it('briefly reassures the callee when they check liveness during an operator hold', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Schedule an appointment.',
+      languageLock: 'English',
+      agentEngine: 'gpt-live-1'
+    });
+    const deliverVerbatimText = vi.fn(() => Promise.resolve({ ok: true }));
+    const mutable = session as unknown as {
+      agent: { suppressActiveOutput: (reason: string) => void };
+      considerOperatorQuestion: (text: string) => void;
+      observeRemoteTranscript: (delta: string) => void;
+      deliverVerbatimText: typeof deliverVerbatimText;
+    };
+    mutable.agent = { suppressActiveOutput: vi.fn() };
+    mutable.deliverVerbatimText = deliverVerbatimText;
+    session.data.state = 'live';
+
+    mutable.considerOperatorQuestion('Can you do Wednesday at noon?');
+    mutable.observeRemoteTranscript('Hello, are you still there?');
+    await Promise.resolve();
+
+    expect(deliverVerbatimText).toHaveBeenNthCalledWith(
+      2,
+      "Yes, I'm still here. Just one more moment, please.",
+      expect.any(Function),
+      false,
+      false
+    );
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
   });
 
   it('keeps a blocking question pending until GPT-Live confirms response audio', async () => {
@@ -318,11 +344,21 @@ describe('AgentCallRegistry', () => {
       latencyMs: number;
     }) => void;
     const injectInstruction = vi.fn(
-      () =>
-        new Promise<{
+      (_text: string, semanticControl?: string) =>
+        semanticControl === 'resume_autonomy'
+          ? Promise.resolve({
+              delivered: true,
+              acknowledged: true,
+              audioStarted: false,
+              audioCompleted: false,
+              retryCount: 0,
+              latencyMs: 10
+            })
+          : new Promise<{
           delivered: boolean;
           acknowledged: boolean;
           audioStarted: boolean;
+          audioCompleted?: boolean;
           retryCount: number;
           latencyMs: number;
         }>((resolve) => {
@@ -348,6 +384,7 @@ describe('AgentCallRegistry', () => {
       delivered: true,
       acknowledged: true,
       audioStarted: true,
+      audioCompleted: true,
       retryCount: 0,
       latencyMs: 40
     });
@@ -356,12 +393,21 @@ describe('AgentCallRegistry', () => {
       acknowledged: true,
       audioStarted: true
     });
-    expect(injectInstruction).toHaveBeenCalledWith(
+    expect(injectInstruction).toHaveBeenNthCalledWith(
+      1,
       expect.stringContaining('SINGLE-USE APPROVAL BOUNDARY'),
       'yes',
       true
     );
     expect(injectInstruction.mock.calls[0]?.[0]).toContain('does not approve any later or follow-up date, time');
+    expect(injectInstruction.mock.calls[0]?.[0]).toContain('ACTIVE CALLEE QUESTION');
+    expect(injectInstruction.mock.calls[0]?.[0]).toContain('Can you do Wednesday at noon?');
+    expect(injectInstruction).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('Remove the temporary decision hold'),
+      'resume_autonomy',
+      false
+    );
     expect(session.diagnostics()).toMatchObject({
       pendingOperatorQuestion: null,
       counters: {
