@@ -503,6 +503,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     }
 
     if (event.type === 'session.started') {
+      if (this.sessionStarted) return;
       this.sessionStarted = true;
       this.setStatus('live');
       this.publishStartupDiagnostics();
@@ -677,7 +678,9 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       ? normalizeOpeningText(this.options.firstUtterance)
       : '';
     const purpose = normalizeOpeningText(this.options.spokenPurpose);
-    const directive = buildGptLiveOpeningDirective({ disclosure, purpose });
+    const directive = buildGptLiveOpeningDirective({
+      disclosure, purpose, language: lockedLanguage(this.options.instructions)
+    });
     const eventId = `bridge-live-opening-rule-${Date.now()}`;
     this.openingInstructionEventId = eventId;
     this.sendJson({
@@ -850,9 +853,8 @@ export function buildGptLiveConversationInstructions(
   const missionContext = extractGptLiveMissionContext(missionInstructions);
   const disclosure = opening?.disclosureEnabled ? normalizeOpeningText(opening.firstUtterance) : '';
   const purpose = normalizeOpeningText(opening?.spokenPurpose);
-  const openingPolicy = disclosure
-    ? `The trusted application will trigger your first assistant output. In that one output, say the configured disclosure exactly once, then the prepared purpose exactly once, in the same voice: ${JSON.stringify(disclosure)} ${JSON.stringify(purpose)}. Add nothing before them.`
-    : `No disclosure is enabled. The trusted application will trigger your first assistant output with the prepared purpose exactly once and no greeting, announcement, or preamble: ${JSON.stringify(purpose)}.`;
+  const openingPolicy = 'The trusted application will trigger your first assistant output. ' +
+    buildGptLiveOpeningDirective({ disclosure, purpose, language });
   return [
     'You are Bridge, a warm, calm, capable caller in a natural outbound phone conversation. Sound like a real person: conversational, attentive, and unhurried, with concise wording and normal phone pacing.',
     `Speak ${language} only unless a trusted application instruction explicitly changes the language.`,
@@ -886,25 +888,33 @@ export function buildGptLiveConversationInstructions(
 export function buildGptLiveOpeningDirective(input: {
   disclosure?: string;
   purpose?: string;
+  language?: string;
 }): string {
   const disclosure = normalizeOpeningText(input.disclosure);
   const purpose = normalizeOpeningText(input.purpose);
-  if (disclosure) {
-    return [
-      'Begin the outbound call now in one natural spoken turn, using your configured GPT-Live voice.',
-      `First say exactly these words once: ${JSON.stringify(disclosure)}.`,
-      purpose ? `Immediately continue by saying exactly these words once: ${JSON.stringify(purpose)}.` : '',
-      'Do not add a greeting, introduction, explanation, question, or any other words. Then stop and listen.'
-    ].filter(Boolean).join(' ');
-  }
-  if (purpose) {
-    return [
-      'Begin the outbound call now in one natural spoken turn, using your configured GPT-Live voice.',
-      `Say exactly these words once: ${JSON.stringify(purpose)}.`,
-      'There is no disclosure. Do not add a greeting, announcement, explanation, question, or any other words. Then stop and listen.'
-    ].join(' ');
-  }
-  return 'Begin the outbound call now from the active mission in one concise natural turn. There is no disclosure or preamble. Then stop and listen.';
+  const language = normalizeOpeningLanguage(input.language);
+  const greeting = language === 'Spanish' ? 'Hola.' : language === 'Portuguese' ? 'Olá.' : 'Hi.';
+  const body = [disclosure, purpose].filter(Boolean).join(' ');
+  // A saved custom opening may already start with a greeting. Preserve its
+  // words without inserting a second "Hi / hello" before it.
+  const startsWithGreeting = language === 'Spanish' ? /^hola\b/i.test(body)
+    : language === 'Portuguese' ? /^(?:olá|ola|oi)(?=\s|[.,!?:;]|$)/iu.test(body)
+      : /^(?:hi|hello|hey)\b/i.test(body);
+  const opening = [startsWithGreeting ? '' : greeting, body].filter(Boolean).join(' ');
+  return [
+    `Begin the outbound call now in one natural spoken turn in ${language}, using your configured GPT-Live voice.`,
+    'Start with the brief, warm greeting immediately; do not wait for another hello or delegate the prepared opening to the backend. Flow straight into the rest with only a natural short pause, not a separate turn.',
+    `Say exactly these words once: ${JSON.stringify(opening)}.`,
+    !disclosure ? 'There is no disclosure. Do not add telemarketer or translator wording.' : '',
+    !purpose ? 'Then state the concrete reason from the active mission briefly, without inventing facts.' : '',
+    'Do not add another greeting, introduction, explanation, or question. Then stop and listen. Never replay the opening after it has started; if interrupted, continue only the unheard remainder.'
+  ].filter(Boolean).join(' ');
+}
+
+function normalizeOpeningLanguage(language?: string): 'English' | 'Spanish' | 'Portuguese' {
+  if (/^(?:spanish|es(?:[-_][a-z]+)?)$/i.test(language?.trim() ?? '')) return 'Spanish';
+  if (/^(?:portuguese|pt(?:[-_][a-z]+)?)$/i.test(language?.trim() ?? '')) return 'Portuguese';
+  return 'English';
 }
 
 function normalizeOpeningText(text: string | undefined): string {
@@ -966,6 +976,8 @@ function extractGptLiveMissionContext(instructions: string): string {
 }
 
 function lockedLanguage(instructions: string): string {
+  const explicitLock = instructions.match(/language lock:\s*speaks? only(?: in)?\s+(english|spanish|portuguese|(?:en|es|pt)(?:[-_][a-z]+)?)(?=[\s.,;]|$)/i)?.[1];
+  if (explicitLock) return normalizeOpeningLanguage(explicitLock);
   if (/speak only spanish|speaks? only in spanish|first utterance must be in spanish/i.test(instructions)) return 'Spanish';
   if (/speak only portuguese|speaks? only in portuguese|first utterance must be in portuguese/i.test(instructions)) return 'Portuguese';
   return 'English';

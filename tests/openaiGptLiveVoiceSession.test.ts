@@ -38,7 +38,7 @@ const speechAudio = Buffer.from(encodeMuLaw(Int16Array.from(
 ))).toString('base64');
 const quietAudio = Buffer.alloc(4000, 255).toString('base64');
 
-function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: string; spokenPurpose?: string }) {
+function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: string; spokenPurpose?: string; instructions?: string }) {
   const sent: Array<Record<string, unknown>> = [];
   const audio: string[] = [];
   const remote: string[] = [];
@@ -50,7 +50,7 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
   const playbackMarks: string[] = [];
   const session = new OpenAiGptLiveVoiceSession({
     config,
-    instructions: 'LANGUAGE LOCK: Speak only English. Mission fact: appointment at noon.',
+    instructions: input?.instructions ?? 'LANGUAGE LOCK: Speak only English. Mission fact: appointment at noon.',
     disclosureEnabled: input?.disclosureEnabled ?? true,
     firstUtterance: input?.firstUtterance ?? "I'm not a telemarketer.",
     spokenPurpose: input?.spokenPurpose ?? 'I am calling to confirm the appointment time.',
@@ -559,7 +559,7 @@ describe('GPT-Live voice session', () => {
     expect(session.status).toBe('live');
   });
 
-  it('uses one GPT-Live voice turn for disclosure plus purpose when the toggle is on', () => {
+  it('uses one GPT-Live voice turn for greeting, disclosure and purpose when the toggle is on', () => {
     const directive = buildGptLiveOpeningDirective({
       disclosure: "I'm not a telemarketer.",
       purpose: 'I am calling about the car you listed.'
@@ -568,10 +568,12 @@ describe('GPT-Live voice session', () => {
     expect(directive).toContain("I'm not a telemarketer.");
     expect(directive).toContain('I am calling about the car you listed.');
     expect(directive).toContain('one natural spoken turn');
-    expect(directive).toContain('Do not add a greeting');
+    expect(directive).toContain('"Hi. I\'m not a telemarketer. I am calling about the car you listed."');
+    expect(directive).toContain('Do not add another greeting');
+    expect(directive).toContain('only a natural short pause, not a separate turn');
   });
 
-  it('starts directly with the mission purpose and no disclosure when the toggle is off', () => {
+  it('starts with a brief greeting and mission purpose but no disclosure when the toggle is off', () => {
     const { mutable, sent } = makeSession({
       disclosureEnabled: false,
       firstUtterance: "I'm not a telemarketer.",
@@ -583,6 +585,87 @@ describe('GPT-Live voice session', () => {
     expect(String(sent[0]?.content)).toContain('I am calling about the car you listed.');
     expect(String(sent[0]?.content)).toContain('There is no disclosure');
     expect(String(sent[0]?.content)).not.toContain("I'm not a telemarketer.");
+    expect(String(sent[0]?.content)).toContain('"Hi. I am calling about the car you listed."');
+  });
+
+  it.each([
+    ['English', 'Hi.', 'I am calling about the listing.'],
+    ['en-US', 'Hi.', 'I am calling about the listing.'],
+    ['Spanish', 'Hola.', 'Llamo por el anuncio.'],
+    ['es-ES', 'Hola.', 'Llamo por el anuncio.'],
+    ['Portuguese', 'Olá.', 'Estou ligando sobre o anúncio.'],
+    ['pt-BR', 'Olá.', 'Estou ligando sobre o anúncio.']
+  ])('uses the outbound %s lock for both startup and live greeting directives', (language, greeting, purpose) => {
+    const instructions = `Language lock: speak only in ${language}.\nMission:\nAsk about the listing. Other language examples are not the call language.`;
+    const { mutable, sent } = makeSession({ instructions, disclosureEnabled: false, spokenPurpose: purpose });
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    const start = buildGptLiveSessionStart({
+      liveModel: 'gpt-live-1', backendModel: 'gpt-5.6-luna', voice: 'echo',
+      instructions, disclosureEnabled: false, spokenPurpose: purpose
+    });
+    for (const directive of [String(start.instructions), String(sent[0].content)]) {
+      expect(directive).toContain(JSON.stringify(`${greeting} ${purpose}`));
+      expect(directive).toContain('do not wait for another hello');
+      expect(directive).not.toContain('no greeting');
+    }
+  });
+
+  it.each([
+    ['English', 'Hi. I am calling about the listing.'],
+    ['English', 'Hello, I am calling about the listing.'],
+    ['Spanish', 'Hola, llamo por el anuncio.'],
+    ['Portuguese', 'Olá. Estou ligando sobre o anúncio.']
+  ])('preserves an existing %s custom greeting without adding another', (language, purpose) => {
+    const directive = buildGptLiveOpeningDirective({ language, purpose });
+    expect(directive).toContain(`Say exactly these words once: ${JSON.stringify(purpose)}.`);
+    const withDisclosure = buildGptLiveOpeningDirective({ language, disclosure: purpose, purpose: 'A separate purpose.' });
+    expect(withDisclosure).toContain(`Say exactly these words once: ${JSON.stringify(`${purpose} A separate purpose.`)}.`);
+  });
+
+  it('uses the explicit English lock rather than a Spanish instruction quoted inside mission data', () => {
+    const start = buildGptLiveSessionStart({
+      liveModel: 'gpt-live-1', backendModel: 'gpt-5.6-luna', voice: 'echo',
+      instructions: 'Language lock: speak only in en-US.\nMission:\nDiscuss a sign saying "speak only Spanish".',
+      disclosureEnabled: false, spokenPurpose: 'I am calling about the sign.'
+    });
+    expect(start.instructions).toContain('Speak English only');
+    expect(start.instructions).toContain('"Hi. I am calling about the sign."');
+  });
+
+  it('greets then uses the active mission if no prepared purpose exists', () => {
+    const directive = buildGptLiveOpeningDirective({ language: 'Spanish' });
+    expect(directive).toContain('Say exactly these words once: "Hola."');
+    expect(directive).toContain('Then state the concrete reason from the active mission briefly');
+    expect(directive).toContain('There is no disclosure');
+  });
+
+  it('triggers the single opening immediately on acknowledgment without waiting for caller transcription', () => {
+    const { mutable, sent, session } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    const rule = sent[0];
+    mutable.handleMessage(JSON.stringify({ type: 'session.instructions.appended', client_event_id: rule.event_id }));
+    expect(sent.map((event) => event.type)).toEqual(['session.instructions.append', 'session.commentary.append']);
+    expect(sent[0].content).toContain('"Hi.');
+    session.appendPcmuBase64('actual-caller-hello');
+    expect(sent.at(-1)).toEqual({ type: 'session.input_audio.append', audio: 'actual-caller-hello' });
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.instructions.appended', client_event_id: rule.event_id }));
+    expect(sent.filter((event) => event.type === 'session.instructions.append')).toHaveLength(1);
+    expect(sent.filter((event) => event.type === 'session.commentary.append')).toHaveLength(1);
+  });
+
+  it('does not replay the greeting after early audio, late acknowledgment or a mid-call hello', () => {
+    vi.useFakeTimers();
+    try {
+      const { mutable, sent } = makeSession();
+      mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.instructions.appended', client_event_id: sent[0].event_id }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello?' }));
+      vi.advanceTimersByTime(5_000);
+      expect(sent.filter((event) => event.type === 'session.instructions.append')).toHaveLength(1);
+      expect(sent.some((event) => event.type === 'session.commentary.append')).toBe(false);
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
   });
 
   it('retries the opener once without ever replacing the live caller stream with silence', () => {

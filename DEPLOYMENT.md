@@ -43,6 +43,39 @@ Set these in Lovable/Supabase, not in browser code:
 
 ## Notes
 
+### Same-voice GPT-Live greeting (2026-09-13, pending deployment)
+
+- Removed the GPT-Live-only prohibition on greeting before the prepared purpose.
+  The startup policy, fresh opening directive and delegated backend now share one
+  opening contract: a brief warm Hi / Hola / Olá, the disclosure only when enabled,
+  then the prepared purpose, in one configured voice and one turn. Custom text
+  already starting with a greeting is preserved without a second prefixed greeting.
+- Start promptly without waiting for another hello or delegating the prepared
+  opening. No extra spoken clip/event, artificial pause, Twilio Say, or new voice.
+  Duplicate session.started events cannot enqueue another opening; late acks and
+  later caller hellos cannot replay it. Existing startup watchdogs are unchanged.
+- Resolve the greeting from the explicit outbound language lock, including
+  en-US/es-ES/pt-BR, ahead of language wording quoted in mission data. This is not
+  a claim to have repaired the separate mid-call language-switch anomaly.
+- Timing limitation: current synchronous DetectMessageEnd blocks TwiML/media
+  until Twilio classifies the answer (or the voicemail greeting ends). The bridge
+  then creates the Live connection. No greeting can be heard before that path
+  opens. This patch does not change AMD, call routing or preconnect behavior and
+  does not prove a reduction in answer-to-first-audible-speech latency. Review
+  those timings separately before redesigning the voicemail/connection path.
+- Verification: 270 bridge tests and TypeScript build pass. Coverage includes
+  toggle on/off, locale locks, custom greetings, immediate post-ack triggering,
+  duplicate startup, late acks, mid-call hello and uninterrupted caller input.
+  Realtime, main translation, hybrid, operator buttons, Twilio settings, auth,
+  credentials and billing are unchanged. No real call or model-audio test ran.
+  Not pushed, deployed or published; includes the earlier local recap repair.
+- After authorized deployment, test both disclosure settings in English/Spanish:
+  one greeting and one mission, same voice; a mid-call hello must not restart it.
+  Measure pickup-to-stream, stream-to-agent-ready and ready-to-audible-greeting
+  separately. Listen to actual playback; append acknowledgments are not proof.
+- References: [OpenAI greeting guidance](https://developers.openai.com/api/docs/guides/live-conversations#greet-before-the-caller-speaks),
+  [Twilio synchronous AMD](https://www.twilio.com/docs/voice/answering-machine-detection#asyncamd).
+
 ### Context-aware repeat confirmations (2026-09-13, pending deployment)
 
 - Retained call `…62fa7078` on `edf112b` contained delivered operator values

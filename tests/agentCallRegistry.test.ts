@@ -291,6 +291,25 @@ describe('AgentCallRegistry', () => {
     expect(standard.data.agentEngine).toBe('realtime');
   });
 
+  it.each([true, false])('keeps GPT-Live backend greeting aligned with the disclosure toggle %s', (disclosureEnabled) => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Ask about the listing.',
+      languageLock: 'English', agentEngine: 'gpt-live-1', disclosureEnabled,
+      spokenPurpose: 'I am calling about the listing.'
+    });
+    const instructions = buildAgentInstructions(session.data);
+    expect(instructions).toContain('Say exactly these words once: "Hi. ');
+    expect(instructions).toContain('one natural spoken turn in English');
+    expect(instructions).toContain('do not wait for another hello');
+    expect(instructions).not.toContain('Your first spoken words must be exactly:');
+    expect(instructions).not.toContain('no greeting');
+    if (disclosureEnabled) expect(instructions).toContain(session.data.firstUtterance);
+    else {
+      expect(instructions).toContain('"Hi. I am calling about the listing."');
+      expect(instructions).not.toContain(session.data.firstUtterance);
+    }
+  });
+
   it('builds instructions that prevent operator questions from being spoken aloud', () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

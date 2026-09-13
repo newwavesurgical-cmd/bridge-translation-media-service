@@ -16,7 +16,7 @@ import {
   type AgentStartupDiagnostics,
   type AgentVoiceSession
 } from './openai/agentVoiceSession.js';
-import { OpenAiGptLiveVoiceSession, resolveGptLiveVoice } from './openai/gptLiveVoiceSession.js';
+import { buildGptLiveOpeningDirective, OpenAiGptLiveVoiceSession, resolveGptLiveVoice } from './openai/gptLiveVoiceSession.js';
 import {
   observeOperatorQuestion,
   type OperatorQuestionObservation,
@@ -2341,11 +2341,17 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
   const spokenStyle = languageStyleInstruction(record.languageLock);
   const holdPhrase = holdPhraseInstruction(record.languageLock);
 
-  const openingRule = record.disclosureEnabled
-    ? `Your first spoken words must be exactly: "${record.firstUtterance}"`
-    : record.spokenPurpose
-      ? `No disclosure is enabled. Begin the call once with this prepared purpose: "${record.spokenPurpose}" Do not add a greeting, announcement, or other preamble before it.`
-      : 'No disclosure is enabled. Begin directly from the active Mission with no greeting, announcement, or other preamble.';
+  const openingRule = record.agentEngine === 'gpt-live-1'
+    ? buildGptLiveOpeningDirective({
+      disclosure: record.disclosureEnabled ? record.firstUtterance : undefined,
+      purpose: record.spokenPurpose,
+      language: record.languageLock
+    })
+    : record.disclosureEnabled
+      ? `Your first spoken words must be exactly: "${record.firstUtterance}"`
+      : record.spokenPurpose
+        ? `No disclosure is enabled. Begin the call once with this prepared purpose: "${record.spokenPurpose}" Do not add a greeting, announcement, or other preamble before it.`
+        : 'No disclosure is enabled. Begin directly from the active Mission with no greeting, announcement, or other preamble.';
 
   return [
     'You are a live outbound phone-call voice agent.',
