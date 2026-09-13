@@ -423,4 +423,36 @@ describe('GPT-Live voice session', () => {
       vi.useRealTimers();
     }
   });
+
+  it('does not postpone the opening boundary when audio chunks stream continuously', () => {
+    vi.useFakeTimers();
+    try {
+      const { mutable, queued } = makeSession();
+      mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'chunk-1' }));
+      vi.advanceTimersByTime(500);
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'chunk-2' }));
+      vi.advanceTimersByTime(500);
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'chunk-3' }));
+
+      vi.advanceTimersByTime(499);
+      expect(queued).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(queued).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases queued controls as soon as the callee responds after opening audio', () => {
+    const { session, mutable, sent } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    session.injectInstruction('Yes, that works.', 'yes');
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    expect(sent.some((payload) => String(payload.content ?? '').includes('Yes, that works.'))).toBe(false);
+
+    mutable.handleMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello?' }));
+
+    expect(sent.some((payload) => String(payload.content ?? '').includes('Yes, that works.'))).toBe(true);
+  });
 });

@@ -312,6 +312,21 @@ export function createBridgeMediaServer(config: AppConfig) {
         }
         const body = agentControlSchema.parse(await readJson(req));
         const control = await session.receiveControl(body);
+        console.info(
+          JSON.stringify({
+            event: 'agent_control_result',
+            version: 1,
+            sessionIdSuffix: sessionId.slice(-8),
+            kind: body.kind ?? null,
+            semanticControl: body.control ?? body.semantic_control ?? body.microId ?? null,
+            delivered: control.delivered,
+            acknowledged: control.acknowledged ?? false,
+            audioStarted: control.audioStarted ?? false,
+            fallbackUsed: control.fallbackUsed ?? false,
+            retryCount: control.retryCount ?? 0,
+            errorCode: control.errorCode ?? (control.error ? 'control_error' : null)
+          })
+        );
         if (control.error) {
           return sendJson(res, 409, {
             ok: false,

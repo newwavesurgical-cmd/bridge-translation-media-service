@@ -479,6 +479,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
         this.openingOutputStarted = true;
         if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
         this.openingFirstAudioTimer = undefined;
+        // This is a hard boundary from the first opening-audio chunk, not an
+        // inactivity debounce. GPT-Live can stream audio continuously across
+        // the opening and the next turn; resetting this timer for every chunk
+        // stranded every queued operator control for the life of the call.
         this.armOpeningIdleFallback();
       }
       if (this.activeIntervention) {
@@ -502,6 +506,13 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       return;
     }
     if (event.type === 'session.input_transcript.delta' && event.delta) {
+      // A real callee transcript after opening audio is definitive evidence
+      // that the call has moved beyond startup. Release operator controls
+      // immediately instead of waiting for an output-done event that some
+      // Live sessions do not emit.
+      if (this.openingOutputStarted && !this.startupEnvelopeQueued) {
+        this.finishOpeningOutput();
+      }
       const now = Date.now();
       // GPT-Live emits many transcript fragments for one continuous
       // utterance. Treat only the first fragment after a real pause as a
@@ -635,7 +646,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   }
 
   private armOpeningIdleFallback(): void {
-    if (this.openingIdleTimer) clearTimeout(this.openingIdleTimer);
+    if (this.openingIdleTimer || this.startupEnvelopeQueued) return;
     this.openingIdleTimer = setTimeout(() => this.finishOpeningOutput(), 1_500);
     this.openingIdleTimer.unref();
   }

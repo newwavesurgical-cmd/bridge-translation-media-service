@@ -275,6 +275,34 @@ describe('AgentCallRegistry', () => {
     });
   });
 
+  it('keeps a surfaced non-blocking question visible after the agent answers', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Ask about store hours.',
+      languageLock: 'English'
+    });
+    const mutable = session as unknown as {
+      considerOperatorQuestion: (text: string) => void;
+      handleAgentTranscriptDelta: (delta: string) => void;
+    };
+
+    mutable.considerOperatorQuestion('What would you like to know?');
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({
+      text: 'What would you like to know?',
+      blocking: false
+    });
+
+    mutable.handleAgentTranscriptDelta('I am calling to ask about your store hours.');
+
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: {
+        text: 'What would you like to know?',
+        blocking: false
+      },
+      counters: { operatorQuestionsResolved: 0 }
+    });
+  });
+
   it('keeps a blocking question pending until GPT-Live confirms response audio', async () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000',

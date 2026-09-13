@@ -1174,22 +1174,7 @@ export class AgentCallSession {
         this.emitTranscript('remote', delta);
         this.observeRemoteTranscript(delta);
       },
-      onAgentTranscriptDelta: (delta) => {
-        this.flushRemoteUtterance();
-        if (this.isIvrHoldActive()) {
-          this.record.counters.ivrAgentTranscriptSuppressed += 1;
-          return;
-        }
-        if (this.record.pendingOperatorQuestion?.blocking && !this.operatorControlResponseActive) {
-          return;
-        }
-        if (this.record.pendingOperatorQuestion && !this.operatorControlResponseActive) {
-          this.resolvePendingOperatorQuestion('mission_answered');
-        }
-        this.record.timings.firstAgentTranscriptAt ??= new Date().toISOString();
-        this.record.counters.agentTranscriptDeltas += 1;
-        this.emitTranscript('agent', delta);
-      },
+      onAgentTranscriptDelta: (delta) => this.handleAgentTranscriptDelta(delta),
       onUserSpeechStarted: () => this.clearTwilioAudioForBargeIn(),
       onStartupEnvelopeQueued: () => {
         const name = `agent-startup-envelope-${Date.now()}`;
@@ -1468,6 +1453,23 @@ export class AgentCallSession {
     if (newlyBlocking) this.activateOperatorDecisionHold(next);
   }
 
+  private handleAgentTranscriptDelta(delta: string): void {
+    this.flushRemoteUtterance();
+    if (this.isIvrHoldActive()) {
+      this.record.counters.ivrAgentTranscriptSuppressed += 1;
+      return;
+    }
+    if (this.record.pendingOperatorQuestion?.blocking && !this.operatorControlResponseActive) {
+      return;
+    }
+    // Do not clear a surfaced question merely because the autonomous agent
+    // spoke. The operator may still need to verify, correct, or dismiss it,
+    // and the next callee question will replace it naturally.
+    this.record.timings.firstAgentTranscriptAt ??= new Date().toISOString();
+    this.record.counters.agentTranscriptDeltas += 1;
+    this.emitTranscript('agent', delta);
+  }
+
   private flushRemoteUtterance(): void {
     const utterance = this.currentRemoteUtterance.trim();
     if (!utterance) return;
@@ -1499,7 +1501,7 @@ export class AgentCallSession {
   }
 
   private resolvePendingOperatorQuestion(
-    _source: 'operator_control' | 'operator_takeover' | 'operator_dismissed' | 'mission_answered'
+    _source: 'operator_control' | 'operator_takeover' | 'operator_dismissed'
   ): void {
     if (!this.record.pendingOperatorQuestion) return;
     this.record.pendingOperatorQuestion = undefined;
