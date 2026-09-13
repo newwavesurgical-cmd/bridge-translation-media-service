@@ -43,6 +43,26 @@ Set these in Lovable/Supabase, not in browser code:
 
 ## Notes
 
+### GPT-Live post-answer continuity (2026-09-13)
+
+- GPT-Live has no output-audio-done event. Operator speech completion uses local
+  PCMU activity plus a Twilio playback checkpoint after 450 ms of streamed quiet
+  (or a 650 ms packet gap). A new voiced chunk invalidates an older checkpoint.
+  Cleared marks are not completed playback. A lost-checkpoint watchdog releases
+  the control without claiming completed playback; it resets while speech continues.
+- After an answered question, preserve the exact question/reply as quiet context
+  and continue with one mission-specific next step. A day approval is retained as
+  a settled fact, never extended to a new time or other commitment. A later
+  question cannot be cleared by completion of the earlier answer.
+- Exact-say, takeover, startup, credentials, billing, main translation, and hybrid
+  configuration are unchanged. No real calls are part of automated verification.
+- References: [OpenAI Live WebSockets](https://developers.openai.com/api/docs/guides/voice-websockets),
+  [Live context updates](https://developers.openai.com/api/docs/guides/live-conversations#provide-history-and-context),
+  [Twilio marks and clear](https://www.twilio.com/docs/voice/media-streams/websocket-messages#mark-message).
+- Manual acceptance after deployment: approve Wednesday, verify the spoken answer
+  continues to asking for time options, check that noon still requires approval,
+  and say hello mid-call to verify it continues the topic without restarting intake.
+
 Twilio bidirectional Media Streams receive phone audio and accept `media` messages back to the call. The current keypad path sends audible DTMF tones through that media stream for lab IVR testing. Treat this as a prototype behavior, not guaranteed production DTMF delivery.
 
 OpenAI Realtime Translation expects continuous base64 PCM16 at 24 kHz through `session.input_audio_buffer.append` and returns translated audio through `session.output_audio.delta`. Keep streaming silence between phrases; do not build a push-to-talk turn system around phone calls.

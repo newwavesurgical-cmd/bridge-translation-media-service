@@ -31,7 +31,7 @@ const CONCRETE_SCHEDULING_SLOT =
 // commitment and must be held for the operator instead of being treated as a
 // harmless general question.
 const EXPLICIT_BARE_SCHEDULING_HOUR =
-  /^[¿\s]*(?:(?:how|what)\s+about\s+|(?:at|around|about|by|from)\s+|(?:a\s+las?|alrededor\s+de|como\s+a)\s+)(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;
+  /^[¿\s]*(?:y\s+)?(?:(?:how|what)\s+about\s+|(?:at|around|about|by|from)\s+|(?:a\s+las?|alrededor\s+de|como\s+a)\s+)(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;
 
 const NAKED_HOUR =
   /^[¿\s]*(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;

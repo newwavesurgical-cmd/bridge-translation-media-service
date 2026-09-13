@@ -48,6 +48,76 @@ function makeSpeechPayload(frequency = 440): string {
 }
 
 describe('AgentCallRegistry', () => {
+  it.each([
+    ['English', 'Can you do Wednesday?', 'What about 12 p.m.?', 'Hello'],
+    ['Spanish', '¿Puede venir el miércoles?', '¿Y a las doce?', 'Hola']
+  ])('preserves the answered day but requires separate time approval in %s', async (language, day, time, hello) => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit to see the car.',
+      languageLock: language, agentEngine: 'gpt-live-1'
+    });
+    const injectInstruction = vi.fn(() => Promise.resolve({
+      delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true, retryCount: 0, latencyMs: 20
+    }));
+    const appendConversationContext = vi.fn();
+    const mutable = session as unknown as {
+      agent: object;
+      considerOperatorQuestion: (text: string) => void;
+      observeRemoteTranscript: (delta: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction, appendConversationContext };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion(day);
+    await session.receiveControl({ control: 'yes' });
+    expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
+    expect(JSON.parse(appendConversationContext.mock.calls[0][0])).toMatchObject({
+      answered: [{ question: day, reply: 'yes: Yes' }]
+    });
+    expect(injectInstruction).toHaveBeenLastCalledWith(
+      expect.stringContaining('one brief, relevant next-step question'), 'resume_autonomy', true
+    );
+    mutable.observeRemoteTranscript(hello);
+    expect(appendConversationContext).toHaveBeenCalledTimes(2);
+    mutable.considerOperatorQuestion(time);
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ text: time, blocking: true });
+  });
+
+  it('does not clear a follow-up question that arrives while the earlier answer is playing', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    let finishAnswer!: (delivery: object) => void;
+    const delivered = { delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true, retryCount: 0, latencyMs: 20 };
+    const injectInstruction = vi.fn((_text: string, semantic: string) => semantic === 'yes'
+      ? new Promise((resolve) => { finishAnswer = resolve; })
+      : Promise.resolve(delivered));
+    const mutable = session as unknown as { agent: object; considerOperatorQuestion: (text: string) => void };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you come Wednesday?');
+    const request = session.receiveControl({ control: 'yes' });
+    mutable.considerOperatorQuestion('What about 12 p.m.?');
+    finishAnswer(delivered);
+    await request;
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ text: 'What about 12 p.m.?', blocking: true });
+    expect(injectInstruction.mock.calls.some((call) => call[1] === 'resume_autonomy')).toBe(false);
+  });
+
+  it('does not keep the answer button waiting on the next conversational step', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const injectInstruction = vi.fn((_text: string, semantic: string) => semantic === 'resume_autonomy'
+      ? new Promise(() => undefined)
+      : Promise.resolve({ delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true, retryCount: 0, latencyMs: 20 }));
+    const mutable = session as unknown as { agent: object; considerOperatorQuestion: (text: string) => void };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you come Wednesday?');
+    await expect(session.receiveControl({ control: 'yes' })).resolves.toMatchObject({ delivered: true });
+    expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
+  });
+
   it('creates agent-call sessions with language lock and control diagnostics', async () => {
     const registry = new AgentCallRegistry(config);
     const session = registry.create({
@@ -406,7 +476,7 @@ describe('AgentCallRegistry', () => {
       3,
       expect.stringContaining('Remove the temporary decision hold'),
       'resume_autonomy',
-      false
+      true
     );
     expect(session.diagnostics()).toMatchObject({
       pendingOperatorQuestion: null,

@@ -461,6 +461,7 @@ export class AgentCallSession {
   private lastHoldLivenessAt = 0;
   private holdLivenessInFlight = false;
   private operatorQuestionObserverGeneration = 0;
+  private readonly answeredOperatorQuestions: Array<{ question: string; reply: string }> = [];
 
   constructor(
     private readonly config: AppConfig,
@@ -680,7 +681,7 @@ export class AgentCallSession {
     const baseInstruction = controlInstruction(request, pendingQuestion?.text);
     const text =
       this.record.pendingOperatorQuestion && resolvesPendingQuestion
-        ? `${baseInstruction} SINGLE-USE APPROVAL BOUNDARY: this operator response resolves only the one currently pending question. It expires immediately after one callee-facing answer and does not approve any later or follow-up date, time, price, payment, consent, or other commitment.`
+        ? `${baseInstruction} SINGLE-USE APPROVAL BOUNDARY: this operator response resolves only the one currently pending question. Keep that resolved fact in call memory; it does not approve any later or follow-up date, time, price, payment, consent, or other commitment.`
         : baseInstruction;
     const duplicate = this.isDuplicateControl(request.control, text);
     const entry: AgentControlEntry = {
@@ -765,8 +766,7 @@ export class AgentCallSession {
         this.record.counters.controlsDelivered += 1;
         this.record.counters.controlsAudioStarted += 1;
         if (resolvesPendingQuestion) {
-          this.resolvePendingOperatorQuestion('operator_control');
-          await this.resumeAutonomyAfterOperatorAnswer();
+          await this.completeOperatorAnswer(request, pendingQuestion);
         }
       }
       this.touch();
@@ -774,12 +774,12 @@ export class AgentCallSession {
     }
 
     if (request.control === 'end_politely') {
-      await this.deliverAgentControl(request, text, entry, resolvesPendingQuestion);
+      await this.deliverAgentControl(request, text, entry, resolvesPendingQuestion, pendingQuestion);
       setTimeout(() => void this.end('operator_end_politely'), 4000).unref();
       return entry;
     }
 
-    await this.deliverAgentControl(request, text, entry, resolvesPendingQuestion);
+    await this.deliverAgentControl(request, text, entry, resolvesPendingQuestion, pendingQuestion);
     this.touch();
     return entry;
   }
@@ -788,7 +788,8 @@ export class AgentCallSession {
     request: AgentControlRequest,
     instruction: string,
     entry: AgentControlEntry,
-    resolvesPendingQuestion: boolean
+    resolvesPendingQuestion: boolean,
+    answeredQuestion?: AgentPendingOperatorQuestion
   ): Promise<void> {
     if (!this.agent || this.record.state !== 'live') {
       entry.error = 'The live agent session is not ready for an operator response.';
@@ -825,11 +826,10 @@ export class AgentCallSession {
       // does not yet expose GPT-Live-style append acknowledgments.
       entry.delivered = true;
       this.record.counters.controlsDelivered += 1;
-      if (resolvesPendingQuestion) {
-        this.resolvePendingOperatorQuestion('operator_control');
-        await this.resumeAutonomyAfterOperatorAnswer();
-      }
       this.operatorControlResponseActive = false;
+      if (resolvesPendingQuestion) {
+        await this.completeOperatorAnswer(request, answeredQuestion);
+      }
       return;
     }
 
@@ -844,11 +844,10 @@ export class AgentCallSession {
     if (delivery.delivered) {
       entry.delivered = true;
       this.record.counters.controlsDelivered += 1;
-      if (resolvesPendingQuestion) {
-        this.resolvePendingOperatorQuestion('operator_control');
-        await this.resumeAutonomyAfterOperatorAnswer();
-      }
       this.operatorControlResponseActive = false;
+      if (resolvesPendingQuestion) {
+        await this.completeOperatorAnswer(request, answeredQuestion);
+      }
       return;
     }
 
@@ -874,8 +873,7 @@ export class AgentCallSession {
       this.record.counters.controlsDelivered += 1;
       this.record.counters.controlsFallbackUsed += 1;
       if (resolvesPendingQuestion) {
-        this.resolvePendingOperatorQuestion('operator_control');
-        await this.resumeAutonomyAfterOperatorAnswer();
+        await this.completeOperatorAnswer(request, answeredQuestion);
       }
       return;
     }
@@ -885,21 +883,67 @@ export class AgentCallSession {
     this.record.counters.controlsFailed += 1;
   }
 
-  private async resumeAutonomyAfterOperatorAnswer(): Promise<void> {
+  private async completeOperatorAnswer(
+    request: AgentControlRequest,
+    question?: AgentPendingOperatorQuestion
+  ): Promise<void> {
+    if (question) {
+      this.answeredOperatorQuestions.push({
+        question: (question.sourceText ?? question.text).slice(0, 160),
+        reply: `${semanticControlFromRequest(request) ?? request.kind ?? 'answer'}: ${operatorTranscriptText(request, request.text ?? '')}`.slice(0, 100)
+      });
+      this.answeredOperatorQuestions.splice(0, Math.max(0, this.answeredOperatorQuestions.length - 4));
+    }
+    // A follow-up can arrive while the earlier answer is playing. Never clear
+    // that new approval or unmute it just because the earlier control finished.
+    if (this.record.pendingOperatorQuestion?.id !== question?.id) return;
+    this.resolvePendingOperatorQuestion('operator_control');
+    // The button is delivered when its answer plays, not when the separate
+    // next-step question finishes. Keep that background continuation out of
+    // the control HTTP response so a quiet callee cannot strand the cockpit.
+    void this.resumeAutonomyAfterOperatorAnswer(
+      Boolean(question) && semanticControlFromRequest(request) !== 'end_politely' &&
+      request.kind !== 'force_say' && request.kind !== 'human_say'
+    ).catch(() => {
+      console.warn(JSON.stringify({ event: 'agent_continuation_error', sessionIdSuffix: this.sessionId.slice(-8) }));
+    });
+  }
+
+  private async resumeAutonomyAfterOperatorAnswer(continueMission = false): Promise<void> {
     if (!this.agent || this.record.state !== 'live') return;
+    const gptLiveContinuation = this.record.agentEngine === 'gpt-live-1' && continueMission;
+    if (this.record.agentEngine === 'gpt-live-1' && this.answeredOperatorQuestions.length) {
+      this.agent.appendConversationContext?.(this.operatorContinuityContext());
+    }
     const resume = this.agent.injectInstruction(
       [
-        'The operator-directed answer has now finished playing.',
-        'Remove the temporary decision hold and resume the live conversation from fresh remote speech.',
+        'The operator-directed answer was delivered. Respect any callee interruption.',
+        'Remove the temporary decision hold. This is the SAME outbound call, not a new conversation.',
+        gptLiveContinuation
+          ? 'Continue from the resolved answer and current mission now with one brief, relevant next-step question. Do not wait for another hello. If you already asked that next question, listen instead of repeating it.'
+          : 'Resume the live conversation from fresh remote speech.',
         'The answer applies only to the question that was just resolved; it is not approval for any later choice or commitment.',
+        'Keep settled facts. Do not repeat the opening, restart intake, or re-ask an answered question.',
+        'A mid-call hello is a presence check: acknowledge you are still here and continue the current topic, never ask How can I help you.',
         'Stay responsive if the callee speaks, but do not repeat the answer merely because this instruction arrived.'
       ].join(' '),
       'resume_autonomy',
-      false
+      gptLiveContinuation
     );
     if (resume && typeof (resume as Promise<AgentInterventionDelivery>).then === 'function') {
       await resume;
     }
+  }
+
+  private operatorContinuityContext(): string {
+    return JSON.stringify({
+      state: 'Same outbound call. These are past answers, not approval for new commitments.',
+      purpose: this.callPurposeText().slice(0, 180),
+      answered: this.answeredOperatorQuestions.slice(-2),
+      recent: this.operatorQuestionObserverTurns().slice(-2).map((turn) => ({
+        speaker: turn.speaker, text: turn.text.slice(-140)
+      }))
+    });
   }
 
   /**
@@ -1212,6 +1256,7 @@ export class AgentCallSession {
       return;
     }
     if (message.event === 'mark') {
+      this.agent?.confirmPlaybackCheckpoint?.(message.mark.name);
       if (message.mark.name === this.startupEnvelopeMarkName) {
         this.startupEnvelopeMarkName = undefined;
         this.agent?.confirmStartupEnvelopePlayback();
@@ -1241,25 +1286,27 @@ export class AgentCallSession {
       onAudioDelta: (pcmu, context) => {
         this.flushRemoteUtterance();
         if (this.record.takeover?.active) {
-          return;
+          return false;
         }
         if (this.verbatimSpeechActive) {
-          return;
+          return false;
         }
         if (this.isIvrHoldActive()) {
           this.record.counters.ivrAgentAudioSuppressed += 1;
-          return;
+          return false;
         }
         if (
           this.record.pendingOperatorQuestion?.blocking &&
           !this.operatorControlResponseActive &&
           !isSameVoiceHoldContext(context?.semanticControl)
         ) {
-          return;
+          return false;
         }
         this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
         this.sendTwilioMedia(pcmu);
+        return true;
       },
+      onPlaybackCheckpoint: (name) => this.sendTwilioMark(name),
       onRemoteTranscriptDelta: (delta) => {
         this.record.timings.firstRemoteTranscriptAt ??= new Date().toISOString();
         this.record.counters.remoteTranscriptDeltas += 1;
@@ -1430,6 +1477,12 @@ export class AgentCallSession {
       looksLikeHoldLivenessCheck(this.currentRemoteUtterance)
     ) {
       void this.acknowledgeHoldLiveness();
+    }
+    if (!this.record.pendingOperatorQuestion && this.answeredOperatorQuestions.length &&
+      looksLikeHoldLivenessCheck(this.currentRemoteUtterance) &&
+      now - this.lastHoldLivenessAt >= HOLD_LIVENESS_COOLDOWN_MS) {
+      this.lastHoldLivenessAt = now;
+      this.agent?.appendConversationContext?.(this.operatorContinuityContext());
     }
     this.considerOperatorQuestion(this.currentRemoteUtterance);
     this.clearOperatorQuestionTimer();
@@ -1944,6 +1997,7 @@ export class AgentCallSession {
     }
     if (now - this.lastBargeInClearAt < BARGE_IN_CLEAR_COOLDOWN_MS) return;
     this.lastBargeInClearAt = now;
+    this.agent?.notifyPlaybackCleared?.();
     this.record.counters.bargeInClears += 1;
     this.twilioWs.send(
       JSON.stringify({
@@ -1957,6 +2011,7 @@ export class AgentCallSession {
   /** Exact speech is an explicit operator interrupt, so clear queued agent audio unconditionally. */
   private clearTwilioAudioForForcedSpeech(): void {
     if (!this.twilioWs || !this.record.twilioStreamSid) return;
+    this.agent?.notifyPlaybackCleared?.();
     this.record.counters.bargeInClears += 1;
     this.twilioWs.send(
       JSON.stringify({

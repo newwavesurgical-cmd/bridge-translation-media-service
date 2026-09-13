@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/config.js';
 import type { AgentOutputContext } from '../src/openai/agentVoiceSession.js';
+import { encodeMuLaw } from '../src/audio/mulaw.js';
 import {
   OpenAiGptLiveVoiceSession,
   buildGptLiveOpeningDirective,
@@ -32,6 +33,11 @@ const config: AppConfig = {
   DRY_RUN_CALLS: true
 };
 
+const speechAudio = Buffer.from(encodeMuLaw(Int16Array.from(
+  { length: 800 }, (_, i) => Math.round(Math.sin(i * 0.35) * 5000)
+))).toString('base64');
+const quietAudio = Buffer.alloc(4000, 255).toString('base64');
+
 function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: string; spokenPurpose?: string }) {
   const sent: Array<Record<string, unknown>> = [];
   const audio: string[] = [];
@@ -41,6 +47,7 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
   const agentContexts: Array<AgentOutputContext | undefined> = [];
   const queued = vi.fn();
   const speechStarted = vi.fn();
+  const playbackMarks: string[] = [];
   const session = new OpenAiGptLiveVoiceSession({
     config,
     instructions: 'LANGUAGE LOCK: Speak only English. Mission fact: appointment at noon.',
@@ -58,6 +65,7 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
       agentContexts.push(context);
     },
     onUserSpeechStarted: speechStarted,
+    onPlaybackCheckpoint: (name) => playbackMarks.push(name),
     onStartupEnvelopeQueued: queued,
     onStatus: () => undefined,
     onError: () => undefined
@@ -80,11 +88,136 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
     audioContexts,
     agentContexts,
     queued,
-    speechStarted
+    speechStarted,
+    playbackMarks,
+    finishPlayback: () => {
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: quietAudio }));
+      expect(playbackMarks.at(-1)).toBeTruthy();
+      session.confirmPlaybackCheckpoint(playbackMarks.at(-1)!);
+    }
   };
 }
 
+function readyControlSession() {
+  const fixture = makeSession();
+  fixture.mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+  fixture.mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+  fixture.mutable.handleMessage(JSON.stringify({ type: 'session.input_transcript.delta', delta: 'Hello' }));
+  fixture.sent.splice(0);
+  const acknowledge = () => {
+    for (const payload of fixture.sent.filter((p) =>
+      p.type === 'session.instructions.append' || p.type === 'session.commentary.append')) {
+      fixture.mutable.handleMessage(JSON.stringify({
+        type: `${payload.type}ed`, client_event_id: payload.event_id
+      }));
+    }
+  };
+  return { ...fixture, acknowledge };
+}
+
 describe('GPT-Live voice session', () => {
+  it('finishes a short answer at confirmed playback without waiting ten seconds or an API done event', async () => {
+    const { session, mutable, acknowledge, finishPlayback } = readyControlSession();
+    const result = session.injectInstruction('Yes, Wednesday works.', 'yes');
+    acknowledge();
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+    finishPlayback();
+    await expect(result).resolves.toMatchObject({ delivered: true, audioCompleted: true, retryCount: 0 });
+  });
+
+  it('does not confuse continuously streamed silence with an audible answer', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mutable, acknowledge, playbackMarks } = readyControlSession();
+      const result = session.injectInstruction('Yes, Wednesday works.', 'yes');
+      acknowledge();
+      for (let i = 0; i < 8; i++) {
+        mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: quietAudio }));
+        vi.advanceTimersByTime(500);
+      }
+      expect(playbackMarks).toEqual([]);
+      await expect(result).resolves.toMatchObject({ delivered: false, audioStarted: false, errorCode: 'control_audio_timeout' });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it('waits for playback of resumed speech instead of accepting a stale quiet-boundary mark', async () => {
+    const { session, mutable, acknowledge, playbackMarks, finishPlayback } = readyControlSession();
+    const result = session.injectInstruction('A longer operator answer.', 'yes');
+    acknowledge();
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: quietAudio }));
+    const staleMark = playbackMarks.at(-1)!;
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+    let settled = false;
+    void result.then(() => { settled = true; });
+    session.confirmPlaybackCheckpoint(staleMark);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    finishPlayback();
+    await expect(result).resolves.toMatchObject({ audioCompleted: true });
+  });
+
+  it('requests a playback checkpoint when output stops sending packets after speech', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mutable, acknowledge, playbackMarks } = readyControlSession();
+      const result = session.injectInstruction('No, thank you.', 'no');
+      acknowledge();
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+      vi.advanceTimersByTime(650);
+      expect(playbackMarks).toHaveLength(1);
+      session.confirmPlaybackCheckpoint(playbackMarks[0]);
+      await expect(result).resolves.toMatchObject({ audioCompleted: true });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it('does not release a long answer at a fixed ten-second deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mutable, acknowledge, finishPlayback } = readyControlSession();
+      const result = session.injectInstruction('Deliver this longer answer.', 'yes');
+      acknowledge();
+      let settled = false;
+      void result.then(() => { settled = true; });
+      for (let i = 0; i < 30; i++) {
+        mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+        await vi.advanceTimersByTimeAsync(500);
+      }
+      expect(settled).toBe(false);
+      finishPlayback();
+      await expect(result).resolves.toMatchObject({ audioCompleted: true });
+    } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+  });
+
+  it('releases an interrupted answer without calling a cleared Twilio mark completed speech', async () => {
+    const { session, mutable, acknowledge, playbackMarks } = readyControlSession();
+    const result = session.injectInstruction('Wednesday works for me.', 'yes');
+    acknowledge();
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: quietAudio }));
+    session.notifyPlaybackCleared();
+    session.confirmPlaybackCheckpoint(playbackMarks[0]);
+    await expect(result).resolves.toMatchObject({ delivered: true, audioStarted: true, audioCompleted: false });
+  });
+
+  it('updates settled call facts as quiet context without restarting the session or speaking them', () => {
+    const { session, sent } = readyControlSession();
+    session.appendConversationContext('Wednesday was approved. Time has not been chosen.');
+    expect(sent).toEqual([expect.objectContaining({
+      type: 'session.thinking.append', delegation_id: null,
+      content: 'Wednesday was approved. Time has not been chosen.'
+    })]);
+  });
+
+  it('keeps the call alive if an optional context refresh is rejected', () => {
+    const { session, mutable, sent } = readyControlSession();
+    session.appendConversationContext('Wednesday was approved.');
+    mutable.handleMessage(JSON.stringify({ type: 'error', error: {
+      client_event_id: sent[0].event_id, code: 'context_rejected', message: 'Rejected context'
+    } }));
+    expect(session.status).toBe('live');
+  });
+
   it('maps the app voice selection onto natural GPT-Live voices', () => {
     expect(resolveGptLiveVoice('echo')).toBe('meridian');
     expect(resolveGptLiveVoice('coral')).toBe('gleam');
@@ -128,6 +261,9 @@ describe('GPT-Live voice session', () => {
     expect(instructions).toContain('Single active mission:');
     expect(instructions).toContain('Never borrow a subject, identity, business, warranty, offer, or scenario');
     expect(instructions).toContain('Mission: LANGUAGE LOCK: Speak only English. Mission facts.');
+    expect(instructions).toContain('remain the outbound caller throughout holds and private answers');
+    expect(instructions).toContain('do not choose a time without separate approval');
+    expect(instructions).toContain('A mid-call hello, hola');
   });
 
   it('gives the fast voice layer the active mission without replaying the completed opener contract', () => {
@@ -246,7 +382,7 @@ describe('GPT-Live voice session', () => {
   });
 
   it('confirms operator delivery only after correlated acknowledgments and response audio', async () => {
-    const { session, mutable, sent } = makeSession();
+    const { session, mutable, sent, finishPlayback } = makeSession();
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
@@ -283,10 +419,13 @@ describe('GPT-Live voice session', () => {
     await Promise.resolve();
     expect(settled).toBe(false);
 
-    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'answer-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
     await Promise.resolve();
     expect(settled).toBe(false);
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    await Promise.resolve();
+    expect(settled).toBe(false); // Live has no such event; it is not playback proof.
+    finishPlayback();
     await expect(delivery).resolves.toMatchObject({
       delivered: true,
       acknowledged: true,
@@ -299,7 +438,7 @@ describe('GPT-Live voice session', () => {
   it('retries an acknowledged operator response once when no audio begins', async () => {
     vi.useFakeTimers();
     try {
-      const { session, mutable, sent } = makeSession();
+      const { session, mutable, sent, finishPlayback } = makeSession();
       mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
       mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
       mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
@@ -315,8 +454,8 @@ describe('GPT-Live voice session', () => {
 
       vi.advanceTimersByTime(1_400);
       expect(sent.filter((payload) => payload.type === 'session.commentary.append')).toHaveLength(2);
-      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'retry-audio' }));
-      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+      finishPlayback();
 
       await expect(delivery).resolves.toMatchObject({
         delivered: true,
@@ -359,7 +498,7 @@ describe('GPT-Live voice session', () => {
   });
 
   it('resumes after a dismissed hold without presenting private resume instructions as words to say', async () => {
-    const { session, mutable, sent } = makeSession();
+    const { session, mutable, sent, finishPlayback } = makeSession();
     mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
     mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
@@ -382,8 +521,8 @@ describe('GPT-Live voice session', () => {
     mutable.handleMessage(
       JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
     );
-    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'resume-audio' }));
-    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+    finishPlayback();
 
     await expect(delivery).resolves.toMatchObject({
       delivered: true,

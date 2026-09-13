@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { LiveSpeechBoundary } from './liveSpeechBoundary.js';
 import type {
   AgentInterventionDelivery,
   AgentStartupDiagnostics,
@@ -32,6 +33,10 @@ interface ActiveIntervention extends PendingIntervention {
   audioCompleted: boolean;
   retryCount: number;
   timer?: NodeJS.Timeout;
+  quietTimer?: NodeJS.Timeout;
+  playbackMark?: string;
+  playbackInterrupted?: boolean;
+  boundary: LiveSpeechBoundary;
 }
 
 /**
@@ -56,6 +61,8 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   private readonly pendingInterventions: PendingIntervention[] = [];
   private activeIntervention?: ActiveIntervention;
   private interventionSequence = 0;
+  private playbackSequence = 0;
+  private readonly pendingContextIds = new Set<string>();
   private openingInstructionEventId?: string;
   private openingCommentaryEventId?: string;
   private openingInstructionAcked = false;
@@ -222,7 +229,8 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       commentaryAcked: false,
       audioStarted: false,
       audioCompleted: false,
-      retryCount: 0
+      retryCount: 0,
+      boundary: new LiveSpeechBoundary()
     };
     const resumeAutonomy = semanticControl === 'resume_autonomy';
     const controlRule = semanticControl
@@ -303,10 +311,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     active.timer = setTimeout(() => {
       const current = this.activeIntervention;
       if (!current || current.id !== active.id || !current.audioStarted) return;
-      // Current Live builds normally emit output_audio.done. Keep a bounded
-      // escape hatch for a missing terminal event so one malformed turn can
-      // never strand all later operator controls.
-      logGptLiveControl('audio_completion_timeout', current);
+      // Live has no output-audio-done event. Normal completion uses a Twilio
+      // playback checkpoint. This escape hatch is only for a lost checkpoint,
+      // and is refreshed while speech continues (never truncate a long answer).
+      logGptLiveControl('playback_checkpoint_timeout', current);
       this.finishIntervention(true);
     }, CONTROL_AUDIO_COMPLETION_TIMEOUT_MS);
     active.timer.unref();
@@ -318,7 +326,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       !active ||
       !active.instructionAcked ||
       !active.commentaryAcked ||
-      (active.expectsSpeech && (!active.audioStarted || !active.audioCompleted))
+      (active.expectsSpeech && (!active.audioStarted || (!active.audioCompleted && !active.playbackInterrupted)))
     ) {
       return;
     }
@@ -332,6 +340,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     const active = this.activeIntervention;
     if (!active) return;
     if (active.timer) clearTimeout(active.timer);
+    if (active.quietTimer) clearTimeout(active.quietTimer);
     const result: AgentInterventionDelivery = {
       delivered,
       acknowledged: active.instructionAcked && active.commentaryAcked,
@@ -368,6 +377,64 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     this.publishStartupDiagnostics();
   }
 
+  appendConversationContext(text: string): void {
+    if (!this.sessionStarted) return;
+    const eventId = `bridge-live-context-${Date.now()}-${++this.playbackSequence}`;
+    this.pendingContextIds.add(eventId);
+    if (this.pendingContextIds.size > 16) this.pendingContextIds.delete(this.pendingContextIds.values().next().value!);
+    this.sendJson({
+      type: 'session.thinking.append',
+      event_id: eventId,
+      delegation_id: null,
+      content: text.slice(0, 1_200)
+    });
+  }
+
+  confirmPlaybackCheckpoint(name: string): void {
+    const active = this.activeIntervention;
+    if (!active || active.playbackMark !== name) return;
+    active.audioCompleted = true;
+    logGptLiveControl('playback_confirmed', active);
+    this.maybeFinishIntervention();
+  }
+
+  notifyPlaybackCleared(): void {
+    const active = this.activeIntervention;
+    if (!active) return;
+    // Twilio also echoes marks for discarded media. Never call that completed
+    // playback, and never repeat a partly heard answer automatically.
+    active.playbackMark = undefined;
+    active.audioCompleted = false;
+    active.playbackInterrupted = active.audioStarted;
+    if (active.quietTimer) clearTimeout(active.quietTimer);
+    this.maybeFinishIntervention();
+  }
+
+  private trackInterventionPlayback(audio: string): void {
+    const active = this.activeIntervention;
+    if (!active?.expectsSpeech) return;
+    const activity = active.boundary.append(audio);
+    if (activity.voiced) {
+      active.audioStarted = true;
+      active.audioCompleted = false;
+      active.playbackMark = undefined;
+      this.armInterventionCompletionWatchdog();
+    }
+    if (!active.audioStarted) return; // Silent packets are not delivered speech.
+    if (active.quietTimer) clearTimeout(active.quietTimer);
+    const checkpoint = () => {
+      if (this.activeIntervention !== active || active.playbackMark || active.playbackInterrupted) return;
+      if (!this.options.onPlaybackCheckpoint) return;
+      active.playbackMark = `live-control-${++this.playbackSequence}-${active.id}`;
+      this.options.onPlaybackCheckpoint(active.playbackMark);
+    };
+    if (activity.endsQuiet) checkpoint();
+    // Also support a stream that stops sending packets after speech. The
+    // transport marker, not this quiet interval, proves the queue drained.
+    active.quietTimer = setTimeout(checkpoint, 650);
+    active.quietTimer.unref();
+  }
+
   suppressActiveOutput(reason = 'Temporarily suppress autonomous agent output.'): void {
     if (!this.sessionStarted) return;
     this.sendJson({
@@ -386,6 +453,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     if (this.openingFirstAudioTimer) clearTimeout(this.openingFirstAudioTimer);
     this.openingFirstAudioTimer = undefined;
     if (this.activeIntervention?.timer) clearTimeout(this.activeIntervention.timer);
+    if (this.activeIntervention?.quietTimer) clearTimeout(this.activeIntervention.quietTimer);
     const closingDelivery: AgentInterventionDelivery = {
       delivered: false,
       acknowledged: false,
@@ -445,6 +513,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       for (const audio of this.queuedAudio.splice(0)) {
         this.sendJson({ type: 'session.input_audio.append', audio });
       }
+      return;
+    }
+    if (event.type === 'session.thinking.appended' && event.client_event_id) {
+      this.pendingContextIds.delete(event.client_event_id);
       return;
     }
     if (
@@ -512,27 +584,12 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
         // stranded every queued operator control for the life of the call.
         this.armOpeningIdleFallback();
       }
-      if (this.activeIntervention) {
-        const firstControlAudio = !this.activeIntervention.audioStarted;
-        this.activeIntervention.audioStarted = true;
-        if (firstControlAudio) this.armInterventionCompletionWatchdog();
-        this.maybeFinishIntervention();
-      }
-      this.options.onAudioDelta(event.delta, this.outputContext());
+      const queued = this.options.onAudioDelta(event.delta, this.outputContext());
+      if (queued !== false) this.trackInterventionPlayback(event.delta);
       return;
     }
     if (event.type === 'session.output_transcript.delta' && event.delta) {
       this.options.onAgentTranscriptDelta(event.delta, this.outputContext());
-      return;
-    }
-    if (
-      this.activeIntervention?.audioStarted &&
-      (event.type === 'session.output_audio.done' ||
-        event.type === 'session.output_item.done' ||
-        event.type === 'session.output.done')
-    ) {
-      this.activeIntervention.audioCompleted = true;
-      this.maybeFinishIntervention();
       return;
     }
     if (
@@ -581,6 +638,11 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     }
     if (event.type === 'error') {
       const failedClientEventId = event.error?.client_event_id;
+      if (failedClientEventId && this.pendingContextIds.delete(failedClientEventId)) {
+        // A rejected optional memory refresh must not kill a healthy call.
+        logGptLiveStartup('context_update_rejected', { code: event.error?.code });
+        return;
+      }
       if (
         this.activeIntervention &&
         failedClientEventId &&
@@ -796,6 +858,7 @@ export function buildGptLiveConversationInstructions(
     `Speak ${language} only unless a trusted application instruction explicitly changes the language.`,
     openingPolicy,
     'After that first assistant output is complete, treat the opening as delivered forever. Never restart it or repeat the purpose merely because the callee says hello, yes, okay, sure, or go ahead; continue to the next mission step.',
+    'Conversation continuity: remain the outbound caller throughout holds and private answers. Keep settled facts and answered questions. Once a day is approved, gather the time options next; do not choose a time without separate approval. A mid-call hello, hola, are you there, or sigues ahí checks presence: briefly reassure the callee and continue the current topic. Never restart with How can I help you or Qué puedo hacer por usted.',
     'Single active mission: use only the active mission context below for caller identity, caller-side facts, the reason for the call, and the next mission-specific question. Never borrow a subject, identity, business, warranty, offer, or scenario from another call, an example, or a generic customer-service pattern.',
     'Every substantive statement or new topic must be grounded in at least one of: the active mission context, something the callee just said, or a fresh private operator control. A greeting, yes, okay, go ahead, silence, or unclear audio does not authorize a new topic.',
     'If asked who you are or why you called, answer from the caller identity and concrete purpose in the active mission. Never invent vague framing such as a team the callee contacted, a support department, or a prior inquiry unless the mission explicitly says that.',

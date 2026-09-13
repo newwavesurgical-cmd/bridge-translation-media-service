@@ -17,7 +17,10 @@ export interface AgentVoiceSessionOptions {
   /** Prepared callee-facing purpose, already resolved in the language lock. */
   spokenPurpose?: string;
   voice: string;
-  onAudioDelta: (base64Pcmu: string, context?: AgentOutputContext) => void;
+  /** Return false if the bridge did not queue this audio for playback. */
+  onAudioDelta: (base64Pcmu: string, context?: AgentOutputContext) => void | boolean;
+  /** Queue a transport playback marker after the audio already sent. */
+  onPlaybackCheckpoint?: (name: string) => void;
   onRemoteTranscriptDelta: (delta: string) => void;
   onAgentTranscriptDelta: (delta: string, context?: AgentOutputContext) => void;
   onUserSpeechStarted?: () => void;
@@ -38,7 +41,7 @@ export interface AgentInterventionDelivery {
   delivered: boolean;
   acknowledged: boolean;
   audioStarted: boolean;
-  /** True when GPT-Live confirmed that the directed spoken turn finished. */
+  /** True when the transport confirmed playback through the detected speech boundary. */
   audioCompleted?: boolean;
   retryCount: number;
   latencyMs: number;
@@ -58,6 +61,9 @@ export interface AgentVoiceSession {
   ): void | Promise<AgentInterventionDelivery>;
   setRemoteInteractionMode(mode: 'conversational_ai'): void;
   confirmStartupEnvelopePlayback(): void;
+  confirmPlaybackCheckpoint?(name: string): void;
+  notifyPlaybackCleared?(): void;
+  appendConversationContext?(text: string): void;
   suppressActiveOutput(reason?: string): void;
   close(): void;
 }
