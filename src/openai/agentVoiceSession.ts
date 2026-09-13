@@ -3,6 +3,11 @@ import type { AppConfig } from '../config.js';
 
 export type AgentVoiceSessionStatus = 'idle' | 'connecting' | 'live' | 'closing' | 'closed' | 'error';
 
+export interface AgentOutputContext {
+  kind: 'opening' | 'normal' | 'intervention';
+  semanticControl?: string;
+}
+
 export interface AgentVoiceSessionOptions {
   config: AppConfig;
   instructions: string;
@@ -12,9 +17,9 @@ export interface AgentVoiceSessionOptions {
   /** Prepared callee-facing purpose, already resolved in the language lock. */
   spokenPurpose?: string;
   voice: string;
-  onAudioDelta: (base64Pcmu: string) => void;
+  onAudioDelta: (base64Pcmu: string, context?: AgentOutputContext) => void;
   onRemoteTranscriptDelta: (delta: string) => void;
-  onAgentTranscriptDelta: (delta: string) => void;
+  onAgentTranscriptDelta: (delta: string, context?: AgentOutputContext) => void;
   onUserSpeechStarted?: () => void;
   /** Called after startup audio is queued, or when the bounded no-audio failsafe releases the opening gate. */
   onStartupEnvelopeQueued?: () => void;

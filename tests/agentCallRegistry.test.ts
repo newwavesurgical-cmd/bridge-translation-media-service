@@ -394,16 +394,16 @@ describe('AgentCallRegistry', () => {
       audioStarted: true
     });
     expect(injectInstruction).toHaveBeenNthCalledWith(
-      1,
+      2,
       expect.stringContaining('SINGLE-USE APPROVAL BOUNDARY'),
       'yes',
       true
     );
-    expect(injectInstruction.mock.calls[0]?.[0]).toContain('does not approve any later or follow-up date, time');
-    expect(injectInstruction.mock.calls[0]?.[0]).toContain('ACTIVE CALLEE QUESTION');
-    expect(injectInstruction.mock.calls[0]?.[0]).toContain('Can you do Wednesday at noon?');
+    expect(injectInstruction.mock.calls[1]?.[0]).toContain('does not approve any later or follow-up date, time');
+    expect(injectInstruction.mock.calls[1]?.[0]).toContain('ACTIVE CALLEE QUESTION');
+    expect(injectInstruction.mock.calls[1]?.[0]).toContain('Can you do Wednesday at noon?');
     expect(injectInstruction).toHaveBeenNthCalledWith(
-      2,
+      3,
       expect.stringContaining('Remove the temporary decision hold'),
       'resume_autonomy',
       false

@@ -518,11 +518,11 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
         if (firstControlAudio) this.armInterventionCompletionWatchdog();
         this.maybeFinishIntervention();
       }
-      this.options.onAudioDelta(event.delta);
+      this.options.onAudioDelta(event.delta, this.outputContext());
       return;
     }
     if (event.type === 'session.output_transcript.delta' && event.delta) {
-      this.options.onAgentTranscriptDelta(event.delta);
+      this.options.onAgentTranscriptDelta(event.delta, this.outputContext());
       return;
     }
     if (
@@ -648,6 +648,16 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     });
     logGptLiveStartup('opening_commentary_sent', { clientEventId: eventId, retryCount: 0 });
     this.armFirstAudioWatchdog(OPENING_FIRST_AUDIO_TIMEOUT_MS);
+  }
+
+  private outputContext(): import('./agentVoiceSession.js').AgentOutputContext {
+    if (this.activeIntervention) {
+      return {
+        kind: 'intervention',
+        semanticControl: this.activeIntervention.semanticControl
+      };
+    }
+    return { kind: this.startupEnvelopeQueued ? 'normal' : 'opening' };
   }
 
   private armFirstAudioWatchdog(timeoutMs: number): void {

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../src/config.js';
+import type { AgentOutputContext } from '../src/openai/agentVoiceSession.js';
 import {
   OpenAiGptLiveVoiceSession,
   buildGptLiveOpeningDirective,
@@ -36,6 +37,8 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
   const audio: string[] = [];
   const remote: string[] = [];
   const agent: string[] = [];
+  const audioContexts: Array<AgentOutputContext | undefined> = [];
+  const agentContexts: Array<AgentOutputContext | undefined> = [];
   const queued = vi.fn();
   const speechStarted = vi.fn();
   const session = new OpenAiGptLiveVoiceSession({
@@ -45,9 +48,15 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
     firstUtterance: input?.firstUtterance ?? "I'm not a telemarketer.",
     spokenPurpose: input?.spokenPurpose ?? 'I am calling to confirm the appointment time.',
     voice: 'echo',
-    onAudioDelta: (delta) => audio.push(delta),
+    onAudioDelta: (delta, context) => {
+      audio.push(delta);
+      audioContexts.push(context);
+    },
     onRemoteTranscriptDelta: (delta) => remote.push(delta),
-    onAgentTranscriptDelta: (delta) => agent.push(delta),
+    onAgentTranscriptDelta: (delta, context) => {
+      agent.push(delta);
+      agentContexts.push(context);
+    },
     onUserSpeechStarted: speechStarted,
     onStartupEnvelopeQueued: queued,
     onStatus: () => undefined,
@@ -61,7 +70,18 @@ function makeSession(input?: { disclosureEnabled?: boolean; firstUtterance?: str
     readyState: 1,
     send: (payload: string) => sent.push(JSON.parse(payload) as Record<string, unknown>)
   };
-  return { session, mutable, sent, audio, remote, agent, queued, speechStarted };
+  return {
+    session,
+    mutable,
+    sent,
+    audio,
+    remote,
+    agent,
+    audioContexts,
+    agentContexts,
+    queued,
+    speechStarted
+  };
 }
 
 describe('GPT-Live voice session', () => {
@@ -181,6 +201,33 @@ describe('GPT-Live voice session', () => {
     expect(audio).toEqual(['pcmu']);
     expect(remote).toEqual(['hello']);
     expect(agent).toEqual(['Hi']);
+  });
+
+  it('tags automatic hold speech so the bridge can pass only that same-voice output through a decision hold', () => {
+    const { session, mutable, sent, audioContexts, agentContexts } = makeSession();
+    mutable.handleMessage(JSON.stringify({ type: 'session.started' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'opening-audio' }));
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.done' }));
+    session.confirmStartupEnvelopePlayback();
+    sent.splice(0);
+
+    void session.injectInstruction(
+      'Say exactly one brief holding sentence, then listen.',
+      'operator_decision_hold'
+    );
+    mutable.handleMessage(
+      JSON.stringify({ type: 'session.output_transcript.delta', delta: 'One moment, please.' })
+    );
+    mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: 'hold-audio' }));
+
+    expect(agentContexts.at(-1)).toEqual({
+      kind: 'intervention',
+      semanticControl: 'operator_decision_hold'
+    });
+    expect(audioContexts.at(-1)).toEqual({
+      kind: 'intervention',
+      semanticControl: 'operator_decision_hold'
+    });
   });
 
   it('signals barge-in once per continuous remote utterance instead of once per transcript fragment', () => {

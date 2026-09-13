@@ -16,6 +16,11 @@ import {
   type AgentVoiceSession
 } from './openai/agentVoiceSession.js';
 import { OpenAiGptLiveVoiceSession, resolveGptLiveVoice } from './openai/gptLiveVoiceSession.js';
+import {
+  observeOperatorQuestion,
+  type OperatorQuestionObservation,
+  type OperatorQuestionObserverTurn
+} from './openai/operatorQuestionObserver.js';
 import { createSpeechPcm24kBase64 } from './openai/speech.js';
 import { OpenAiTranslationSession } from './openai/translationSession.js';
 import {
@@ -192,10 +197,18 @@ export interface AgentRemotePartyState {
 
 export interface AgentPendingOperatorQuestion {
   id: string;
+  /** Complete operator-facing question; retained as `text` for old clients. */
   text: string;
+  /** Exact remote utterance that caused the alert. */
+  sourceText?: string;
+  /** Bilingual contextual labels produced by the silent observer. */
+  displayTextEn?: string;
+  displayTextEs?: string;
   kind: OperatorQuestionKind;
   blocking: boolean;
   reason: string;
+  observedBy?: 'deterministic' | 'contextual_ai';
+  observerConfidence?: number;
   detectedAt: string;
   updatedAt: string;
 }
@@ -265,6 +278,10 @@ export interface AgentCallRecord {
     operatorQuestionsDetected: number;
     operatorQuestionsBlocked: number;
     operatorQuestionsResolved: number;
+    operatorQuestionObserverRuns: number;
+    operatorQuestionObserverHits: number;
+    operatorQuestionObserverEnrichments: number;
+    operatorQuestionObserverFailures: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   timings: {
@@ -363,7 +380,11 @@ export class AgentCallRegistry {
         conversationalAiDetections: 0,
         operatorQuestionsDetected: 0,
         operatorQuestionsBlocked: 0,
-        operatorQuestionsResolved: 0
+        operatorQuestionsResolved: 0,
+        operatorQuestionObserverRuns: 0,
+        operatorQuestionObserverHits: 0,
+        operatorQuestionObserverEnrichments: 0,
+        operatorQuestionObserverFailures: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -439,6 +460,7 @@ export class AgentCallSession {
   private lastBargeInClearAt = 0;
   private lastHoldLivenessAt = 0;
   private holdLivenessInFlight = false;
+  private operatorQuestionObserverGeneration = 0;
 
   constructor(
     private readonly config: AppConfig,
@@ -1216,7 +1238,7 @@ export class AgentCallSession {
       firstUtterance: this.record.firstUtterance,
       spokenPurpose: this.record.spokenPurpose,
       voice: this.record.voice,
-      onAudioDelta: (pcmu) => {
+      onAudioDelta: (pcmu, context) => {
         this.flushRemoteUtterance();
         if (this.record.takeover?.active) {
           return;
@@ -1228,7 +1250,11 @@ export class AgentCallSession {
           this.record.counters.ivrAgentAudioSuppressed += 1;
           return;
         }
-        if (this.record.pendingOperatorQuestion?.blocking && !this.operatorControlResponseActive) {
+        if (
+          this.record.pendingOperatorQuestion?.blocking &&
+          !this.operatorControlResponseActive &&
+          !isSameVoiceHoldContext(context?.semanticControl)
+        ) {
           return;
         }
         this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
@@ -1240,7 +1266,8 @@ export class AgentCallSession {
         this.emitTranscript('remote', delta);
         this.observeRemoteTranscript(delta);
       },
-      onAgentTranscriptDelta: (delta) => this.handleAgentTranscriptDelta(delta),
+      onAgentTranscriptDelta: (delta, context) =>
+        this.handleAgentTranscriptDelta(delta, context?.semanticControl),
       onUserSpeechStarted: () => this.clearTwilioAudioForBargeIn(),
       onStartupEnvelopeQueued: () => {
         const name = `agent-startup-envelope-${Date.now()}`;
@@ -1494,32 +1521,33 @@ export class AgentCallSession {
     this.touch();
   }
 
-  private considerOperatorQuestion(text: string): void {
+  private considerOperatorQuestion(text: string): ReturnType<typeof classifyOperatorQuestion> {
     const classification = classifyOperatorQuestion(
       text,
       this.callPurposeText(),
       this.previousAgentUtterance()
     );
-    if (!classification) return;
+    if (!classification) return null;
 
     // The model can answer ordinary conversational questions from the mission.
     // Only a missing caller-side fact or unapproved commitment deserves an
     // operator alert and the temporary output hold.
-    if (!classification.blocking) return;
+    if (!classification.blocking) return classification;
 
     const current = this.record.pendingOperatorQuestion;
-    const sameQuestion = current ? questionsShareGrowingText(current.text, classification.text) : false;
-    if (current?.blocking && !classification.blocking && !sameQuestion) {
-      return;
-    }
-
+    const sameQuestion = current
+      ? questionsShareGrowingText(current.sourceText ?? current.text, classification.text)
+      : false;
     const timestamp = new Date().toISOString();
     const next: AgentPendingOperatorQuestion = {
       id: sameQuestion && current ? current.id : `operator-question-${++this.operatorQuestionSequence}`,
       text: classification.text,
+      sourceText: classification.text,
       kind: classification.kind,
       blocking: classification.blocking,
       reason: classification.reason,
+      observedBy: current?.observedBy ?? 'deterministic',
+      observerConfidence: current?.observerConfidence,
       detectedAt: sameQuestion && current ? current.detectedAt : timestamp,
       updatedAt: timestamp
     };
@@ -1532,15 +1560,20 @@ export class AgentCallSession {
     this.sendAppStatus();
 
     if (newlyBlocking) this.activateOperatorDecisionHold(next);
+    return classification;
   }
 
-  private handleAgentTranscriptDelta(delta: string): void {
+  private handleAgentTranscriptDelta(delta: string, semanticControl?: string): void {
     this.flushRemoteUtterance();
     if (this.isIvrHoldActive()) {
       this.record.counters.ivrAgentTranscriptSuppressed += 1;
       return;
     }
-    if (this.record.pendingOperatorQuestion?.blocking && !this.operatorControlResponseActive) {
+    if (
+      this.record.pendingOperatorQuestion?.blocking &&
+      !this.operatorControlResponseActive &&
+      !isSameVoiceHoldContext(semanticControl)
+    ) {
       return;
     }
     // Do not clear a surfaced question merely because the autonomous agent
@@ -1556,18 +1589,134 @@ export class AgentCallSession {
     if (!utterance) return;
     this.clearOperatorQuestionTimer();
     this.currentRemoteUtterance = '';
-    this.considerOperatorQuestion(utterance);
+    const deterministic = this.considerOperatorQuestion(utterance);
+    this.scheduleContextualQuestionObservation(utterance, deterministic);
+  }
+
+  private scheduleContextualQuestionObservation(
+    utterance: string,
+    deterministic: ReturnType<typeof classifyOperatorQuestion>
+  ): void {
+    // Unit tests exercise the observer module with a mocked fetch. Registry
+    // suites never open network requests, and production always keeps the
+    // deterministic detector as the immediate fail-safe.
+    if (process.env.NODE_ENV === 'test' || !this.config.OPENAI_API_KEY) return;
+    const generation = ++this.operatorQuestionObserverGeneration;
+    const recentTurns = this.operatorQuestionObserverTurns();
+    this.record.counters.operatorQuestionObserverRuns += 1;
+    void observeOperatorQuestion(this.config, {
+      missionContext: this.callPurposeText(),
+      currentRemoteUtterance: utterance,
+      recentTurns,
+      deterministicClassification: deterministic
+        ? {
+            kind: deterministic.kind,
+            blocking: deterministic.blocking,
+            reason: deterministic.reason
+          }
+        : null
+    }).then((observation) => {
+      if (generation !== this.operatorQuestionObserverGeneration || this.record.state === 'ended') return;
+      if (!observation) {
+        this.record.counters.operatorQuestionObserverFailures += 1;
+        this.touch();
+        return;
+      }
+      if (!observation.requiresOperator) return;
+      this.applyContextualQuestionObservation(utterance, observation);
+    });
+  }
+
+  private applyContextualQuestionObservation(
+    sourceText: string,
+    observation: OperatorQuestionObservation
+  ): void {
+    this.record.counters.operatorQuestionObserverHits += 1;
+    const current = this.record.pendingOperatorQuestion;
+    const sameQuestion = current
+      ? questionsShareGrowingText(current.sourceText ?? current.text, sourceText)
+      : false;
+    const timestamp = new Date().toISOString();
+    const next: AgentPendingOperatorQuestion = {
+      id: sameQuestion && current ? current.id : `operator-question-${++this.operatorQuestionSequence}`,
+      text: observation.questionEn,
+      sourceText,
+      displayTextEn: observation.questionEn,
+      displayTextEs: observation.questionEs,
+      kind: observation.kind,
+      blocking: true,
+      reason: observation.reason,
+      observedBy: 'contextual_ai',
+      observerConfidence: observation.confidence,
+      detectedAt: sameQuestion && current ? current.detectedAt : timestamp,
+      updatedAt: timestamp
+    };
+    const newlyDetected = !current || !sameQuestion;
+    const newlyBlocking = !current?.blocking || !sameQuestion;
+    if (sameQuestion && current) this.record.counters.operatorQuestionObserverEnrichments += 1;
+    this.record.pendingOperatorQuestion = next;
+    if (newlyDetected) this.record.counters.operatorQuestionsDetected += 1;
+    if (newlyBlocking) this.record.counters.operatorQuestionsBlocked += 1;
+    this.touch();
+    this.sendAppStatus();
+    if (newlyBlocking) this.activateOperatorDecisionHold(next);
+  }
+
+  private operatorQuestionObserverTurns(): OperatorQuestionObserverTurn[] {
+    const turns: OperatorQuestionObserverTurn[] = [];
+    for (const entry of this.record.transcripts.slice(-60)) {
+      if (entry.speaker === 'operator' && /^\[.*\]$/.test(entry.delta)) continue;
+      const previous = turns[turns.length - 1];
+      if (previous?.speaker === entry.speaker) {
+        previous.text = appendSpokenDelta(previous.text, entry.delta).slice(-900);
+      } else {
+        turns.push({ speaker: entry.speaker, text: entry.delta.slice(-900) });
+      }
+    }
+    return turns.slice(-6);
   }
 
   private activateOperatorDecisionHold(question: AgentPendingOperatorQuestion): void {
     this.agent?.suppressActiveOutput?.(
-      `Operator approval is required before answering this callee question: ${question.text}`
+      `Operator approval is required before answering this callee question: ${question.sourceText ?? question.text}`
     );
     if (this.holdDeliveredForQuestionId === question.id) return;
     this.holdDeliveredForQuestionId = question.id;
+    if (this.agentAlreadyHolding()) return;
+    const phrase = operatorDecisionHoldPhrase(this.record.languageLock);
+    if (this.record.agentEngine === 'gpt-live-1') {
+      void this.deliverSameVoiceHold(question.id, phrase);
+      return;
+    }
     void this.deliverVerbatimText(
-      operatorDecisionHoldPhrase(this.record.languageLock),
+      phrase,
       () => this.record.pendingOperatorQuestion?.id === question.id,
+      false
+    );
+  }
+
+  private async deliverSameVoiceHold(questionId: string, phrase: string): Promise<void> {
+    const agent = this.agent;
+    if (!agent || this.record.state !== 'live') return;
+    if (typeof agent.injectInstruction !== 'function') {
+      await this.deliverVerbatimText(
+        phrase,
+        () => this.record.pendingOperatorQuestion?.id === questionId,
+        false
+      );
+      return;
+    }
+    const result = agent.injectInstruction(
+      `Say exactly one brief holding sentence to the callee now: ${JSON.stringify(phrase)} Say nothing else, do not answer the pending question, then keep listening.`,
+      'operator_decision_hold',
+      true
+    );
+    if (!result || typeof (result as Promise<AgentInterventionDelivery>).then !== 'function') return;
+    const delivery = await result;
+    if (delivery.delivered || this.record.pendingOperatorQuestion?.id !== questionId) return;
+    await this.deliverVerbatimText(
+      phrase,
+      () => this.record.pendingOperatorQuestion?.id === questionId,
       false
     );
   }
@@ -1585,15 +1734,48 @@ export class AgentCallSession {
     this.holdLivenessInFlight = true;
     this.lastHoldLivenessAt = now;
     try {
-      await this.deliverVerbatimText(
-        operatorHoldLivenessPhrase(this.record.languageLock),
-        () => this.record.pendingOperatorQuestion?.id === questionId,
-        false,
-        false
+      const phrase = operatorHoldLivenessPhrase(this.record.languageLock);
+      if (this.record.agentEngine !== 'gpt-live-1') {
+        await this.deliverVerbatimText(
+          phrase,
+          () => this.record.pendingOperatorQuestion?.id === questionId,
+          false,
+          false
+        );
+        return;
+      }
+      if (!this.agent || typeof this.agent.injectInstruction !== 'function') {
+        await this.deliverVerbatimText(
+          phrase,
+          () => this.record.pendingOperatorQuestion?.id === questionId,
+          false,
+          false
+        );
+        return;
+      }
+      const result = this.agent?.injectInstruction(
+        `The callee is checking whether you are still present. Reply with exactly this one sentence: ${JSON.stringify(phrase)} Then keep listening without answering the pending question.`,
+        'operator_hold_liveness',
+        true
       );
+      if (result && typeof (result as Promise<AgentInterventionDelivery>).then === 'function') {
+        const delivery = await result;
+        if (!delivery.delivered && this.record.pendingOperatorQuestion?.id === questionId) {
+          await this.deliverVerbatimText(
+            phrase,
+            () => this.record.pendingOperatorQuestion?.id === questionId,
+            false,
+            false
+          );
+        }
+      }
     } finally {
       this.holdLivenessInFlight = false;
     }
+  }
+
+  private agentAlreadyHolding(): boolean {
+    return looksLikeAgentHoldUtterance(this.previousAgentUtterance());
   }
 
   private interruptOperatorDecisionHold(): void {
@@ -1609,6 +1791,10 @@ export class AgentCallSession {
     _source: 'operator_control' | 'operator_takeover' | 'operator_dismissed'
   ): void {
     if (!this.record.pendingOperatorQuestion) return;
+    // A contextual observer request may still be in flight when the operator
+    // answers or dismisses the question. Invalidate it so a late result cannot
+    // resurrect the already-resolved alert and re-apply the decision hold.
+    this.operatorQuestionObserverGeneration += 1;
     this.record.pendingOperatorQuestion = undefined;
     this.record.lastOperatorQuestionResolvedAt = new Date().toISOString();
     this.record.counters.operatorQuestionsResolved += 1;
@@ -1864,6 +2050,16 @@ export class AgentCallSession {
 
 function isFirstUtteranceContractEnforcement(text: string): boolean {
   return text.trim().toUpperCase().startsWith('FIRST UTTERANCE CONTRACT ENFORCEMENT');
+}
+
+function isSameVoiceHoldContext(semanticControl: string | undefined): boolean {
+  return semanticControl === 'operator_decision_hold' || semanticControl === 'operator_hold_liveness';
+}
+
+function looksLikeAgentHoldUtterance(text: string): boolean {
+  return /(?:^|[^\p{L}])(one moment|just a (?:moment|second)|give me a (?:moment|second)|hold on|let me (?:check|see|think|review|find out|look into it)|i(?:'ll| will) (?:check|review|find out|look into it)|un momento|un segundo|perm[ií]tame|d[eé]j[ae]me (?:ver|revisar|pensar|averiguar|investigar)|voy a (?:revisar|verificar|averiguar|investigar))(?![\p{L}])/iu.test(
+    text.replace(/[’‘]/g, "'").trim()
+  );
 }
 
 function appendSpokenDelta(previous: string, delta: string): string {
