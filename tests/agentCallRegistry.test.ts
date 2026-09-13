@@ -48,6 +48,113 @@ function makeSpeechPayload(frequency = 440): string {
 }
 
 describe('AgentCallRegistry', () => {
+  it('remembers delivered Wednesday/4 PM answers beyond the recent transcript and never reopens simple recaps', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Arrange a viewing of the car.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const delivery = { delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true, retryCount: 0, latencyMs: 20 };
+    const injectInstruction = vi.fn(() => Promise.resolve(delivery));
+    const suppressActiveOutput = vi.fn();
+    const appendConversationContext = vi.fn();
+    const mutable = session as unknown as {
+      agent: object;
+      considerOperatorQuestion: (text: string) => void;
+      applyContextualQuestionObservation: (text: string, observation: object) => void;
+      emitTranscript: (speaker: 'agent' | 'remote', text: string) => void;
+      operatorContinuityContext: () => string;
+      approvedSchedule: object;
+    };
+    mutable.agent = { injectInstruction, suppressActiveOutput, appendConversationContext };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you do Wednesday or Thursday?');
+    await session.receiveControl({ kind: 'value_relay', semantic_control: 'relay_value', text: 'Wednesday' });
+    mutable.considerOperatorQuestion('What time would you like to come?');
+    await session.receiveControl({ kind: 'value_relay', semantic_control: 'relay_value', text: '4 PM' });
+    expect(mutable.approvedSchedule).toEqual({ day: 'Wednesday', time: '4:00PM' });
+    // Push the scheduling turns out of every recent-turn window.
+    for (let i = 0; i < 20; i += 1) {
+      mutable.emitTranscript('remote', 'The car is in good condition.');
+      mutable.emitTranscript('agent', 'Thank you for explaining.');
+    }
+    injectInstruction.mockClear(); suppressActiveOutput.mockClear();
+    for (const text of [
+      'What time', 'What time are we going to meet?',
+      "so what's the plan, what's the date? When are we meeting", 'date',
+      "Okay, let's confirm the time.", '¿Entonces nos vemos el miércoles a las cuatro de la tarde?'
+    ]) mutable.considerOperatorQuestion(text);
+    mutable.applyContextualQuestionObservation('date', {
+      requiresOperator: true, kind: 'commitment', questionEn: 'What date should I confirm?',
+      questionEs: '¿Qué fecha debo confirmar?', confidence: 0.99, reason: 'No date is in the recent turns.'
+    });
+    expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
+    expect(suppressActiveOutput).not.toHaveBeenCalled();
+    expect(injectInstruction).not.toHaveBeenCalled();
+    expect(JSON.parse(mutable.operatorContinuityContext()).approvedSchedule).toEqual({ day: 'Wednesday', time: '4:00PM' });
+    mutable.considerOperatorQuestion('Can we do Thursday at 5 PM?');
+    const newQuestion = session.diagnostics().pendingOperatorQuestion;
+    expect(newQuestion).toMatchObject({ blocking: true });
+    mutable.considerOperatorQuestion('What time did we agree on?');
+    expect(session.diagnostics().pendingOperatorQuestion).toEqual(newQuestion);
+  });
+
+  it('records semantic YES without borrowing dates from the micro-button instruction examples', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const mutable = session as unknown as { agent: object; considerOperatorQuestion: (text: string) => void; operatorContinuityContext: () => string };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction: vi.fn(() => Promise.resolve({ delivered: true, acknowledged: true, audioStarted: true, retryCount: 0, latencyMs: 20 })) };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Wednesday at 4 PM?');
+    await session.receiveControl({ kind: 'contextual_micro_intervention', semantic_control: 'yes', text: 'CONTEXTUAL_MICRO_INTERVENTION: yes. Example: Tuesday at 12 PM works.' });
+    const memory = JSON.parse(mutable.operatorContinuityContext());
+    expect(memory.approvedSchedule).toEqual({ day: 'Wednesday', time: '4:00PM' });
+    expect(memory.answered[0].reply).toBe('yes: Yes');
+    expect(mutable.operatorContinuityContext()).not.toContain('Tuesday');
+    mutable.considerOperatorQuestion('Tuesday at 12 PM?');
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+  });
+
+  it('does not reuse a dismissed or undelivered answer as scheduling permission', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const mutable = session as unknown as { agent: object; considerOperatorQuestion: (text: string) => void; approvedSchedule: object; deliverVerbatimText: () => Promise<object> };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction: vi.fn(() => Promise.resolve({ delivered: false, acknowledged: false, audioStarted: false, retryCount: 0, latencyMs: 20 })) };
+    mutable.deliverVerbatimText = vi.fn(() => Promise.resolve({ ok: false, error: 'not delivered' }));
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Wednesday at 4 PM?');
+    await session.receiveControl({ kind: 'value_relay', semantic_control: 'relay_value', text: 'Wednesday at 4 PM' });
+    expect(mutable.approvedSchedule).toEqual({});
+    await session.receiveControl({ kind: 'dismiss_pending_question' });
+    mutable.considerOperatorQuestion('What time are we meeting?');
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+  });
+
+  it.each([false, true])('handles a newer question arriving during an answer without confusing its appointment scope (new appointment: %s)', async (newAppointment) => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a car viewing.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    let finishAnswer!: (value: object) => void;
+    const delivered = { delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true, retryCount: 0, latencyMs: 20 };
+    const injectInstruction = vi.fn((_text: string, semantic: string) => semantic === 'yes'
+      ? new Promise((resolve) => { finishAnswer = resolve; }) : Promise.resolve(delivered));
+    const mutable = session as unknown as { agent: object; considerOperatorQuestion: (text: string) => void; approvedSchedule: object };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Wednesday at 4 PM?');
+    const answer = session.receiveControl({ control: 'yes' });
+    mutable.considerOperatorQuestion(newAppointment ? 'Can we arrange another appointment?' : 'What date and time are we meeting?');
+    finishAnswer(delivered);
+    await answer;
+    if (newAppointment) {
+      expect(mutable.approvedSchedule).toEqual({});
+      expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+    } else {
+      expect(mutable.approvedSchedule).toEqual({ day: 'Wednesday', time: '4:00PM' });
+      expect(session.diagnostics().pendingOperatorQuestion).toBeNull();
+    }
+  });
+
   it.each([
     ['English', 'Can you do Wednesday?', 'What about 12 p.m.?', 'Hello'],
     ['Spanish', '¿Puede venir el miércoles?', '¿Y a las doce?', 'Hola']

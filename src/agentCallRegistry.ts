@@ -9,6 +9,7 @@ import {
   twilioMuLaw8kBase64ToOpenAiPcm24kBase64
 } from './audio/codec.js';
 import { decodeMuLaw } from './audio/mulaw.js';
+import { isApprovedScheduleRecall, rememberApprovedSchedule, startsNewSchedule, type ApprovedSchedule } from './approvedSchedule.js';
 import {
   OpenAiAgentVoiceSession,
   type AgentInterventionDelivery,
@@ -462,6 +463,11 @@ export class AgentCallSession {
   private holdLivenessInFlight = false;
   private operatorQuestionObserverGeneration = 0;
   private readonly answeredOperatorQuestions: Array<{ question: string; reply: string }> = [];
+  private approvedSchedule: ApprovedSchedule = {};
+  private lastScheduleRecallRefreshAt = 0;
+  private scheduleScope = 0;
+  private lastNewScheduleText = '';
+  private readonly questionScheduleScopes = new WeakMap<AgentPendingOperatorQuestion, number>();
 
   constructor(
     private readonly config: AppConfig,
@@ -887,16 +893,28 @@ export class AgentCallSession {
     request: AgentControlRequest,
     question?: AgentPendingOperatorQuestion
   ): Promise<void> {
-    if (question) {
+    if (question && this.questionScheduleScopes.get(question) === this.scheduleScope) {
+      const semantic = semanticControlFromRequest(request);
+      // Micro-button wire text includes examples/instructions. Preserve only
+      // its semantic answer in memory; never turn an example into an approval.
+      const reply = semantic && semantic !== 'relay_value'
+        ? operatorTranscriptText({ control: semantic as ContextualMicroIntervention }, semantic)
+        : operatorTranscriptText(request, request.text ?? '');
+      this.approvedSchedule = rememberApprovedSchedule(
+        this.approvedSchedule, question.sourceText ?? question.text, reply, semantic
+      );
       this.answeredOperatorQuestions.push({
-        question: (question.sourceText ?? question.text).slice(0, 160),
-        reply: `${semanticControlFromRequest(request) ?? request.kind ?? 'answer'}: ${operatorTranscriptText(request, request.text ?? '')}`.slice(0, 100)
+        question: (question.displayTextEn ?? question.text).slice(0, 400),
+        reply: `${semantic ?? request.kind ?? 'answer'}: ${reply}`.slice(0, 200)
       });
-      this.answeredOperatorQuestions.splice(0, Math.max(0, this.answeredOperatorQuestions.length - 4));
+      this.answeredOperatorQuestions.splice(0, Math.max(0, this.answeredOperatorQuestions.length - 20));
+      this.operatorQuestionObserverGeneration += 1;
     }
     // A follow-up can arrive while the earlier answer is playing. Never clear
     // that new approval or unmute it just because the earlier control finished.
-    if (this.record.pendingOperatorQuestion?.id !== question?.id) return;
+    const current = this.record.pendingOperatorQuestion;
+    if (current?.id !== question?.id &&
+      (!current || !isApprovedScheduleRecall(current.sourceText ?? current.text, this.approvedSchedule))) return;
     this.resolvePendingOperatorQuestion('operator_control');
     // The button is delivered when its answer plays, not when the separate
     // next-step question finishes. Keep that background continuation out of
@@ -923,6 +941,7 @@ export class AgentCallSession {
           ? 'Continue from the resolved answer and current mission now with one brief, relevant next-step question. Do not wait for another hello. If you already asked that next question, listen instead of repeating it.'
           : 'Resume the live conversation from fresh remote speech.',
         'The answer applies only to the question that was just resolved; it is not approval for any later choice or commitment.',
+        'Read-back of the same approved detail for the same arrangement is allowed without another hold or operator question. Only new or changed details require fresh approval.',
         'Keep settled facts. Do not repeat the opening, restart intake, or re-ask an answered question.',
         'A mid-call hello is a presence check: acknowledge you are still here and continue the current topic, never ask How can I help you.',
         'Stay responsive if the callee speaks, but do not repeat the answer merely because this instruction arrived.'
@@ -938,8 +957,11 @@ export class AgentCallSession {
   private operatorContinuityContext(): string {
     return JSON.stringify({
       state: 'Same outbound call. These are past answers, not approval for new commitments.',
+      approvedSchedule: this.approvedSchedule,
       purpose: this.callPurposeText().slice(0, 180),
-      answered: this.answeredOperatorQuestions.slice(-2),
+      answered: this.answeredOperatorQuestions.slice(-2).map((answer) => ({
+        question: answer.question.slice(0, 160), reply: answer.reply.slice(0, 100)
+      })),
       recent: this.operatorQuestionObserverTurns().slice(-2).map((turn) => ({
         speaker: turn.speaker, text: turn.text.slice(-140)
       }))
@@ -1575,6 +1597,20 @@ export class AgentCallSession {
   }
 
   private considerOperatorQuestion(text: string): ReturnType<typeof classifyOperatorQuestion> {
+    if (startsNewSchedule(text) && !questionsShareGrowingText(this.lastNewScheduleText, text)) {
+      this.lastNewScheduleText = text;
+      this.scheduleScope += 1;
+      this.approvedSchedule = {};
+      this.answeredOperatorQuestions.length = 0;
+      this.operatorQuestionObserverGeneration += 1;
+    }
+    if (isApprovedScheduleRecall(text, this.approvedSchedule)) {
+      if (!this.record.pendingOperatorQuestion && Date.now() - this.lastScheduleRecallRefreshAt >= HOLD_LIVENESS_COOLDOWN_MS) {
+        this.lastScheduleRecallRefreshAt = Date.now();
+        this.agent?.appendConversationContext?.(this.operatorContinuityContext());
+      }
+      return { text, kind: 'question', blocking: false, reason: 'Read-back of an operator-approved scheduling detail for this same arrangement.' };
+    }
     const classification = classifyOperatorQuestion(
       text,
       this.callPurposeText(),
@@ -1607,6 +1643,7 @@ export class AgentCallSession {
     const newlyDetected = !current || !sameQuestion;
     const newlyBlocking = next.blocking && (!current?.blocking || !sameQuestion);
     this.record.pendingOperatorQuestion = next;
+    this.questionScheduleScopes.set(next, this.scheduleScope);
     if (newlyDetected) this.record.counters.operatorQuestionsDetected += 1;
     if (newlyBlocking) this.record.counters.operatorQuestionsBlocked += 1;
     this.touch();
@@ -1654,6 +1691,7 @@ export class AgentCallSession {
     // suites never open network requests, and production always keeps the
     // deterministic detector as the immediate fail-safe.
     if (process.env.NODE_ENV === 'test' || !this.config.OPENAI_API_KEY) return;
+    if (isApprovedScheduleRecall(utterance, this.approvedSchedule)) return;
     const generation = ++this.operatorQuestionObserverGeneration;
     const recentTurns = this.operatorQuestionObserverTurns();
     this.record.counters.operatorQuestionObserverRuns += 1;
@@ -1661,6 +1699,8 @@ export class AgentCallSession {
       missionContext: this.callPurposeText(),
       currentRemoteUtterance: utterance,
       recentTurns,
+      resolvedOperatorAnswers: this.answeredOperatorQuestions,
+      approvedSchedule: this.approvedSchedule,
       deterministicClassification: deterministic
         ? {
             kind: deterministic.kind,
@@ -1684,6 +1724,9 @@ export class AgentCallSession {
     sourceText: string,
     observation: OperatorQuestionObservation
   ): void {
+    // A delayed/context-poor positive result must not re-open an approved recap.
+    // It also must not clear a different, still-unanswered question.
+    if (isApprovedScheduleRecall(sourceText, this.approvedSchedule)) return;
     this.record.counters.operatorQuestionObserverHits += 1;
     const current = this.record.pendingOperatorQuestion;
     const sameQuestion = current
@@ -1708,6 +1751,7 @@ export class AgentCallSession {
     const newlyBlocking = !current?.blocking || !sameQuestion;
     if (sameQuestion && current) this.record.counters.operatorQuestionObserverEnrichments += 1;
     this.record.pendingOperatorQuestion = next;
+    this.questionScheduleScopes.set(next, this.scheduleScope);
     if (newlyDetected) this.record.counters.operatorQuestionsDetected += 1;
     if (newlyBlocking) this.record.counters.operatorQuestionsBlocked += 1;
     this.touch();
@@ -1717,8 +1761,12 @@ export class AgentCallSession {
 
   private operatorQuestionObserverTurns(): OperatorQuestionObserverTurn[] {
     const turns: OperatorQuestionObserverTurn[] = [];
-    for (const entry of this.record.transcripts.slice(-60)) {
+    for (const entry of this.record.transcripts) {
       if (entry.speaker === 'operator' && /^\[.*\]$/.test(entry.delta)) continue;
+      // The audit transcript may contain a micro-button's wire instruction
+      // and examples. Its delivered semantic answer is stored separately;
+      // examples must never become conversational facts in either reviewer.
+      if (entry.speaker === 'operator' && /^CONTEXTUAL_MICRO_INTERVENTION:/i.test(entry.delta)) continue;
       const previous = turns[turns.length - 1];
       if (previous?.speaker === entry.speaker) {
         previous.text = appendSpokenDelta(previous.text, entry.delta).slice(-900);
@@ -1726,7 +1774,7 @@ export class AgentCallSession {
         turns.push({ speaker: entry.speaker, text: entry.delta.slice(-900) });
       }
     }
-    return turns.slice(-6);
+    return turns.slice(-12);
   }
 
   private activateOperatorDecisionHold(question: AgentPendingOperatorQuestion): void {
@@ -2325,6 +2373,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'Only use a hold phrase for caller-side facts that are truly absent from the mission and prior private controls. If a partial answer is known, give the known part first, then ask a narrow follow-up only if useful, such as "It is for my son. Do you need his name?"',
     'If the remote callee asks for a caller-side fact you do not have, say one allowed hold phrase and stop speaking until a private operator control supplies it. Never ask the remote callee to tell you the caller-side fact. While waiting, if the callee asks whether you are still there or can hear them, answer briefly that you are still there and need one more moment; do not resolve or guess the missing fact.',
     'HARD COMMITMENT GATE: never choose, accept, confirm, or imply approval of a date, time, appointment, reservation, price, payment, purchase, cancellation, consent, or authorization unless that exact decision is explicitly approved in the Mission or a fresh private operator control.',
+    'Previously delivered operator answers remain known facts for this same call. A request to repeat or confirm the SAME agreed date/time is a recap, not a new commitment: answer from those approved facts without another hold. Never apply that approval to a changed date/time, a new appointment, or additional terms.',
     'A Mission goal to schedule, book, meet, visit, buy, or complete the call authorizes you to ask and gather information only. It never authorizes you to choose or accept a specific day, time, price, or other commitment.',
     'When the remote callee proposes options or asks for any commitment that is not explicitly approved, say one allowed hold phrase and stop. Do not pick the most convenient option, infer approval from urgency, or continue negotiating on the operator\'s behalf.',
     'A request to schedule as soon as possible does not authorize a specific day or time. Ask privately through the application and wait for the operator before accepting an offered slot.',

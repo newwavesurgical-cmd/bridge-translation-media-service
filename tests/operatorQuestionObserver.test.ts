@@ -12,6 +12,34 @@ const config = {
 } as AppConfig;
 
 describe('operator question observer', () => {
+  it('supplies durable operator answers and approved schedule even when recent turns contain no scheduling facts', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const input = JSON.parse(body.input);
+      expect(input.approved_schedule).toEqual({ day: 'Wednesday', time: '4:00PM' });
+      expect(input.resolved_operator_answers).toEqual([
+        { question: 'Which day can you come?', reply: 'relay_value: Wednesday' },
+        { question: 'What time can you come?', reply: 'relay_value: 4 PM' }
+      ]);
+      expect(body.instructions).toContain('Repeating, reminding, or confirming an already-approved detail');
+      expect(body.instructions).toContain('A changed day/time, new appointment, added condition');
+      return new Response(JSON.stringify({ output_text: JSON.stringify({
+        requires_operator: false, kind: 'question', operator_question_en: '', operator_question_es: '',
+        confidence: 0.99, reason: 'Recap of the existing approved meeting.'
+      }) }), { status: 200 });
+    });
+    const result = await observeOperatorQuestion(config, {
+      missionContext: 'Arrange a viewing.', currentRemoteUtterance: 'What date and time did we agree?',
+      recentTurns: [{ speaker: 'remote', text: 'The paint is in good shape.' }],
+      approvedSchedule: { day: 'Wednesday', time: '4:00PM' },
+      resolvedOperatorAnswers: [
+        { question: 'Which day can you come?', reply: 'relay_value: Wednesday' },
+        { question: 'What time can you come?', reply: 'relay_value: 4 PM' }
+      ]
+    }, fetchMock as typeof fetch);
+    expect(result?.requiresOperator).toBe(false);
+  });
+
   it('accepts a complete bilingual operator question', () => {
     expect(
       parseOperatorQuestionObservation(

@@ -43,6 +43,33 @@ Set these in Lovable/Supabase, not in browser code:
 
 ## Notes
 
+### Context-aware repeat confirmations (2026-09-13, pending deployment)
+
+- Retained call `…62fa7078` on `edf112b` contained delivered operator values
+  Wednesday and 4 PM, followed by an unnecessary date/time hold. The final
+  observer reason said the date was missing from the mission/recent turns.
+- Keep call-local approved scheduling fields plus the last 20 delivered
+  question/answer pairs. The observer receives these explicitly alongside 12
+  reconstructed turns (not just the last 60 fragments). Micro-button instruction
+  examples are excluded from conversational memory; button delivery is unchanged.
+- Simple English/Spanish read-backs of approved weekday/hour values bypass a
+  new alert before any hold. Changed values, missing fields, AM/PM changes,
+  added terms, unsupported calendar/relative-date wording and ambiguous phrases
+  remain on the existing approval path. No AI-only veto weakens that gate.
+- A stale observer result cannot re-open a recognized recap. An answer finishing
+  while a recap arrives may resolve that recap, but not a new decision or a
+  different appointment. Rejected, dismissed and failed answers are not approval.
+- Verification: 254 bridge tests and TypeScript build pass, including the
+  scheduling replay, delayed-result races, new appointments, rejected answers,
+  changed times, caller quantities, Spanish and instruction-example isolation.
+  No frontend, voice/audio transport, routing, secrets, auth or billing changes.
+  No call was placed. This repair is not deployed or published yet.
+- User acceptance after deployment: choose Wednesday and 4 PM, discuss another
+  subject, then ask for the agreed day/time again. Expect one natural read-back,
+  no new alert/hold. Propose Thursday or 5 PM and expect a new operator question.
+- Separate retained evidence: the same call briefly switched language after a
+  4 PM reply. Voice/language handling is deliberately outside this patch.
+
 ### GPT-Live post-answer continuity (2026-09-13)
 
 - GPT-Live has no output-audio-done event. Operator speech completion uses local
