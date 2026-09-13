@@ -40,6 +40,24 @@ describe('operator question classifier', () => {
     });
   });
 
+  it('blocks a bare streamed hour before a.m. or p.m. arrives', () => {
+    const mission = 'Schedule a meeting on Wednesday.';
+
+    for (const fragment of ['Twelve?', 'At twelve?', 'How about twelve?', '12', 'At 12']) {
+      expect(classifyOperatorQuestion(fragment, mission), fragment).toMatchObject({
+        kind: 'commitment',
+        blocking: true
+      });
+    }
+  });
+
+  it('blocks a bare Spanish streamed hour in a scheduling mission', () => {
+    expect(classifyOperatorQuestion('¿A las doce?', 'Llama para agendar una reunión.')).toMatchObject({
+      kind: 'commitment',
+      blocking: true
+    });
+  });
+
   it('blocks direct meeting availability questions', () => {
     expect(classifyOperatorQuestion('When do you want to do the meeting?')).toMatchObject({
       kind: 'commitment',
@@ -98,6 +116,13 @@ describe('operator question classifier', () => {
 
   it('does not treat product availability as a scheduling authorization', () => {
     expect(classifyOperatorQuestion('It will be available Wednesday.', 'Ask whether the car is available.')).toBeNull();
+  });
+
+  it('does not treat a bare number as a time outside a scheduling mission', () => {
+    expect(classifyOperatorQuestion('Twelve?', 'Ask about the warranty.')).toMatchObject({
+      kind: 'question',
+      blocking: false
+    });
   });
 
   it('strips repeated English and Spanish fillers', () => {

@@ -356,6 +356,12 @@ describe('AgentCallRegistry', () => {
       acknowledged: true,
       audioStarted: true
     });
+    expect(injectInstruction).toHaveBeenCalledWith(
+      expect.stringContaining('SINGLE-USE APPROVAL BOUNDARY'),
+      'yes',
+      true
+    );
+    expect(injectInstruction.mock.calls[0]?.[0]).toContain('does not approve any later or follow-up date, time');
     expect(session.diagnostics()).toMatchObject({
       pendingOperatorQuestion: null,
       counters: {

@@ -25,6 +25,14 @@ const SCHEDULING_CONTEXT =
 const CONCRETE_SCHEDULING_SLOT =
   /(?:\b(?:today|tomorrow|tonight|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|hoy|mañana|manana|esta noche|por la mañana|por la manana|por la tarde|lunes|martes|miércoles|miercoles|jueves|viernes|sábado|sabado|domingo)\b|\b(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*(?::\s*\d{2})?\s*(?:a\s*\.?\s*m|p\s*\.?\s*m)\b|\b\d{1,2}:\d{2}\b|\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b)/i;
 
+// Streaming transcripts often surface a proposed hour before the recognizer
+// appends "a.m." / "p.m." (for example "Twelve?", "At twelve?", then
+// "p.m."). In a scheduling mission, that first fragment is already a new
+// commitment and must be held for the operator instead of being treated as a
+// harmless general question.
+const BARE_SCHEDULING_HOUR =
+  /^[¿\s]*(?:(?:how|what)\s+about\s+|(?:at|around|about|by|from)\s+|(?:a\s+las?|alrededor\s+de|como\s+a)\s+)?(?:[1-9]|1[0-2]|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|una|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce)(?:\s*(?:o'?clock|en\s+punto))?(?:\s*(?:sharp|ish))?[?？.!]*$/i;
+
 const COMMITMENT =
   /\b(?:accept|agree|approve|authorize|authorization|consent|confirm|commit|cancel|reschedule|purchase|order|reserve|price|cost|fee|rate|payment|are you sure|works? for you|okay with you|acept|acepta|aprobar|autorizar|autorización|autorizacion|consentimiento|confirmar|confirma|segur[oa]|comprometer|cancelar|reprogramar|comprar|pedido|reservar|precio|costo|tarifa|pago|le sirve|está bien|esta bien)\b/i;
 
@@ -83,6 +91,7 @@ export function classifyOperatorQuestion(
   const schedulingProposal = looksLikeSchedulingProposal(core);
   const schedulingContext = SCHEDULING_CONTEXT.test(missionContext);
   const concreteSchedulingSlot = CONCRETE_SCHEDULING_SLOT.test(core);
+  const bareSchedulingHour = schedulingContext && BARE_SCHEDULING_HOUR.test(core);
   const question = looksQuestionLike(core);
   const schedulingQuestion =
     question &&
@@ -93,7 +102,7 @@ export function classifyOperatorQuestion(
   // fragment ("Wednesday would be great", then "1 p.m."). Once the mission is
   // a scheduling mission, a concrete day/date/time is itself a decision that
   // requires operator approval even without question punctuation.
-  const schedulingDecision = concreteSchedulingSlot && schedulingContext;
+  const schedulingDecision = (concreteSchedulingSlot || bareSchedulingHour) && schedulingContext;
   const choice = CHOICE.test(core) && (question || schedulingProposal || COMMITMENT.test(core));
   const commitment = COMMITMENT.test(core) || schedulingProposal || schedulingQuestion || schedulingDecision;
   const callerFactQuestion = CALLER_FACT.test(core) && question;

@@ -648,7 +648,12 @@ export class AgentCallSession {
   }
 
   async receiveControl(request: AgentControlRequest): Promise<AgentControlEntry> {
-    const text = controlInstruction(request);
+    const resolvesPendingQuestion = controlResolvesPendingQuestion(request);
+    const baseInstruction = controlInstruction(request);
+    const text =
+      this.record.pendingOperatorQuestion && resolvesPendingQuestion
+        ? `${baseInstruction} SINGLE-USE APPROVAL BOUNDARY: this operator response resolves only the one currently pending question. It expires immediately after one callee-facing answer and does not approve any later or follow-up date, time, price, payment, consent, or other commitment.`
+        : baseInstruction;
     const duplicate = this.isDuplicateControl(request.control, text);
     const entry: AgentControlEntry = {
       at: new Date().toISOString(),
@@ -685,7 +690,6 @@ export class AgentCallSession {
     }
 
     this.lastOperatorDecisionAt = Date.now();
-    const resolvesPendingQuestion = controlResolvesPendingQuestion(request);
     if (this.record.pendingOperatorQuestion) this.interruptOperatorDecisionHold();
     this.emitTranscript('operator', operatorTranscriptText(request, text));
 
