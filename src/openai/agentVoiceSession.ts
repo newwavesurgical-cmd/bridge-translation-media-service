@@ -10,6 +10,8 @@ export interface AgentOutputContext {
 
 export interface AgentVoiceSessionOptions {
   config: AppConfig;
+  /** Bounded correlation only; never logged with phone, prompt, or audio data. */
+  sessionId?: string;
   instructions: string;
   /** Whether the operator enabled the guaranteed first-message disclosure. */
   disclosureEnabled?: boolean;

@@ -13,6 +13,7 @@ import { isApprovedScheduleRecall, rememberApprovedSchedule, startsNewSchedule, 
 import {
   OpenAiAgentVoiceSession,
   type AgentInterventionDelivery,
+  type AgentOutputContext,
   type AgentStartupDiagnostics,
   type AgentVoiceSession
 } from './openai/agentVoiceSession.js';
@@ -50,6 +51,7 @@ const BARGE_IN_PLAYBACK_WINDOW_MS = 1500;
 const BARGE_IN_CLEAR_COOLDOWN_MS = 450;
 const OPERATOR_QUESTION_SETTLE_MS = 650;
 const HOLD_LIVENESS_COOLDOWN_MS = 3500;
+const MAX_QUESTION_EVENT_TAIL = 80;
 const DEFAULT_FIRST_UTTERANCE =
   "I'm Not a telemarketer. I'm using a translator app since my English is limited. I'm calling.";
 const LEGACY_FIRST_UTTERANCE =
@@ -210,8 +212,31 @@ export interface AgentPendingOperatorQuestion {
   reason: string;
   observedBy?: 'deterministic' | 'contextual_ai';
   observerConfidence?: number;
+  /** Stable within one buffered caller utterance; diagnostic correlation only. */
+  sourceUtteranceId?: number;
   detectedAt: string;
   updatedAt: string;
+}
+
+type AgentQuestionEventPhase =
+  | 'detected'
+  | 'enriched'
+  | 'held'
+  | 'answered'
+  | 'dismissed'
+  | 'dismiss_ignored'
+  | 'superseded'
+  | 'observer_discarded'
+  | 'observer_failed';
+
+interface AgentQuestionEvent {
+  at: string;
+  phase: AgentQuestionEventPhase;
+  questionId?: string;
+  sourceUtteranceId?: number;
+  source?: 'deterministic' | 'contextual_ai' | 'operator';
+  text?: string;
+  reason?: string;
 }
 
 export interface AgentCallRecord {
@@ -283,6 +308,10 @@ export interface AgentCallRecord {
     operatorQuestionObserverHits: number;
     operatorQuestionObserverEnrichments: number;
     operatorQuestionObserverFailures: number;
+    operatorQuestionObserverStaleDiscards: number;
+    operatorAnswerCompletions: number;
+    autonomyResumeRequests: number;
+    operatorQuestionDismissals: number;
   };
   startupDiagnostics: AgentStartupDiagnostics;
   timings: {
@@ -385,7 +414,11 @@ export class AgentCallRegistry {
         operatorQuestionObserverRuns: 0,
         operatorQuestionObserverHits: 0,
         operatorQuestionObserverEnrichments: 0,
-        operatorQuestionObserverFailures: 0
+        operatorQuestionObserverFailures: 0,
+        operatorQuestionObserverStaleDiscards: 0,
+        operatorAnswerCompletions: 0,
+        autonomyResumeRequests: 0,
+        operatorQuestionDismissals: 0
       },
       startupDiagnostics: {
         sessionUpdateAcked: false,
@@ -454,14 +487,19 @@ export class AgentCallSession {
   private verbatimSpeechGeneration = 0;
   private verbatimSpeechActive = false;
   private currentRemoteUtterance = '';
+  private currentRemoteUtteranceId = 0;
+  private remoteUtteranceSequence = 0;
   private operatorQuestionTimer?: NodeJS.Timeout;
   private operatorQuestionSequence = 0;
   private holdDeliveredForQuestionId?: string;
   private operatorControlResponseActive = false;
+  private operatorControlQuestionId?: string;
   private lastBargeInClearAt = 0;
   private lastHoldLivenessAt = 0;
   private holdLivenessInFlight = false;
   private operatorQuestionObserverGeneration = 0;
+  private operatorQuestionObserverRunSequence = 0;
+  private readonly questionEvents: AgentQuestionEvent[] = [];
   private readonly answeredOperatorQuestions: Array<{ question: string; reply: string }> = [];
   private approvedSchedule: ApprovedSchedule = {};
   private lastScheduleRecallRefreshAt = 0;
@@ -684,7 +722,11 @@ export class AgentCallSession {
   async receiveControl(request: AgentControlRequest): Promise<AgentControlEntry> {
     const resolvesPendingQuestion = controlResolvesPendingQuestion(request);
     const pendingQuestion = this.record.pendingOperatorQuestion;
-    const baseInstruction = controlInstruction(request, pendingQuestion?.text);
+    const baseInstruction = controlInstruction(
+      request,
+      pendingQuestion?.text,
+      pendingQuestion?.sourceText
+    );
     const text =
       this.record.pendingOperatorQuestion && resolvesPendingQuestion
         ? `${baseInstruction} SINGLE-USE APPROVAL BOUNDARY: this operator response resolves only the one currently pending question. Keep that resolved fact in call memory; it does not approve any later or follow-up date, time, price, payment, consent, or other commitment.`
@@ -707,13 +749,25 @@ export class AgentCallSession {
     }
     this.lastControlSignature = { value: controlSignature(request.control, text), at: Date.now() };
 
-    if (isFirstUtteranceContractEnforcement(text)) {
+    if (isFirstUtteranceContractEnforcement(request.text ?? request.note ?? text)) {
       entry.text = 'Ignored duplicate first-utterance contract enforcement; startup is enforced by the media bridge.';
       this.touch();
       return entry;
     }
 
     if (request.kind === 'dismiss_pending_question') {
+      if (
+        pendingQuestion &&
+        this.operatorControlResponseActive &&
+        this.operatorControlQuestionId === pendingQuestion.id
+      ) {
+        entry.text = 'The answer is already being delivered; dismissal was ignored.';
+        entry.delivered = true;
+        this.record.counters.controlsDelivered += 1;
+        this.recordQuestionEvent('dismiss_ignored', pendingQuestion, 'operator', 'answer_in_progress');
+        this.touch();
+        return entry;
+      }
       const dismissedBlockingQuestion = this.record.pendingOperatorQuestion?.blocking === true;
       this.lastOperatorDecisionAt = Date.now();
       this.interruptOperatorDecisionHold();
@@ -722,6 +776,7 @@ export class AgentCallSession {
       entry.delivered = true;
       this.record.counters.controlsDelivered += 1;
       if (dismissedBlockingQuestion && this.agent && this.record.state === 'live') {
+        this.record.counters.autonomyResumeRequests += 1;
         const resume = this.agent.injectInstruction(
           [
             'The temporary operator-decision hold has been dismissed without an answer.',
@@ -805,6 +860,7 @@ export class AgentCallSession {
     }
 
     this.operatorControlResponseActive = true;
+    this.operatorControlQuestionId = resolvesPendingQuestion ? answeredQuestion?.id : undefined;
     let delivery: AgentInterventionDelivery | undefined;
     try {
       const result = this.agent.injectInstruction(
@@ -833,6 +889,7 @@ export class AgentCallSession {
       entry.delivered = true;
       this.record.counters.controlsDelivered += 1;
       this.operatorControlResponseActive = false;
+      this.operatorControlQuestionId = undefined;
       if (resolvesPendingQuestion) {
         await this.completeOperatorAnswer(request, answeredQuestion);
       }
@@ -851,6 +908,7 @@ export class AgentCallSession {
       entry.delivered = true;
       this.record.counters.controlsDelivered += 1;
       this.operatorControlResponseActive = false;
+      this.operatorControlQuestionId = undefined;
       if (resolvesPendingQuestion) {
         await this.completeOperatorAnswer(request, answeredQuestion);
       }
@@ -861,8 +919,9 @@ export class AgentCallSession {
     // any late model output and speak a concise, already-safe answer through
     // deterministic TTS. The pending question remains visible until one of
     // these two paths actually starts audible delivery.
-    this.operatorControlResponseActive = false;
     if (!operatorControlExpectsSpeech(request)) {
+      this.operatorControlResponseActive = false;
+      this.operatorControlQuestionId = undefined;
       entry.error = delivery.error ?? 'The private operator instruction was not acknowledged.';
       entry.errorCode = delivery.errorCode ?? 'control_delivery_failed';
       this.record.counters.controlsFailed += 1;
@@ -878,12 +937,16 @@ export class AgentCallSession {
       entry.error = undefined;
       this.record.counters.controlsDelivered += 1;
       this.record.counters.controlsFallbackUsed += 1;
+      this.operatorControlResponseActive = false;
+      this.operatorControlQuestionId = undefined;
       if (resolvesPendingQuestion) {
         await this.completeOperatorAnswer(request, answeredQuestion);
       }
       return;
     }
 
+    this.operatorControlResponseActive = false;
+    this.operatorControlQuestionId = undefined;
     entry.error = delivery.error ?? fallback.error ?? 'Operator response was not delivered.';
     entry.errorCode = delivery.errorCode ?? 'control_delivery_failed';
     this.record.counters.controlsFailed += 1;
@@ -893,6 +956,7 @@ export class AgentCallSession {
     request: AgentControlRequest,
     question?: AgentPendingOperatorQuestion
   ): Promise<void> {
+    this.record.counters.operatorAnswerCompletions += 1;
     if (question && this.questionScheduleScopes.get(question) === this.scheduleScope) {
       const semantic = semanticControlFromRequest(request);
       // Micro-button wire text includes examples/instructions. Preserve only
@@ -916,30 +980,25 @@ export class AgentCallSession {
     if (current?.id !== question?.id &&
       (!current || !isApprovedScheduleRecall(current.sourceText ?? current.text, this.approvedSchedule))) return;
     this.resolvePendingOperatorQuestion('operator_control');
-    // The button is delivered when its answer plays, not when the separate
-    // next-step question finishes. Keep that background continuation out of
-    // the control HTTP response so a quiet callee cannot strand the cockpit.
-    void this.resumeAutonomyAfterOperatorAnswer(
-      Boolean(question) && semanticControlFromRequest(request) !== 'end_politely' &&
-      request.kind !== 'force_say' && request.kind !== 'human_say'
-    ).catch(() => {
+    // The spoken answer itself may include one relevant follow-up. Resume the
+    // autonomous listener quietly so a second model-generated continuation
+    // cannot thank the operator, repeat the answer, or change topics.
+    void this.resumeAutonomyAfterOperatorAnswer().catch(() => {
       console.warn(JSON.stringify({ event: 'agent_continuation_error', sessionIdSuffix: this.sessionId.slice(-8) }));
     });
   }
 
-  private async resumeAutonomyAfterOperatorAnswer(continueMission = false): Promise<void> {
+  private async resumeAutonomyAfterOperatorAnswer(): Promise<void> {
     if (!this.agent || this.record.state !== 'live') return;
-    const gptLiveContinuation = this.record.agentEngine === 'gpt-live-1' && continueMission;
     if (this.record.agentEngine === 'gpt-live-1' && this.answeredOperatorQuestions.length) {
       this.agent.appendConversationContext?.(this.operatorContinuityContext());
     }
+    this.record.counters.autonomyResumeRequests += 1;
     const resume = this.agent.injectInstruction(
       [
         'The operator-directed answer was delivered. Respect any callee interruption.',
         'Remove the temporary decision hold. This is the SAME outbound call, not a new conversation.',
-        gptLiveContinuation
-          ? 'Continue from the resolved answer and current mission now with one brief, relevant next-step question. Do not wait for another hello. If you already asked that next question, listen instead of repeating it.'
-          : 'Resume the live conversation from fresh remote speech.',
+        'Resume the live listener now and wait for fresh remote speech. Do not create a separate spoken continuation merely because this instruction arrived.',
         'The answer applies only to the question that was just resolved; it is not approval for any later choice or commitment.',
         'Read-back of the same approved detail for the same arrangement is allowed without another hold or operator question. Only new or changed details require fresh approval.',
         'Keep settled facts. Do not repeat the opening, restart intake, or re-ask an answered question.',
@@ -947,7 +1006,7 @@ export class AgentCallSession {
         'Stay responsive if the callee speaks, but do not repeat the answer merely because this instruction arrived.'
       ].join(' '),
       'resume_autonomy',
-      gptLiveContinuation
+      false
     );
     if (resume && typeof (resume as Promise<AgentInterventionDelivery>).then === 'function') {
       await resume;
@@ -1202,6 +1261,7 @@ export class AgentCallSession {
       startupDiagnostics: { ...this.record.startupDiagnostics },
       counters: { ...this.record.counters },
       controlsTail: this.record.controls.slice(-MAX_CONTROL_TAIL),
+      questionEventTail: this.questionEvents.slice(-MAX_QUESTION_EVENT_TAIL),
       dtmfTail: this.record.dtmf.slice(-MAX_CONTROL_TAIL),
       transcriptDiagnosticNote:
         'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
@@ -1300,34 +1360,13 @@ export class AgentCallSession {
         : OpenAiAgentVoiceSession;
     this.agent = new SessionClass({
       config: this.config,
+      sessionId: this.sessionId,
       instructions: buildAgentInstructions(this.record),
       disclosureEnabled: this.record.disclosureEnabled,
       firstUtterance: this.record.firstUtterance,
       spokenPurpose: this.record.spokenPurpose,
       voice: this.record.voice,
-      onAudioDelta: (pcmu, context) => {
-        this.flushRemoteUtterance();
-        if (this.record.takeover?.active) {
-          return false;
-        }
-        if (this.verbatimSpeechActive) {
-          return false;
-        }
-        if (this.isIvrHoldActive()) {
-          this.record.counters.ivrAgentAudioSuppressed += 1;
-          return false;
-        }
-        if (
-          this.record.pendingOperatorQuestion?.blocking &&
-          !this.operatorControlResponseActive &&
-          !isSameVoiceHoldContext(context?.semanticControl)
-        ) {
-          return false;
-        }
-        this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
-        this.sendTwilioMedia(pcmu);
-        return true;
-      },
+      onAudioDelta: (pcmu, context) => this.handleAgentAudioDelta(pcmu, context),
       onPlaybackCheckpoint: (name) => this.sendTwilioMark(name),
       onRemoteTranscriptDelta: (delta) => {
         this.record.timings.firstRemoteTranscriptAt ??= new Date().toISOString();
@@ -1360,6 +1399,28 @@ export class AgentCallSession {
       onError: (error) => this.fail(error)
     });
     this.agent.connect();
+  }
+
+  private handleAgentAudioDelta(pcmu: string, context?: AgentOutputContext): boolean {
+    // GPT-Live audio packets are not caller-turn boundaries. Flushing here
+    // split one caller utterance into word-by-word observer runs and bubbles.
+    // Caller text settles on its timer or a genuine agent transcript turn.
+    if (this.record.takeover?.active) return false;
+    if (this.verbatimSpeechActive) return false;
+    if (this.isIvrHoldActive()) {
+      this.record.counters.ivrAgentAudioSuppressed += 1;
+      return false;
+    }
+    if (
+      this.record.pendingOperatorQuestion?.blocking &&
+      !this.operatorControlResponseActive &&
+      !isSameVoiceHoldContext(context?.semanticControl)
+    ) {
+      return false;
+    }
+    this.record.timings.firstAgentAudioAt ??= new Date().toISOString();
+    this.sendTwilioMedia(pcmu);
+    return true;
   }
 
   private handleAppMessage(raw: string): void {
@@ -1493,6 +1554,9 @@ export class AgentCallSession {
     }
 
     const now = Date.now();
+    if (!this.currentRemoteUtterance) {
+      this.currentRemoteUtteranceId = ++this.remoteUtteranceSequence;
+    }
     this.currentRemoteUtterance = appendSpokenDelta(this.currentRemoteUtterance, normalized);
     if (
       this.record.pendingOperatorQuestion?.blocking &&
@@ -1506,7 +1570,7 @@ export class AgentCallSession {
       this.lastHoldLivenessAt = now;
       this.agent?.appendConversationContext?.(this.operatorContinuityContext());
     }
-    this.considerOperatorQuestion(this.currentRemoteUtterance);
+    this.considerOperatorQuestion(this.currentRemoteUtterance, this.currentRemoteUtteranceId);
     this.clearOperatorQuestionTimer();
     this.operatorQuestionTimer = setTimeout(() => this.flushRemoteUtterance(), OPERATOR_QUESTION_SETTLE_MS);
     this.operatorQuestionTimer.unref();
@@ -1596,7 +1660,10 @@ export class AgentCallSession {
     this.touch();
   }
 
-  private considerOperatorQuestion(text: string): ReturnType<typeof classifyOperatorQuestion> {
+  private considerOperatorQuestion(
+    text: string,
+    sourceUtteranceId = this.currentRemoteUtteranceId
+  ): ReturnType<typeof classifyOperatorQuestion> {
     if (startsNewSchedule(text) && !questionsShareGrowingText(this.lastNewScheduleText, text)) {
       this.lastNewScheduleText = text;
       this.scheduleScope += 1;
@@ -1625,27 +1692,41 @@ export class AgentCallSession {
 
     const current = this.record.pendingOperatorQuestion;
     const sameQuestion = current
-      ? questionsShareGrowingText(current.sourceText ?? current.text, classification.text)
+      ? (sourceUtteranceId > 0 && current.sourceUtteranceId === sourceUtteranceId) ||
+        questionsShareGrowingText(current.sourceText ?? current.text, classification.text)
       : false;
     const timestamp = new Date().toISOString();
+    const contextualText = deterministicOperatorQuestionText(
+      classification.text,
+      classification.kind,
+      this.previousAgentUtterance()
+    );
     const next: AgentPendingOperatorQuestion = {
       id: sameQuestion && current ? current.id : `operator-question-${++this.operatorQuestionSequence}`,
-      text: classification.text,
+      text: contextualText,
       sourceText: classification.text,
+      displayTextEn: contextualText,
+      displayTextEs: sameQuestion ? current?.displayTextEs : undefined,
       kind: classification.kind,
       blocking: classification.blocking,
       reason: classification.reason,
       observedBy: current?.observedBy ?? 'deterministic',
       observerConfidence: current?.observerConfidence,
+      sourceUtteranceId,
       detectedAt: sameQuestion && current ? current.detectedAt : timestamp,
       updatedAt: timestamp
     };
     const newlyDetected = !current || !sameQuestion;
     const newlyBlocking = next.blocking && (!current?.blocking || !sameQuestion);
+    if (newlyDetected) {
+      this.operatorQuestionObserverGeneration += 1;
+      if (current) this.recordQuestionEvent('superseded', current, current.observedBy, 'new_blocking_question');
+    }
     this.record.pendingOperatorQuestion = next;
     this.questionScheduleScopes.set(next, this.scheduleScope);
     if (newlyDetected) this.record.counters.operatorQuestionsDetected += 1;
     if (newlyBlocking) this.record.counters.operatorQuestionsBlocked += 1;
+    this.recordQuestionEvent(newlyDetected ? 'detected' : 'enriched', next, 'deterministic');
     this.touch();
     this.sendAppStatus();
 
@@ -1677,22 +1758,26 @@ export class AgentCallSession {
   private flushRemoteUtterance(): void {
     const utterance = this.currentRemoteUtterance.trim();
     if (!utterance) return;
+    const sourceUtteranceId = this.currentRemoteUtteranceId;
     this.clearOperatorQuestionTimer();
     this.currentRemoteUtterance = '';
-    const deterministic = this.considerOperatorQuestion(utterance);
-    this.scheduleContextualQuestionObservation(utterance, deterministic);
+    this.currentRemoteUtteranceId = 0;
+    const deterministic = this.considerOperatorQuestion(utterance, sourceUtteranceId);
+    this.scheduleContextualQuestionObservation(utterance, deterministic, sourceUtteranceId);
   }
 
   private scheduleContextualQuestionObservation(
     utterance: string,
-    deterministic: ReturnType<typeof classifyOperatorQuestion>
+    deterministic: ReturnType<typeof classifyOperatorQuestion>,
+    sourceUtteranceId: number
   ): void {
     // Unit tests exercise the observer module with a mocked fetch. Registry
     // suites never open network requests, and production always keeps the
     // deterministic detector as the immediate fail-safe.
     if (process.env.NODE_ENV === 'test' || !this.config.OPENAI_API_KEY) return;
     if (isApprovedScheduleRecall(utterance, this.approvedSchedule)) return;
-    const generation = ++this.operatorQuestionObserverGeneration;
+    const generation = this.operatorQuestionObserverGeneration;
+    const runId = ++this.operatorQuestionObserverRunSequence;
     const recentTurns = this.operatorQuestionObserverTurns();
     this.record.counters.operatorQuestionObserverRuns += 1;
     void observeOperatorQuestion(this.config, {
@@ -1709,29 +1794,83 @@ export class AgentCallSession {
           }
         : null
     }).then((observation) => {
-      if (generation !== this.operatorQuestionObserverGeneration || this.record.state === 'ended') return;
+      if (this.record.state === 'ended') return;
+      if (generation !== this.operatorQuestionObserverGeneration) {
+        this.record.counters.operatorQuestionObserverStaleDiscards += 1;
+        this.recordQuestionEvent(
+          'observer_discarded',
+          undefined,
+          'contextual_ai',
+          `lifecycle_changed:run_${runId}`,
+          sourceUtteranceId,
+          utterance
+        );
+        this.touch();
+        return;
+      }
       if (!observation) {
         this.record.counters.operatorQuestionObserverFailures += 1;
+        this.recordQuestionEvent(
+          'observer_failed',
+          undefined,
+          'contextual_ai',
+          `no_valid_result:run_${runId}`,
+          sourceUtteranceId,
+          utterance
+        );
         this.touch();
         return;
       }
       if (!observation.requiresOperator) return;
-      this.applyContextualQuestionObservation(utterance, observation);
+      this.applyContextualQuestionObservation(
+        utterance,
+        observation,
+        sourceUtteranceId,
+        generation,
+        runId
+      );
     });
   }
 
   private applyContextualQuestionObservation(
     sourceText: string,
-    observation: OperatorQuestionObservation
+    observation: OperatorQuestionObservation,
+    sourceUtteranceId: number,
+    generation: number,
+    runId: number
   ): void {
     // A delayed/context-poor positive result must not re-open an approved recap.
     // It also must not clear a different, still-unanswered question.
-    if (isApprovedScheduleRecall(sourceText, this.approvedSchedule)) return;
-    this.record.counters.operatorQuestionObserverHits += 1;
+    if (generation !== this.operatorQuestionObserverGeneration || isApprovedScheduleRecall(sourceText, this.approvedSchedule)) {
+      this.record.counters.operatorQuestionObserverStaleDiscards += 1;
+      this.recordQuestionEvent(
+        'observer_discarded',
+        undefined,
+        'contextual_ai',
+        `resolved_or_approved:run_${runId}`,
+        sourceUtteranceId,
+        sourceText
+      );
+      return;
+    }
     const current = this.record.pendingOperatorQuestion;
     const sameQuestion = current
-      ? questionsShareGrowingText(current.sourceText ?? current.text, sourceText)
+      ? current.sourceUtteranceId === sourceUtteranceId ||
+        questionsShareGrowingText(current.sourceText ?? current.text, sourceText)
       : false;
+    if (current && !sameQuestion && (current.sourceUtteranceId ?? 0) > sourceUtteranceId) {
+      this.record.counters.operatorQuestionObserverStaleDiscards += 1;
+      this.recordQuestionEvent(
+        'observer_discarded',
+        current,
+        'contextual_ai',
+        `newer_question_active:run_${runId}`,
+        sourceUtteranceId,
+        sourceText
+      );
+      return;
+    }
+    this.record.counters.operatorQuestionObserverHits += 1;
     const timestamp = new Date().toISOString();
     const next: AgentPendingOperatorQuestion = {
       id: sameQuestion && current ? current.id : `operator-question-${++this.operatorQuestionSequence}`,
@@ -1744,16 +1883,22 @@ export class AgentCallSession {
       reason: observation.reason,
       observedBy: 'contextual_ai',
       observerConfidence: observation.confidence,
+      sourceUtteranceId,
       detectedAt: sameQuestion && current ? current.detectedAt : timestamp,
       updatedAt: timestamp
     };
     const newlyDetected = !current || !sameQuestion;
     const newlyBlocking = !current?.blocking || !sameQuestion;
     if (sameQuestion && current) this.record.counters.operatorQuestionObserverEnrichments += 1;
+    if (newlyDetected) {
+      this.operatorQuestionObserverGeneration += 1;
+      if (current) this.recordQuestionEvent('superseded', current, current.observedBy, 'new_contextual_question');
+    }
     this.record.pendingOperatorQuestion = next;
     this.questionScheduleScopes.set(next, this.scheduleScope);
     if (newlyDetected) this.record.counters.operatorQuestionsDetected += 1;
     if (newlyBlocking) this.record.counters.operatorQuestionsBlocked += 1;
+    this.recordQuestionEvent(newlyDetected ? 'detected' : 'enriched', next, 'contextual_ai');
     this.touch();
     this.sendAppStatus();
     if (newlyBlocking) this.activateOperatorDecisionHold(next);
@@ -1783,6 +1928,7 @@ export class AgentCallSession {
     );
     if (this.holdDeliveredForQuestionId === question.id) return;
     this.holdDeliveredForQuestionId = question.id;
+    this.recordQuestionEvent('held', question, question.observedBy);
     if (this.agentAlreadyHolding()) return;
     const phrase = operatorDecisionHoldPhrase(this.record.languageLock);
     if (this.record.agentEngine === 'gpt-live-1') {
@@ -1889,19 +2035,46 @@ export class AgentCallSession {
   }
 
   private resolvePendingOperatorQuestion(
-    _source: 'operator_control' | 'operator_takeover' | 'operator_dismissed'
+    source: 'operator_control' | 'operator_takeover' | 'operator_dismissed'
   ): void {
-    if (!this.record.pendingOperatorQuestion) return;
+    const question = this.record.pendingOperatorQuestion;
+    if (!question) return;
     // A contextual observer request may still be in flight when the operator
     // answers or dismisses the question. Invalidate it so a late result cannot
     // resurrect the already-resolved alert and re-apply the decision hold.
     this.operatorQuestionObserverGeneration += 1;
+    if (source === 'operator_dismissed') {
+      this.record.counters.operatorQuestionDismissals += 1;
+      this.recordQuestionEvent('dismissed', question, 'operator');
+    } else {
+      this.recordQuestionEvent('answered', question, 'operator', source);
+    }
     this.record.pendingOperatorQuestion = undefined;
     this.record.lastOperatorQuestionResolvedAt = new Date().toISOString();
     this.record.counters.operatorQuestionsResolved += 1;
     this.holdDeliveredForQuestionId = undefined;
     this.touch();
     this.sendAppStatus();
+  }
+
+  private recordQuestionEvent(
+    phase: AgentQuestionEventPhase,
+    question?: AgentPendingOperatorQuestion,
+    source?: AgentQuestionEvent['source'],
+    reason = question?.reason,
+    sourceUtteranceId = question?.sourceUtteranceId,
+    text = question?.displayTextEn ?? question?.text
+  ): void {
+    this.questionEvents.push({
+      at: new Date().toISOString(),
+      phase,
+      questionId: question?.id,
+      sourceUtteranceId,
+      source,
+      text: text?.replace(/\s+/g, ' ').trim().slice(0, 320),
+      reason: reason?.replace(/\s+/g, ' ').trim().slice(0, 160)
+    });
+    this.questionEvents.splice(0, Math.max(0, this.questionEvents.length - MAX_QUESTION_EVENT_TAIL));
   }
 
   private clearOperatorQuestionTimer(): void {
@@ -2189,6 +2362,21 @@ function questionsShareGrowingText(left: string, right: string): boolean {
   return shorter.length >= 8 && longer.startsWith(`${shorter} `);
 }
 
+function deterministicOperatorQuestionText(
+  sourceText: string,
+  kind: OperatorQuestionKind,
+  precedingAgentTurn: string
+): string {
+  const source = sourceText.replace(/\s+/g, ' ').trim();
+  const preceding = precedingAgentTurn.replace(/\s+/g, ' ').trim().slice(-240);
+  const compactFragment = source.length <= 24 || normalizedQuestionText(source).split(' ').length <= 4;
+  if (!compactFragment || !preceding) return source;
+  if (kind === 'commitment' || kind === 'choice') {
+    return `The caller said “${source}” after the agent asked “${preceding}”. Do you approve that exact option?`;
+  }
+  return `The caller said “${source}” after the agent asked “${preceding}”. What should the agent answer?`;
+}
+
 function controlResolvesPendingQuestion(request: AgentControlRequest): boolean {
   const semantic = semanticControlFromRequest(request);
   if (
@@ -2401,25 +2589,35 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
   ].join('\n');
 }
 
-function controlInstruction(request: AgentControlRequest, pendingQuestion?: string): string {
-  const freeText = normalizeOptional(request.text ?? request.note);
+function controlInstruction(
+  request: AgentControlRequest,
+  pendingQuestion?: string,
+  pendingSourceText?: string
+): string {
+  const semantic = semanticControlFromRequest(request);
+  const suppliedText = normalizeOptional(request.text ?? request.note);
+  const microEnvelope = suppliedText?.startsWith('CONTEXTUAL_MICRO_INTERVENTION:') ?? false;
+  const freeText = microEnvelope ? undefined : suppliedText;
   const context = normalizeOptional(pendingQuestion);
-  const contextualize = (instruction: string): string =>
+  const sourceText = normalizeOptional(pendingSourceText);
+  const contextualize = (instruction: string, answer?: string): string =>
     context
       ? [
           instruction,
           `ACTIVE CALLEE QUESTION: "${context}"`,
-          freeText ? `OPERATOR ANSWER: "${freeText}"` : '',
+          sourceText && normalizedQuestionText(sourceText) !== normalizedQuestionText(context)
+            ? `EXACT LATEST CALLEE WORDS: "${sourceText}"`
+            : '',
+          answer ? `OPERATOR ANSWER: "${answer}"` : '',
           'Answer that exact question in one natural, self-contained sentence that includes the relevant subject and detail.',
           'Do not reply with only a bare yes, no, number, date, or time unless the remote system explicitly requires one exact short field.',
+          'In the same spoken turn, you may ask at most one brief, directly relevant next mission question when the next step is obvious; otherwise stop and listen.',
+          'Never create a second acknowledgement or continuation turn merely because the private answer arrived.',
           'Do not invent or approve anything beyond this single answer.'
         ]
           .filter(Boolean)
           .join(' ')
-      : instruction;
-  if (!request.control) {
-    return contextualize(freeText ?? 'Pause briefly and continue naturally.');
-  }
+      : [instruction, answer ? `OPERATOR ANSWER: "${answer}"` : ''].filter(Boolean).join(' ');
 
   const map: Record<ContextualMicroIntervention, string> = {
     yes: 'Resolve the active question as yes, then ask the next necessary follow-up.',
@@ -2438,9 +2636,16 @@ function controlInstruction(request: AgentControlRequest, pendingQuestion?: stri
     end_politely: 'Politely wrap up the call and end it.'
   };
 
-  return contextualize(
-    freeText ? `${map[request.control]} Operator detail: ${freeText}` : map[request.control]
-  );
+  if (semantic && semantic in map) {
+    return contextualize(map[semantic as ContextualMicroIntervention]);
+  }
+  if (freeText) {
+    if (context || semantic === 'relay_value' || request.kind === 'value_relay') {
+      return contextualize('Use the supplied operator answer for the active callee question.', freeText);
+    }
+    return freeText;
+  }
+  return contextualize('Pause briefly and continue naturally.');
 }
 
 function controlSignature(control: ContextualMicroIntervention | undefined, text: string): string {
@@ -2449,7 +2654,8 @@ function controlSignature(control: ContextualMicroIntervention | undefined, text
 
 function operatorTranscriptText(request: AgentControlRequest, fallback: string): string {
   const supplied = normalizeOptional(request.text ?? request.note);
-  if (supplied) {
+  const semantic = semanticControlFromRequest(request);
+  if (supplied && !supplied.startsWith('CONTEXTUAL_MICRO_INTERVENTION:')) {
     return supplied;
   }
   const labels: Partial<Record<ContextualMicroIntervention, string>> = {
@@ -2468,7 +2674,9 @@ function operatorTranscriptText(request: AgentControlRequest, fallback: string):
     do_not_commit: 'Do not commit',
     end_politely: 'End politely'
   };
-  return request.control ? labels[request.control] ?? fallback : fallback;
+  return semantic && semantic in labels
+    ? labels[semantic as ContextualMicroIntervention] ?? fallback
+    : fallback;
 }
 
 export function detectConversationalAnsweringService(

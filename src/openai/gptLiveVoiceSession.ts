@@ -12,6 +12,7 @@ const OPENING_INSTRUCTION_ACK_TIMEOUT_MS = 750;
 const OPENING_FIRST_AUDIO_TIMEOUT_MS = 1_500;
 const OPENING_RETRY_AUDIO_TIMEOUT_MS = 1_500;
 const CONTROL_FIRST_RESPONSE_TIMEOUT_MS = 1_400;
+const CONTROL_ACKED_FIRST_AUDIO_TIMEOUT_MS = 3_000;
 const CONTROL_RETRY_RESPONSE_TIMEOUT_MS = 1_800;
 const CONTROL_AUDIO_COMPLETION_TIMEOUT_MS = 10_000;
 
@@ -25,10 +26,13 @@ interface PendingIntervention {
 }
 
 interface ActiveIntervention extends PendingIntervention {
-  instructionEventId: string;
+  sessionIdSuffix: string | null;
+  instructionEventIds: Set<string>;
   commentaryEventIds: Set<string>;
   instructionAcked: boolean;
   commentaryAcked: boolean;
+  lastAckAt?: number;
+  ackedAudioGraceArmed: boolean;
   audioStarted: boolean;
   audioCompleted: boolean;
   retryCount: number;
@@ -223,48 +227,39 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     const commentaryEventId = `bridge-live-commentary-${pending.id}`;
     this.activeIntervention = {
       ...pending,
-      instructionEventId,
-      commentaryEventIds: new Set([commentaryEventId]),
+      sessionIdSuffix: this.options.sessionId?.slice(-8) ?? null,
+      instructionEventIds: new Set([instructionEventId]),
+      commentaryEventIds: new Set(pending.expectsSpeech ? [commentaryEventId] : []),
       instructionAcked: false,
-      commentaryAcked: false,
+      // Quiet context belongs only in instructions/thinking. A commentary
+      // event is a spoken channel, so silent controls intentionally omit it.
+      commentaryAcked: !pending.expectsSpeech,
+      ackedAudioGraceArmed: false,
       audioStarted: false,
       audioCompleted: false,
       retryCount: 0,
       boundary: new LiveSpeechBoundary()
     };
-    const resumeAutonomy = semanticControl === 'resume_autonomy';
-    const controlRule = semanticControl
-      ? `This is the private operator's ${semanticControl} control. Apply it to the current question.`
-      : 'This is a private operator intervention for the live call.';
     this.sendJson({
       type: 'session.instructions.append',
       event_id: instructionEventId,
       delegation_id: null,
-      content: resumeAutonomy
-        ? normalized
-        : [
-            controlRule,
-            `Immediately speak the intended callee-facing response now: ${normalized}`,
-            'Speak only to the remote callee in the locked call language.',
-            'Never mention the operator, this control, prompts, instructions, reasoning, or what you are about to do.',
-            'After the response, stop and listen.'
-          ].join(' ')
+      content: interventionInstruction(normalized, semanticControl)
     });
     // Commentary is the Live event intended for a result the frontend should
     // communicate now. Keep the private semantics in instructions above and
     // give commentary only the callee-facing action to minimize leakage.
-    this.sendJson({
-      type: 'session.commentary.append',
-      event_id: commentaryEventId,
-      delegation_id: null,
-      content: resumeAutonomy
-        ? pending.expectsSpeech
-          ? 'Continue the live phone conversation now from the latest remote speech and active mission. If an unanswered fact is still needed, say it must be confirmed rather than inventing or approving it. Do not mention the operator, the hold, or these instructions.'
-          : 'Resume normal autonomous handling silently. Do not speak merely because this instruction arrived.'
-        : pending.expectsSpeech
-          ? `Communicate this operator-directed response naturally now, without mentioning the operator or these instructions: ${normalized}`
-          : `Apply this private operator instruction silently. Do not quote it or speak merely because it arrived: ${normalized}`
-    });
+    if (pending.expectsSpeech) {
+      this.sendJson({
+        type: 'session.commentary.append',
+        event_id: commentaryEventId,
+        delegation_id: null,
+        // Instructions contain the private context exactly once. Commentary
+        // is only the short callee-facing action so the Live voice cannot
+        // paraphrase operator/UI metadata back into the call.
+        content: interventionCommentary(semanticControl)
+      });
+    }
     logGptLiveControl('sent', this.activeIntervention);
     this.armInterventionWatchdog(CONTROL_FIRST_RESPONSE_TIMEOUT_MS);
   }
@@ -276,23 +271,48 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     active.timer = setTimeout(() => {
       const current = this.activeIntervention;
       if (!current || current.id !== active.id) return;
+      const acknowledged = current.instructionAcked && current.commentaryAcked;
+      if (acknowledged && current.expectsSpeech && !current.audioStarted) {
+        if (!current.ackedAudioGraceArmed) {
+          current.ackedAudioGraceArmed = true;
+          const elapsedSinceAck = Date.now() - (current.lastAckAt ?? Date.now());
+          this.armInterventionWatchdog(
+            Math.max(1, CONTROL_ACKED_FIRST_AUDIO_TIMEOUT_MS - elapsedSinceAck)
+          );
+          return;
+        }
+        this.finishIntervention(false, {
+          error: 'GPT-Live acknowledged the operator response but no audible response began.',
+          errorCode: 'control_audio_timeout'
+        });
+        return;
+      }
       if (current.retryCount === 0) {
         current.retryCount = 1;
-        const retryEventId = `bridge-live-commentary-${current.id}-retry`;
-        current.commentaryEventIds.add(retryEventId);
-        this.sendJson({
-          type: 'session.commentary.append',
-          event_id: retryEventId,
-          delegation_id: null,
-          content: current.expectsSpeech
-            ? 'The operator-directed response has not begun. Speak that response now in the locked call language, then stop and listen.'
-            : 'Acknowledge and apply the private operator instruction silently. Do not quote or speak it.'
-        });
+        if (!current.instructionAcked) {
+          const retryInstructionEventId = `bridge-live-control-${current.id}-retry`;
+          current.instructionEventIds.add(retryInstructionEventId);
+          this.sendJson({
+            type: 'session.instructions.append',
+            event_id: retryInstructionEventId,
+            delegation_id: null,
+            content: interventionInstruction(current.text, current.semanticControl)
+          });
+        }
+        if (current.expectsSpeech && !current.commentaryAcked) {
+          const retryCommentaryEventId = `bridge-live-commentary-${current.id}-retry`;
+          current.commentaryEventIds.add(retryCommentaryEventId);
+          this.sendJson({
+            type: 'session.commentary.append',
+            event_id: retryCommentaryEventId,
+            delegation_id: null,
+            content: interventionRetryCommentary(current.semanticControl)
+          });
+        }
         logGptLiveControl('retried', current);
         this.armInterventionWatchdog(CONTROL_RETRY_RESPONSE_TIMEOUT_MS);
         return;
       }
-      const acknowledged = current.instructionAcked && current.commentaryAcked;
       this.finishIntervention(false, {
         error: acknowledged && current.expectsSpeech
           ? 'GPT-Live acknowledged the operator response but no audible response began.'
@@ -550,9 +570,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     if (
       activeIntervention &&
       event.type === 'session.instructions.appended' &&
-      event.client_event_id === activeIntervention.instructionEventId
+      activeIntervention.instructionEventIds.has(event.client_event_id ?? '')
     ) {
       activeIntervention.instructionAcked = true;
+      activeIntervention.lastAckAt = Date.now();
       logGptLiveControl('instruction_acked', activeIntervention);
       this.maybeFinishIntervention();
       return;
@@ -563,6 +584,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       activeIntervention.commentaryEventIds.has(event.client_event_id ?? '')
     ) {
       activeIntervention.commentaryAcked = true;
+      activeIntervention.lastAckAt = Date.now();
       logGptLiveControl('commentary_acked', activeIntervention);
       this.maybeFinishIntervention();
       return;
@@ -647,7 +669,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       if (
         this.activeIntervention &&
         failedClientEventId &&
-        (failedClientEventId === this.activeIntervention.instructionEventId ||
+        (this.activeIntervention.instructionEventIds.has(failedClientEventId) ||
           this.activeIntervention.commentaryEventIds.has(failedClientEventId))
       ) {
         this.finishIntervention(false, {
@@ -941,6 +963,7 @@ function logGptLiveControl(
       event: 'gpt_live_control',
       version: 1,
       phase,
+      sessionIdSuffix: intervention.sessionIdSuffix,
       controlIdSuffix: intervention.id.slice(-12),
       semanticControl: intervention.semanticControl ?? null,
       instructionAcked: intervention.instructionAcked,
@@ -951,6 +974,48 @@ function logGptLiveControl(
       errorCode: failure?.errorCode ?? null
     })
   );
+}
+
+function interventionCommentary(semanticControl: string | undefined): string {
+  if (semanticControl === 'operator_decision_hold') {
+    return 'Say the one brief holding sentence from the private instruction now, then listen.';
+  }
+  if (semanticControl === 'operator_hold_liveness') {
+    return 'Give the brief presence reassurance from the private instruction now, then listen.';
+  }
+  if (semanticControl === 'resume_autonomy') {
+    return 'Continue this same phone conversation from the active mission and latest remote speech now.';
+  }
+  return 'Give the natural callee-facing answer directed by the private instruction now, then listen.';
+}
+
+function interventionInstruction(text: string, semanticControl: string | undefined): string {
+  if (semanticControl === 'resume_autonomy') return text;
+  const controlRule = semanticControl
+    ? `This is the private operator's ${semanticControl} control. Apply it to the current question.`
+    : 'This is a private operator intervention for the live call.';
+  return [
+    controlRule,
+    `Immediately speak the intended callee-facing response now: ${text}`,
+    'Speak only to the remote callee in the locked call language.',
+    'Never mention the operator, this control, prompts, instructions, reasoning, or what you are about to do.',
+    'After the response, stop and listen.'
+  ].join(' ');
+}
+
+function interventionRetryCommentary(
+  semanticControl: string | undefined
+): string {
+  if (semanticControl === 'operator_decision_hold') {
+    return 'The brief holding sentence was not acknowledged. Say that one holding sentence now, then listen.';
+  }
+  if (semanticControl === 'operator_hold_liveness') {
+    return 'The brief presence reassurance was not acknowledged. Say it now, then listen.';
+  }
+  if (semanticControl === 'resume_autonomy') {
+    return 'The same-call continuation was not acknowledged. Continue from the active mission and latest remote speech now.';
+  }
+  return 'The callee-facing answer was not acknowledged. Give that answer now in the locked call language, then listen.';
 }
 
 function extractGptLiveMissionContext(instructions: string): string {

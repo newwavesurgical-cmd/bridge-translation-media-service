@@ -402,7 +402,8 @@ describe('GPT-Live voice session', () => {
       type: 'session.commentary.append',
       delegation_id: null
     });
-    expect(String(sent[1].content)).toContain('Yes, Tuesday works.');
+    expect(String(sent[1].content)).toContain('callee-facing answer');
+    expect(String(sent[1].content)).not.toContain('Yes, Tuesday works.');
 
     mutable.handleMessage(
       JSON.stringify({
@@ -435,7 +436,7 @@ describe('GPT-Live voice session', () => {
     });
   });
 
-  it('retries an acknowledged operator response once when no audio begins', async () => {
+  it('does not retry an acknowledged operator response when audio begins inside the extended grace', async () => {
     vi.useFakeTimers();
     try {
       const { session, mutable, sent, finishPlayback } = makeSession();
@@ -453,7 +454,8 @@ describe('GPT-Live voice session', () => {
       );
 
       vi.advanceTimersByTime(1_400);
-      expect(sent.filter((payload) => payload.type === 'session.commentary.append')).toHaveLength(2);
+      expect(sent.filter((payload) => payload.type === 'session.commentary.append')).toHaveLength(1);
+      vi.advanceTimersByTime(500);
       mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
       finishPlayback();
 
@@ -462,9 +464,53 @@ describe('GPT-Live voice session', () => {
         acknowledged: true,
         audioStarted: true,
         audioCompleted: true,
-        retryCount: 1
+        retryCount: 0
       });
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('retries once when an append acknowledgment is still missing at the first deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const { session, mutable, sent, finishPlayback } = readyControlSession();
+      const delivery = session.injectInstruction('No, Thursday is better.', 'no');
+      mutable.handleMessage(
+        JSON.stringify({ type: 'session.instructions.appended', client_event_id: sent[0]?.event_id })
+      );
+
+      vi.advanceTimersByTime(1_400);
+      const commentary = sent.filter((payload) => payload.type === 'session.commentary.append');
+      expect(commentary).toHaveLength(2);
+      expect(String(commentary[1]?.content)).toContain('callee-facing answer was not acknowledged');
+      mutable.handleMessage(
+        JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
+      );
+      mutable.handleMessage(JSON.stringify({ type: 'session.output_audio.delta', delta: speechAudio }));
+      finishPlayback();
+
+      await expect(delivery).resolves.toMatchObject({ delivered: true, retryCount: 1 });
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['operator_decision_hold', 'holding sentence'],
+    ['resume_autonomy', 'same-call continuation']
+  ])('uses control-specific retry wording for %s', (semanticControl, expected) => {
+    vi.useFakeTimers();
+    try {
+      const { session, sent } = readyControlSession();
+      void session.injectInstruction('Continue this control safely.', semanticControl, true);
+      vi.advanceTimersByTime(1_400);
+      const retry = sent.filter((payload) => payload.type === 'session.commentary.append').at(-1);
+      expect(String(retry?.content)).toContain(expected);
+      expect(String(retry?.content)).not.toContain('operator-directed response');
+    } finally {
+      vi.clearAllTimers();
       vi.useRealTimers();
     }
   });
@@ -481,12 +527,10 @@ describe('GPT-Live voice session', () => {
       'whisper_guidance',
       false
     );
-    expect(String(sent[1]?.content)).toContain('Apply this private operator instruction silently');
+    expect(sent).toHaveLength(1);
+    expect(String(sent[0]?.content)).toContain('Keep the next response especially concise.');
     mutable.handleMessage(
       JSON.stringify({ type: 'session.instructions.appended', client_event_id: sent[0]?.event_id })
-    );
-    mutable.handleMessage(
-      JSON.stringify({ type: 'session.commentary.appended', client_event_id: sent[1]?.event_id })
     );
 
     await expect(delivery).resolves.toMatchObject({
@@ -512,7 +556,7 @@ describe('GPT-Live voice session', () => {
 
     expect(String(sent[0]?.content)).toContain('Dismissal is not approval');
     expect(String(sent[0]?.content)).not.toContain('Immediately speak the intended');
-    expect(String(sent[1]?.content)).toContain('Continue the live phone conversation now');
+    expect(String(sent[1]?.content)).toContain('Continue this same phone conversation');
     expect(String(sent[1]?.content)).not.toContain('Remove the temporary suppression');
 
     mutable.handleMessage(
@@ -709,7 +753,7 @@ describe('GPT-Live voice session', () => {
 
     expect(sent.some((payload) => String(payload.content ?? '').includes('Yes, that works.'))).toBe(true);
     expect(sent.filter((payload) => payload.type === 'session.commentary.append').at(-1)?.content)
-      .toContain('Yes, that works.');
+      .toContain('callee-facing answer');
   });
 
   it('uses the post-audio idle boundary when Live emits no output-done event', () => {

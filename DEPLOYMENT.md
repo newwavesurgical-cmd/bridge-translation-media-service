@@ -43,6 +43,38 @@ Set these in Lovable/Supabase, not in browser code:
 
 ## Notes
 
+### GPT-Live question handoff hardening (2026-09-13)
+
+- Caller transcript fragments now settle only after the existing 650 ms caller
+  pause or a genuine agent transcript turn. Outgoing GPT-Live audio packets are
+  never treated as caller-turn boundaries, preventing word-by-word question
+  bubbles and duplicate observer runs.
+- Operator controls carry private context once. Quiet resume/context updates use
+  instructions only, while spoken commentary contains only a short callee-facing
+  action. After a delivered answer, the listener resumes silently; the answer
+  turn itself may ask at most one directly relevant next mission question.
+- Controls with both acknowledgments receive a bounded first-audio grace instead
+  of being repeated at 1.4 seconds. Missing acknowledgments retry only the missing
+  event, with hold/resume-specific wording. Existing deterministic speech fallback
+  and Twilio playback checkpoints remain unchanged.
+- Short caller fragments such as `3` or `Tuesday` retain the preceding agent
+  question in the operator-facing alert and answer context. Contextual observer
+  results survive later non-question turns, but resolution, dismissal, a schedule
+  scope change, or a newer blocking question invalidates stale results.
+- Diagnostics retain a bounded question lifecycle tail (detected, enriched, held,
+  answered, dismissed, superseded, observer failure/discard) and separate answer,
+  resume, dismissal, and stale-observer counters. No raw audio is recorded.
+- The app shows `Answer sending / playing…` and disables question dismissal while
+  the matching answer is in flight. The bridge independently ignores a racing
+  dismissal for that same answer.
+- Automated verification covers acknowledged-vs-missing-ack retries, silent
+  control delivery, hold/resume wording, fragment buffering, contextual short
+  bubbles, observer races, semantic payload de-duplication, and dismissal races.
+  No real call is placed by the test suite. After deployment, accept with one
+  English and one Spanish call: answer a short date/time/fact bubble, confirm one
+  natural response (and at most one relevant follow-up), dismiss one false
+  positive, and verify no repeated hold or post-answer acknowledgement.
+
 ### Same-voice GPT-Live greeting (2026-09-13, pending deployment)
 
 - Removed the GPT-Live-only prohibition on greeting before the prepared purpose.

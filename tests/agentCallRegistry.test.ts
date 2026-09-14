@@ -114,6 +114,198 @@ describe('AgentCallRegistry', () => {
     expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
   });
 
+  it('decodes a semantic micro button once without nesting its wire envelope', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const delivered = {
+      delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true,
+      retryCount: 0, latencyMs: 20
+    };
+    const injectInstruction = vi.fn(() => Promise.resolve(delivered));
+    const mutable = session as unknown as {
+      agent: object;
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction, appendConversationContext: vi.fn() };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you come on Wednesday?');
+
+    await session.receiveControl({
+      kind: 'contextual_micro_intervention',
+      semantic_control: 'yes',
+      text: 'CONTEXTUAL_MICRO_INTERVENTION: yes. Resolve YES. Example: Tuesday at noon.'
+    });
+
+    const answerInstruction = String(
+      injectInstruction.mock.calls.find((call) => call[1] === 'yes')?.[0] ?? ''
+    );
+    expect(answerInstruction.match(/Resolve the active question as yes/g)).toHaveLength(1);
+    expect(answerInstruction).toContain('ACTIVE CALLEE QUESTION');
+    expect(answerInstruction).toContain('at most one brief, directly relevant next mission question');
+    expect(answerInstruction).not.toContain('CONTEXTUAL_MICRO_INTERVENTION');
+    expect(answerInstruction).not.toContain('Tuesday at noon');
+  });
+
+  it('turns a short caller fragment into a complete contextual operator question', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const injectInstruction = vi.fn(() => Promise.resolve({
+      delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true,
+      retryCount: 0, latencyMs: 20
+    }));
+    const mutable = session as unknown as {
+      agent: object;
+      emitTranscript: (speaker: 'agent' | 'remote', text: string) => void;
+      considerOperatorQuestion: (text: string, sourceUtteranceId?: number) => void;
+      applyContextualQuestionObservation: (
+        text: string, observation: object, utteranceId: number, generation: number, runId: number
+      ) => void;
+      operatorQuestionObserverGeneration: number;
+    };
+    const suppressActiveOutput = vi.fn();
+    mutable.agent = { suppressActiveOutput, injectInstruction };
+    session.data.state = 'live';
+    mutable.emitTranscript('agent', 'What time would you like to come on Wednesday?');
+    mutable.considerOperatorQuestion('3', 7);
+
+    const detected = session.diagnostics().pendingOperatorQuestion as { id: string };
+    expect(detected).toMatchObject({
+      sourceText: '3',
+      sourceUtteranceId: 7,
+      displayTextEn: expect.stringContaining('What time would you like to come on Wednesday?')
+    });
+    mutable.applyContextualQuestionObservation('3', {
+      requiresOperator: true,
+      kind: 'commitment',
+      questionEn: 'The caller offered 3 after being asked for a Wednesday time. Do you approve 3:00?',
+      questionEs: 'La persona ofreció las 3 después de que se le preguntó la hora del miércoles. ¿Aprueba las 3:00?',
+      confidence: 0.98,
+      reason: 'A proposed time needs approval.'
+    }, 7, mutable.operatorQuestionObserverGeneration, 1);
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: {
+        id: detected.id,
+        displayTextEn: expect.stringContaining('Do you approve 3:00?')
+      },
+      counters: { operatorQuestionsBlocked: 1, operatorQuestionObserverEnrichments: 1 }
+    });
+    expect(suppressActiveOutput).toHaveBeenCalledTimes(1);
+    await session.receiveControl({ kind: 'value_relay', semantic_control: 'relay_value', text: '3 PM' });
+    const answerInstruction = String(
+      injectInstruction.mock.calls.find((call) => call[1] === 'relay_value')?.[0] ?? ''
+    );
+    expect(answerInstruction).toContain('EXACT LATEST CALLEE WORDS: "3"');
+    expect(answerInstruction).toContain('OPERATOR ANSWER: "3 PM"');
+  });
+
+  it('keeps caller transcript fragments buffered across agent audio packets and flushes on agent text', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Call the clinic.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    const mutable = session as unknown as {
+      currentRemoteUtterance: string;
+      observeRemoteTranscript: (delta: string) => void;
+      handleAgentAudioDelta: (audio: string) => boolean;
+      handleAgentTranscriptDelta: (delta: string) => void;
+    };
+
+    mutable.observeRemoteTranscript('Which');
+    mutable.handleAgentAudioDelta('silent-packet');
+    mutable.handleAgentAudioDelta('speech-packet');
+    expect(mutable.currentRemoteUtterance).toBe('Which');
+
+    mutable.handleAgentTranscriptDelta('Let me help with that.');
+    expect(mutable.currentRemoteUtterance).toBe('');
+  });
+
+  it('ignores dismissal while the matching answer is still playing', async () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
+    });
+    let finishAnswer!: (delivery: object) => void;
+    const delivered = {
+      delivered: true, acknowledged: true, audioStarted: true, audioCompleted: true,
+      retryCount: 0, latencyMs: 20
+    };
+    const injectInstruction = vi.fn((_text: string, semantic?: string) =>
+      semantic === 'yes'
+        ? new Promise((resolve) => { finishAnswer = resolve; })
+        : Promise.resolve(delivered)
+    );
+    const mutable = session as unknown as {
+      agent: object;
+      considerOperatorQuestion: (text: string) => void;
+    };
+    mutable.agent = { suppressActiveOutput: vi.fn(), injectInstruction, appendConversationContext: vi.fn() };
+    session.data.state = 'live';
+    mutable.considerOperatorQuestion('Can you come Wednesday?');
+
+    const answer = session.receiveControl({ control: 'yes' });
+    await Promise.resolve();
+    const dismissal = await session.receiveControl({ kind: 'dismiss_pending_question' });
+    expect(dismissal.text).toContain('already being delivered');
+    expect(session.diagnostics().pendingOperatorQuestion).not.toBeNull();
+    expect(injectInstruction.mock.calls.some((call) => call[1] === 'resume_autonomy')).toBe(false);
+
+    finishAnswer(delivered);
+    await answer;
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: null,
+      counters: { operatorAnswerCompletions: 1, operatorQuestionDismissals: 0 },
+      questionEventTail: expect.arrayContaining([
+        expect.objectContaining({ phase: 'dismiss_ignored', reason: 'answer_in_progress' }),
+        expect.objectContaining({ phase: 'answered' })
+      ])
+    });
+  });
+
+  it('keeps a useful late observer question after a newer non-question turn but discards it after a new blocker', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Call the clinic about surgery.', languageLock: 'English'
+    });
+    const mutable = session as unknown as {
+      agent: object;
+      considerOperatorQuestion: (text: string, sourceUtteranceId?: number) => void;
+      applyContextualQuestionObservation: (
+        text: string, observation: object, utteranceId: number, generation: number, runId: number
+      ) => void;
+      operatorQuestionObserverGeneration: number;
+    };
+    mutable.agent = { suppressActiveOutput: vi.fn() };
+    mutable.considerOperatorQuestion('Thanks for waiting.', 2);
+    mutable.applyContextualQuestionObservation('Which nurse should I connect you with?', {
+      requiresOperator: true,
+      kind: 'question',
+      questionEn: 'Which nurse should the agent ask for?',
+      questionEs: '¿Por cuál enfermera debe preguntar el agente?',
+      confidence: 0.98,
+      reason: 'A caller-side choice is missing.'
+    }, 1, mutable.operatorQuestionObserverGeneration, 1);
+    expect(session.diagnostics().pendingOperatorQuestion).toMatchObject({
+      displayTextEn: 'Which nurse should the agent ask for?'
+    });
+
+    const oldGeneration = mutable.operatorQuestionObserverGeneration;
+    mutable.considerOperatorQuestion('Can you do Wednesday at 4 PM?', 3);
+    mutable.applyContextualQuestionObservation('What is the policy number?', {
+      requiresOperator: true,
+      kind: 'question',
+      questionEn: 'What policy number should the agent provide?',
+      questionEs: '¿Qué número de póliza debe proporcionar el agente?',
+      confidence: 0.99,
+      reason: 'A caller-side fact is missing.'
+    }, 2, oldGeneration, 2);
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: { sourceText: 'Can you do Wednesday at 4 PM?' },
+      counters: { operatorQuestionObserverStaleDiscards: 1 },
+      questionEventTail: expect.arrayContaining([
+        expect.objectContaining({ phase: 'observer_discarded' })
+      ])
+    });
+  });
+
   it('does not reuse a dismissed or undelivered answer as scheduling permission', async () => {
     const session = new AgentCallRegistry(config).create({
       to: '+15551230000', missionPrompt: 'Schedule a visit.', languageLock: 'English', agentEngine: 'gpt-live-1'
@@ -181,7 +373,7 @@ describe('AgentCallRegistry', () => {
       answered: [{ question: day, reply: 'yes: Yes' }]
     });
     expect(injectInstruction).toHaveBeenLastCalledWith(
-      expect.stringContaining('one brief, relevant next-step question'), 'resume_autonomy', true
+      expect.stringContaining('wait for fresh remote speech'), 'resume_autonomy', false
     );
     mutable.observeRemoteTranscript(hello);
     expect(appendConversationContext).toHaveBeenCalledTimes(2);
@@ -602,7 +794,7 @@ describe('AgentCallRegistry', () => {
       3,
       expect.stringContaining('Remove the temporary decision hold'),
       'resume_autonomy',
-      true
+      false
     );
     expect(session.diagnostics()).toMatchObject({
       pendingOperatorQuestion: null,
