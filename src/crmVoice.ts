@@ -272,7 +272,7 @@ export class CrmVoiceController {
     if (claim.claimed !== true) {
       if (!claim.session) throw new Error('crm_claim_invalid');
       return { sessionId: request.sessionId, provider: 'gpt-live', callSid: claim.session.callSid,
-        startState: claim.session.startState === 'requested' ? 'uncertain' : claim.session.startState, duplicate: true };
+        startState: ['confirmed', 'failed', 'uncertain'].includes(claim.session.startState) ? claim.session.startState : 'uncertain', duplicate: true };
     }
     const session = new CrmCall(request, this.config, this.store, () => this.sessions.delete(request.sessionId));
     this.sessions.set(request.sessionId, session);
@@ -346,7 +346,7 @@ export class CrmVoiceController {
         const result = await this.store({ action: 'get', sessionId, sinceSeq: sinceSeq ?? 0 });
         if (!result.session) { reply(404, { error: 'not_found' }); return true; }
         const interrupted = !this.sessions.has(sessionId) && !result.session.transcriptFinal &&
-          ['requested', 'created', 'calling', 'started', 'in-progress', 'live', 'uncertain'].includes(result.session.status);
+          ['pending', 'requested', 'created', 'dialing', 'calling', 'started', 'in-progress', 'live', 'uncertain'].includes(result.session.status);
         reply(200, { ...result.session, provider: 'gpt-live', events: result.events ?? [], hasMore: result.hasMore ?? false,
           ...(interrupted ? { status: 'incomplete', startState: result.session.callSid ? result.session.startState : 'uncertain' } : {}) });
       } else reply(404, { error: 'not_found' });

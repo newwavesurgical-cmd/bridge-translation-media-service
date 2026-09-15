@@ -72,7 +72,7 @@ describe('durable claim before dial', () => {
       if (body.action === 'claim') {
         if (!claimed) { claimed = true; return { claimed: true }; }
         return { claimed: false, session: { sessionId: request.sessionId, idempotencyKey: request.idempotencyKey,
-          callSid: null, startState: 'requested', status: 'requested', transcriptFinal: false, finalSeq: null, lastSeq: 0 } };
+          callSid: null, startState: 'pending', status: 'pending', transcriptFinal: false, finalSeq: null, lastSeq: 0 } };
       }
       return { accepted: true };
     });
