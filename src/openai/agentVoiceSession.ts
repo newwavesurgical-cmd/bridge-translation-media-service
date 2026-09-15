@@ -13,6 +13,10 @@ export interface AgentVoiceSessionOptions {
   /** Bounded correlation only; never logged with phone, prompt, or audio data. */
   sessionId?: string;
   instructions: string;
+  /** Server-owned conversation policy for a separate application mission. */
+  conversationInstructions?: string;
+  /** Only emitted for the protocol's session.closed acknowledgement. */
+  onSessionCloseConfirmed?: () => void;
   /** Whether the operator enabled the guaranteed first-message disclosure. */
   disclosureEnabled?: boolean;
   firstUtterance?: string;

@@ -12,6 +12,7 @@ import { AppToAppRegistry, type AppToAppParticipant } from './appToAppRegistry.j
 import { originateAgentCall, originateTranslatedCall } from './twilio/client.js';
 import { buildAgentCallTwiMl, buildTranslatedCallTwiMl } from './twilio/twiml.js';
 import { normalizeDialPhoneNumber } from './phone.js';
+import { CrmVoiceController } from './crmVoice.js';
 
 const createCallSchema = z.object({
   to: z.string().min(7).transform(normalizeDialPhoneNumber),
@@ -168,6 +169,7 @@ function firstText(...values: Array<string | undefined>): string | undefined {
 }
 
 export function createBridgeMediaServer(config: AppConfig) {
+  const crmVoice = new CrmVoiceController(config);
   const registry = new CallRegistry(config);
   const agentCallRegistry = new AgentCallRegistry(config);
   const inPersonRegistry = new InPersonRegistry(config);
@@ -183,6 +185,7 @@ export function createBridgeMediaServer(config: AppConfig) {
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      if (await crmVoice.handle(req, res, url)) return;
       if (req.method === 'OPTIONS') {
         return sendJson(res, 200, { ok: true });
       }
@@ -228,6 +231,7 @@ export function createBridgeMediaServer(config: AppConfig) {
           agentRealtimeVoiceBridgeSupported: true,
           gptLiveVoiceBridgeSupported: true,
           supportedAgentEngines: ['realtime', 'gpt-live-1'],
+          crmVoice: crmVoice.readiness(),
           directVoiceTakeoverSupported: true,
           monitorStreamSupported: true,
           dryRunCalls: config.DRY_RUN_CALLS,
@@ -567,6 +571,7 @@ export function createBridgeMediaServer(config: AppConfig) {
 
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    if (crmVoice.upgrade(req, socket, head, url)) return;
     if (url.pathname.startsWith('/app/stream/')) {
       appWss.handleUpgrade(req, socket, head, (ws) => {
         const callId = decodeURIComponent(url.pathname.replace('/app/stream/', ''));
@@ -729,7 +734,7 @@ export function createBridgeMediaServer(config: AppConfig) {
     socket.destroy();
   });
 
-  return { server, registry, agentCallRegistry, inPersonRegistry, appToAppRegistry };
+  return { server, registry, agentCallRegistry, inPersonRegistry, appToAppRegistry, crmVoice };
 }
 
 function parseOptionalNonnegativeInteger(value: string | null): number | null {

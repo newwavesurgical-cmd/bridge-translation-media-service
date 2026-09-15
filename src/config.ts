@@ -24,6 +24,10 @@ const envSchema = z.object({
   TWILIO_PHONE_NUMBER: z.string().optional(),
   BRIDGE_MEDIA_SHARED_SECRET: z.string().min(16).optional(),
   BRIDGE_MEDIA_API_KEY: z.string().min(16).optional(),
+  // Separate CRM scope; never reuse translator control credentials.
+  CRM_VOICE_STORE_URL: z.string().url().optional(),
+  CRM_VOICE_WEBHOOK_SECRET: z.string().min(32).optional(),
+  CRM_VOICE_ENABLED: z.string().optional().transform(value => value === 'true'),
   DRY_RUN_CALLS: z
     .string()
     .optional()

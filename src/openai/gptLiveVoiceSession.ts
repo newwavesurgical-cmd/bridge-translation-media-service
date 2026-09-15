@@ -107,6 +107,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
           liveModel: this.options.config.OPENAI_GPT_LIVE_MODEL,
           backendModel: this.options.config.OPENAI_GPT_LIVE_BACKEND_MODEL,
           instructions: this.options.instructions,
+          conversationInstructions: this.options.conversationInstructions,
           voice: this.options.voice,
           disclosureEnabled: this.options.disclosureEnabled,
           firstUtterance: this.options.firstUtterance,
@@ -654,6 +655,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       return;
     }
     if (event.type === 'session.closed') {
+      this.options.onSessionCloseConfirmed?.();
       if (this.closingTimer) clearTimeout(this.closingTimer);
       this.ws?.close();
       this.setStatus('closed');
@@ -840,6 +842,7 @@ export function buildGptLiveSessionStart(input: {
   liveModel: string;
   backendModel: string;
   instructions: string;
+  conversationInstructions?: string;
   voice: string;
   disclosureEnabled?: boolean;
   firstUtterance?: string;
@@ -847,7 +850,7 @@ export function buildGptLiveSessionStart(input: {
 }): Record<string, unknown> {
   return {
     model: input.liveModel,
-    instructions: buildGptLiveConversationInstructions(input.instructions, {
+    instructions: input.conversationInstructions ?? buildGptLiveConversationInstructions(input.instructions, {
       disclosureEnabled: input.disclosureEnabled,
       firstUtterance: input.firstUtterance,
       spokenPurpose: input.spokenPurpose
