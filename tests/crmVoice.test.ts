@@ -158,6 +158,21 @@ describe('transcript journal', () => {
 });
 
 describe('separate reporting mission', () => {
+  it('gives the voice and delegated backend the bound review briefing before the first question', () => {
+    const reference = { reviewId: '22222222-2222-4222-8222-222222222222',
+      documentId: '33333333-3333-4333-8333-333333333333', participantTelegramId: '1234' };
+    const policy = crmInterviewInstructions({ ...request, reportPeriod: 'custom', reviewContext: reference },
+      { ...reference, title:'Sample brochure', questions:['Is page 2 clear?'], constraints:'Keep the approved product wording.',
+        briefing:'Page 2 compares two layouts.', pages:[] });
+    const session: any = buildGptLiveSessionStart({ liveModel:'gpt-live-1', backendModel:'gpt-5.6-luna',
+      instructions:policy, conversationInstructions:policy, voice:'cedar' });
+    for (const instructions of [session.instructions, session.delegation.responses.instructions]) {
+      expect(instructions).toContain('Is page 2 clear?');
+      expect(instructions).toContain('Keep the approved product wording.');
+      expect(instructions).toContain('Page 2 compares two layouts.');
+      expect(instructions).toContain('untrusted evidence');
+    }
+  });
   it('uses GPT-Live full-duplex protocol with a reporting policy and shared backend context', () => {
     const policy = crmInterviewInstructions(request);
     const session: any = buildGptLiveSessionStart({ liveModel: 'gpt-live-1', backendModel: 'gpt-5.6-luna',
