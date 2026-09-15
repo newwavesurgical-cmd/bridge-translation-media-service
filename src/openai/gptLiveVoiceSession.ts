@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import { LiveSpeechBoundary } from './liveSpeechBoundary.js';
+import { LiveFunctionDispatcher, type LiveFunctionTool } from './liveFunctionTools.js';
 import type {
   AgentInterventionDelivery,
   AgentStartupDiagnostics,
@@ -76,7 +77,11 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   private lastRemoteTranscriptAt = 0;
   private lastRemoteTranscriptEndMs?: number;
 
-  constructor(private readonly options: AgentVoiceSessionOptions) {}
+  private readonly functionDispatcher?: LiveFunctionDispatcher;
+  constructor(private readonly options: AgentVoiceSessionOptions) {
+    if (options.backendTools?.length && options.executeBackendTool)
+      this.functionDispatcher = new LiveFunctionDispatcher(event => this.sendJson(event), options.executeBackendTool);
+  }
 
   get status(): AgentVoiceSessionStatus {
     return this.statusValue;
@@ -111,12 +116,14 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
           voice: this.options.voice,
           disclosureEnabled: this.options.disclosureEnabled,
           firstUtterance: this.options.firstUtterance,
-          spokenPurpose: this.options.spokenPurpose
+          spokenPurpose: this.options.spokenPurpose,
+          backendTools: this.options.backendTools
         })
       });
     });
     ws.on('message', (raw) => this.handleMessage(raw.toString()));
     ws.on('close', () => {
+      this.functionDispatcher?.close();
       this.ws = undefined;
       if (this.closingTimer) clearTimeout(this.closingTimer);
       if (this.openingIdleTimer) clearTimeout(this.openingIdleTimer);
@@ -467,6 +474,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
   }
 
   close(): void {
+    this.functionDispatcher?.close();
     if (this.openingIdleTimer) clearTimeout(this.openingIdleTimer);
     this.openingIdleTimer = undefined;
     if (this.openingInstructionAckTimer) clearTimeout(this.openingInstructionAckTimer);
@@ -520,6 +528,10 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     try {
       event = JSON.parse(message) as typeof event;
     } catch {
+      return;
+    }
+    if (event.type === 'response.event') {
+      this.functionDispatcher?.accept(event);
       return;
     }
 
@@ -655,6 +667,7 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
       return;
     }
     if (event.type === 'session.closed') {
+      this.functionDispatcher?.close();
       this.options.onSessionCloseConfirmed?.();
       if (this.closingTimer) clearTimeout(this.closingTimer);
       this.ws?.close();
@@ -847,6 +860,7 @@ export function buildGptLiveSessionStart(input: {
   disclosureEnabled?: boolean;
   firstUtterance?: string;
   spokenPurpose?: string;
+  backendTools?: LiveFunctionTool[];
 }): Record<string, unknown> {
   return {
     model: input.liveModel,
@@ -864,6 +878,7 @@ export function buildGptLiveSessionStart(input: {
       responses: {
         model: input.backendModel,
         instructions: input.instructions,
+        ...(input.backendTools?.length ? { tools: input.backendTools } : {}),
         parallel_tool_calls: false
       }
     }

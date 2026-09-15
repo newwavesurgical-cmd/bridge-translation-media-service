@@ -1,5 +1,6 @@
 import WebSocket from 'ws';
 import type { AppConfig } from '../config.js';
+import type { LiveFunctionTool } from './liveFunctionTools.js';
 
 export type AgentVoiceSessionStatus = 'idle' | 'connecting' | 'live' | 'closing' | 'closed' | 'error';
 
@@ -15,6 +16,8 @@ export interface AgentVoiceSessionOptions {
   instructions: string;
   /** Server-owned conversation policy for a separate application mission. */
   conversationInstructions?: string;
+  backendTools?: LiveFunctionTool[];
+  executeBackendTool?: (name: string, args: unknown) => Promise<unknown>;
   /** Only emitted for the protocol's session.closed acknowledgement. */
   onSessionCloseConfirmed?: () => void;
   /** Whether the operator enabled the guaranteed first-message disclosure. */

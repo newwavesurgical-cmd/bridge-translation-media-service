@@ -66,6 +66,19 @@ describe('HTTP boundary', () => {
 });
 
 describe('durable claim before dial', () => {
+  it('blocks a review call before claim/dial when canonical document context does not match', async () => {
+    const reference = { reviewId: '22222222-2222-4222-8222-222222222222',
+      documentId: '33333333-3333-4333-8333-333333333333', participantTelegramId: '1234' };
+    const reviewRequest = crmStartSchema.parse({ ...request, reportPeriod: 'custom', reviewContext: reference });
+    const store: Store = vi.fn(async () => ({ reviewContext: { ...reference, participantTelegramId: '9999',
+      title: 'Review', questions: [], constraints: '', briefing: '', pages: [] } }));
+    const dial = vi.fn();
+    const controller = new CrmVoiceController(config(), {store, dial});
+    await expect(controller.start(reviewRequest)).rejects.toThrow('review_context_mismatch');
+    expect(store).toHaveBeenCalledTimes(1);
+    expect(dial).not.toHaveBeenCalled();
+    await controller.close();
+  });
   it('concurrent retries and a new worker only dial once with a shared durable claim', async () => {
     let claimed = false;
     const store: Store = vi.fn(async body => {

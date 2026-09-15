@@ -6,6 +6,30 @@ disabled by default and must not be used for staff calls before acceptance.
 
 ## Configuration
 
+### Management document review extension
+
+Custom mission starts may carry `reviewContext` with UUID `reviewId`, UUID
+`documentId`, and string `participantTelegramId`. Before any dial, the bridge
+requests the canonical session-bound context from the signed store using
+`{action:"review_context",sessionId,...reviewContext,pageNumbers:[]}`. A mismatch
+blocks dialing. The CRM must persist that binding before invoking start.
+
+The store returns `{reviewContext:{reviewId,documentId,participantTelegramId,
+title,questions,constraints,briefing,pages}}`. With one to four requested
+`pageNumbers`, each page has `number`, `text`, `imageBase64`, and `mimeType`
+(`image/png` or `image/jpeg`). The store scopes all reads to the session's exact
+review/version/participant and uses its private asset storage, never arbitrary URLs.
+
+Only these custom review sessions register `inspect_review_document`. A nested
+Responses function call reads exact page images, analyzes them with the configured
+backend Responses model (`store:false`), and returns page-cited observations.
+All function results are submitted before continuing the delegated response;
+audio remains full duplex. Errors produce an explicit unavailable result and
+late results after hangup are discarded. No write tools or audio retention are added.
+
+This extension does not activate CRM voice. Configure and independently pilot
+the existing scoped connection before any manager calls.
+
 Render worker:
 
 - `CRM_VOICE_STORE_URL=https://lrrjcglcbudcmssilpfh.supabase.co/functions/v1/voice-bridge-store`
