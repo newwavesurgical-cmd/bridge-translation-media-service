@@ -118,8 +118,17 @@ Preserve delta whitespace and sequence order. Terminal completeness requires
 every prior sequence, a confirmed GPT-Live `session.closed` acknowledgement,
 both human and assistant speech, and no transport/storage error. Completed
 transport remains separate from substantive interview analysis, draft approval,
-submission and delivery. Voicemail and unknown answering-machine detection
-hang up and never produce a completed report.
+submission and delivery. For calls outside management document reviews, voicemail
+and unknown answering-machine detection hang up and never produce a completed report.
+
+Management document reviews (bound `reviewContext`) omit Twilio AMD and connect
+audio on answer without requiring `AnsweredBy=human`. The journal-write guard
+still applies. These requested interviews greet the participant by the first
+name in the CRM-signed `targetName`, disclose AI identity, and lead concise
+questions with focused follow-ups while honoring interruptions. Missing names
+use an honest generic greeting; never fabricate a name. With AMD disabled, a
+voicemail answer also opens the stream, so machine/human classification is no
+longer a guaranteed outcome for this review mode. No automatic redial.
 
 ## Honest recovery limits
 

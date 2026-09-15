@@ -4,7 +4,7 @@ import twilio from 'twilio';
 import WebSocket from 'ws';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getConfig } from '../src/config.js';
-import { CrmVoiceController, CRM_STORE_URL, crmStartSchema } from '../src/crmVoice.js';
+import { CrmVoiceController, CRM_STORE_URL, crmStartSchema, crmDialOptions, crmOpening } from '../src/crmVoice.js';
 
 const fake = vi.hoisted(() => ({ sessions: [] as any[] }));
 vi.mock('../src/openai/gptLiveVoiceSession.js', async importOriginal => ({
@@ -21,16 +21,20 @@ vi.mock('../src/openai/gptLiveVoiceSession.js', async importOriginal => ({
 }));
 vi.mock('../src/twilio/client.js', () => ({ completeTwilioCall: vi.fn(async () => {}) }));
 
-async function fixture() {
+async function fixture(reviewName?: string) {
   const events: any[] = [];
   const callSid = 'CA' + 'a'.repeat(32);
   const request = crmStartSchema.parse({ sessionId: '22222222-2222-4222-8222-222222222222',
-    idempotencyKey: 'synthetic-lifecycle', to: '+15555550123', missionPrompt: 'Collect reporting facts.', reportPeriod: 'weekly' });
+    idempotencyKey: 'synthetic-lifecycle', to: '+15555550123', missionPrompt: 'Collect reporting facts.', reportPeriod: reviewName ? 'custom' : 'weekly',
+    ...(reviewName ? { targetName: reviewName, reviewContext: { reviewId: '33333333-3333-4333-8333-333333333333',
+      documentId: '44444444-4444-4444-8444-444444444444', participantTelegramId: '1234' } } : {}) });
   const config = { ...getConfig(), CRM_VOICE_WEBHOOK_SECRET: 'synthetic-credential-for-tests-only', CRM_VOICE_STORE_URL: CRM_STORE_URL,
     CRM_VOICE_ENABLED: true, OPENAI_API_KEY: 'synthetic', TWILIO_AUTH_TOKEN: 'synthetic', TWILIO_ACCOUNT_SID: 'synthetic',
     TWILIO_PHONE_NUMBER: '+15555550000', PUBLIC_BASE_URL: 'https://bridge.example', DRY_RUN_CALLS: false };
   const controller = new CrmVoiceController(config, {
     store: async body => {
+      if (body.action === 'review_context') return { reviewContext: { ...request.reviewContext,
+        title: 'Sample brochure', questions: ['What wording should change?'], constraints: '', briefing: 'Two page brochure.', pages: [] } };
       if (body.action === 'claim') return { claimed: true };
       if (body.action === 'append') events.push(...body.events as any[]);
       return { accepted: true };
@@ -60,6 +64,47 @@ async function fixture() {
 
 beforeEach(() => { fake.sessions.length = 0; });
 describe('CRM media lifecycle with synthetic Twilio and GPT-Live', () => {
+  it('connects a requested review without AMD and starts with the named, directed interview', async () => {
+    const f = await fixture('Theo Example');
+    try {
+      const dial = crmDialOptions(f.request, '+15555550000', 'https://bridge.example/twiml', 'https://bridge.example/status');
+      expect(dial).not.toHaveProperty('machineDetection');
+      expect(dial).not.toHaveProperty('asyncAmd');
+      expect(dial).not.toHaveProperty('machineDetectionTimeout');
+      expect(dial.statusCallbackEvent).toEqual(['completed']);
+      const path = '/crm/voice/twiml?sessionId=' + f.request.sessionId;
+      const fields = { CallSid: 'CA' + 'a'.repeat(32) }; // Twilio omits AnsweredBy when AMD is disabled.
+      const response = await fetch(`http://127.0.0.1:${f.port}${path}`, { method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded',
+          'x-twilio-signature': twilio.getExpectedTwilioSignature('synthetic', f.config.PUBLIC_BASE_URL + path, fields) },
+        body: new URLSearchParams(fields) });
+      expect(response.status).toBe(200);
+      const xml = await response.text();
+      expect(xml).toContain('<Connect><Stream');
+      expect(xml).not.toContain('<Hangup');
+      const { client, live } = await f.connect();
+      expect(live.options.firstUtterance).toBe("Hi Theo! I'm NWE's AI assistant.");
+      expect(live.options.spokenPurpose).toContain('document Alex shared');
+      for (const instructions of [live.options.instructions, live.options.conversationInstructions]) {
+        expect(instructions).toContain('You drive the interview');
+        expect(instructions).toContain('honor interruptions');
+        expect(instructions).toContain('What wording should change?');
+      }
+      expect(crmOpening({ ...f.request, targetName: 'Sandy Example' }).firstUtterance).toBe("Hi Sandy! I'm NWE's AI assistant.");
+      client.send(JSON.stringify({ event: 'stop' }));
+      await vi.waitFor(() => expect(f.events.at(-1)?.type).toBe('terminal'));
+    } finally { await f.close(); }
+  });
+  it('preserves detection for calls outside management document reviews', async () => {
+    const f = await fixture();
+    try {
+      for (const reportPeriod of ['weekly', 'monthly', 'custom'] as const) {
+        expect(crmDialOptions({ ...f.request, reportPeriod }, '+15555550000', 'https://bridge.example/twiml', 'https://bridge.example/status'))
+          .toMatchObject({ machineDetection: 'DetectMessageEnd', asyncAmd: 'false', machineDetectionTimeout: 30 });
+      }
+    } finally { await f.close(); }
+  });
+
   it('keeps input flowing during output, clears interrupted playback, and journals final speech before terminal', async () => {
     const f = await fixture();
     try {
