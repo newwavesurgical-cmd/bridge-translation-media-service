@@ -104,10 +104,10 @@ export class CrmJournal {
       this.failed = true;
     });
   }
-  async finish(status: string, complete: boolean): Promise<boolean> {
+  async finish(status: string, complete: boolean, sessionClosed = false): Promise<boolean> {
     await this.tail;
     if (this.failed) return false;
-    this.append('terminal', { status, finalSeq: this.seq, transcriptFinal: complete });
+    this.append('terminal', { status, finalSeq: this.seq, transcriptFinal: complete && sessionClosed, sessionClosed });
     await this.tail;
     return !this.failed;
   }
@@ -242,7 +242,7 @@ class CrmCall {
       }
       this.ws?.close();
       try { await completeTwilioCall(this.config, this.callSid); } catch { this.failed = true; }
-      await this.journal.finish(status, candidateComplete && this.closedConfirmed && this.hadRemote && this.hadAgent && !this.failed);
+      await this.journal.finish(status, candidateComplete && this.closedConfirmed && this.hadRemote && this.hadAgent && !this.failed, this.closedConfirmed);
       this.dispose();
     });
     return this.ending;

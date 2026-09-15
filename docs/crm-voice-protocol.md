@@ -83,7 +83,8 @@ is rejected. Types:
 - started: `{callSid}`
 - transcript: `{speaker:'agent'|'remote'|'operator',delta}`
 - error: `{code}`
-- terminal: `{status,finalSeq:previousSequence,transcriptFinal}`
+- terminal: `{status,finalSeq:previousSequence,transcriptFinal,sessionClosed}`;
+  `sessionClosed` is true only after the GPT-Live protocol acknowledges closure.
 
 Preserve delta whitespace and sequence order. Terminal completeness requires
 every prior sequence, a confirmed GPT-Live `session.closed` acknowledgement,

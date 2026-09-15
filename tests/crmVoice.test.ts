@@ -116,10 +116,10 @@ describe('transcript journal', () => {
     journal.append('started', { callSid: 'synthetic' });
     journal.append('transcript', { speaker: 'remote', delta: 'Exact fragment ' });
     journal.append('transcript', { speaker: 'remote', delta: 'continued.' });
-    expect(await journal.finish('completed', true)).toBe(true);
+    expect(await journal.finish('completed', true, true)).toBe(true);
     expect(received[0]).toEqual(received[1]);
     expect(received.slice(1).map(body => body.events[0].seq)).toEqual([1, 2, 3, 4]);
-    expect(received.at(-1).events[0].data).toEqual({ status: 'completed', finalSeq: 3, transcriptFinal: true });
+    expect(received.at(-1).events[0].data).toEqual({ status: 'completed', finalSeq: 3, transcriptFinal: true, sessionClosed: true });
     expect(received[2].events[0].data.delta).toBe('Exact fragment ');
   });
   it('never writes a complete terminal after a permanent persistence gap', async () => {
@@ -135,6 +135,12 @@ describe('transcript journal', () => {
     const journal = new CrmJournal(request.sessionId, store);
     await journal.finish('voicemail', false);
     expect(events[0].events[0].data.transcriptFinal).toBe(false);
+  });
+  it('cannot declare a final transcript without an explicit protocol close acknowledgement', async () => {
+    const events: any[] = []; const store: Store = async body => { events.push(body); return { accepted: true }; };
+    const journal = new CrmJournal(request.sessionId, store);
+    await journal.finish('completed', true);
+    expect(events[0].events[0].data).toMatchObject({ transcriptFinal: false, sessionClosed: false });
   });
 });
 
