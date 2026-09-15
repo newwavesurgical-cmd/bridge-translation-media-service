@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import twilio from 'twilio';
+import http from 'node:http';
 import { getConfig } from '../src/config.js';
 import { buildGptLiveSessionStart } from '../src/openai/gptLiveVoiceSession.js';
 import { CrmJournal, CrmVoiceController, CRM_STORE_URL, crmStartSchema, crmInterviewInstructions, signature, signedRequestValid, validTwilioStreamSignature, type Store } from '../src/crmVoice.js';
@@ -38,6 +39,29 @@ describe('CRM scoped authentication', () => {
     expect(validTwilioStreamSignature({ ...config(), PUBLIC_BASE_URL: 'https://other.example' }, path, signed)).toBe(false);
     expect(validTwilioStreamSignature({ ...config(), TWILIO_AUTH_TOKEN: undefined }, path, signed)).toBe(false);
     expect(validTwilioStreamSignature(config(), path, '')).toBe(false);
+  });
+});
+
+describe('HTTP boundary', () => {
+  it('requires scoped signatures and exposes truthful readiness without private configuration', async () => {
+    const controller = new CrmVoiceController({ ...config(), CRM_VOICE_ENABLED: false }, { store: async () => ({ accepted: true }) });
+    const server = http.createServer((req, res) => { void controller.handle(req, res, new URL(req.url!, 'http://localhost')); });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as import('node:net').AddressInfo;
+    const base = `http://127.0.0.1:${address.port}`;
+    try {
+      expect((await fetch(base + '/crm/voice/health', { method: 'POST', body: '{}' })).status).toBe(401);
+      const timestamp = String(Math.floor(Date.now() / 1000));
+      const path = '/crm/voice/health';
+      const response = await fetch(base + path, { method: 'POST', body: '{}', headers: {
+        'x-nwe-timestamp': timestamp, 'x-nwe-signature': signature(secret, timestamp, 'POST', path, '{}') } });
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ configured: true, ready: false, enabled: false, storeReachable: true });
+      expect(JSON.stringify(body)).not.toContain(secret);
+      expect(JSON.stringify(body)).not.toContain('synthetic');
+      expect((await fetch(base + path)).status).toBe(405);
+    } finally { await controller.close(); await new Promise<void>(resolve => server.close(() => resolve())); }
   });
 });
 
@@ -131,5 +155,11 @@ describe('separate reporting mission', () => {
     for (const extra of [{ callbackUrl: 'https://attacker.example' }, { agentEngine: 'realtime' }, { maxCallDurationSeconds: 1801 }]) {
       expect(crmStartSchema.safeParse({ ...request, ...extra }).success).toBe(false);
     }
+  });
+  it('keeps general outbound missions separate from staff reporting questions', () => {
+    const policy = crmInterviewInstructions({ ...request, reportPeriod: 'custom', missionPrompt: 'Confirm office hours.' });
+    expect(policy).toContain('Confirm office hours.');
+    expect(policy).not.toContain('Three check-ins');
+    expect(policy).not.toContain('plans for the next period');
   });
 });

@@ -56,6 +56,8 @@ enabled and store reachability separately. `start` accepts:
 ```
 
 `reportPeriod` is weekly/monthly/custom. Max duration is 60–1800 seconds.
+Use custom for the general outbound lane: it follows that call's selected
+mission, without imposing the staff-report interview questions.
 Unknown properties, arbitrary callback URLs, and alternate engines are rejected.
 The claim hash is SHA256 of JSON.stringify of the object in the above key
 order, targetName omitted if absent, default language English and duration900.
