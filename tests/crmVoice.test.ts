@@ -3,6 +3,7 @@ import twilio from 'twilio';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 import { getConfig } from '../src/config.js';
+import { completeTwilioCall } from '../src/twilio/client.js';
 import { buildGptLiveSessionStart } from '../src/openai/gptLiveVoiceSession.js';
 import { CrmJournal, CrmVoiceController, CRM_STORE_URL, crmStartSchema, canonicalCrmStartJson, crmInterviewInstructions, signature, signedRequestValid, validTwilioStreamSignature, type Store } from '../src/crmVoice.js';
 
@@ -44,6 +45,37 @@ describe('CRM scoped authentication', () => {
 });
 
 describe('HTTP boundary', () => {
+  it('hangs up without starting audio when the started event cannot be saved', async () => {
+    const sid = 'CA' + 'a'.repeat(32);
+    const dial = vi.fn(async () => sid);
+    const store: Store = async body => {
+      if (body.action === 'claim') return { claimed: true };
+      throw new Error('synthetic database projection failure');
+    };
+    const controller = new CrmVoiceController(config(), { store, dial });
+    const server = http.createServer((req, res) => { void controller.handle(req, res, new URL(req.url!, 'http://localhost')); });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as import('node:net').AddressInfo;
+    const path = '/crm/voice/twiml?sessionId=' + request.sessionId;
+    const form = { CallSid: sid, AnsweredBy: 'human' };
+    try {
+      const start = controller.start(request);
+      // Race the answered callback against the pending journal acknowledgement.
+      await vi.waitFor(() => expect(dial).toHaveBeenCalledTimes(1));
+      const response = await fetch(`http://127.0.0.1:${address.port}` + path, {
+        method: 'POST', body: new URLSearchParams(form), headers: {
+          'x-twilio-signature': twilio.getExpectedTwilioSignature('synthetic', 'https://bridge.example' + path, form),
+        },
+      });
+      const xml = await response.text();
+      expect(xml).toContain('<Hangup/>');
+      expect(xml).not.toContain('<Stream');
+      expect(await start).toMatchObject({ startState: 'uncertain', callSid: sid });
+      expect(completeTwilioCall).toHaveBeenCalledWith(expect.anything(), sid);
+      expect(dial).toHaveBeenCalledTimes(1);
+      expect(controller.readiness().activeCalls).toBe(0);
+    } finally { await controller.close(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
   it('requires scoped signatures and exposes truthful readiness without private configuration', async () => {
     const controller = new CrmVoiceController({ ...config(), CRM_VOICE_ENABLED: false }, { store: async () => ({ accepted: true }) });
     const server = http.createServer((req, res) => { void controller.handle(req, res, new URL(req.url!, 'http://localhost')); });
@@ -171,6 +203,18 @@ describe('transcript journal', () => {
     expect(await journal.finish('completed', true)).toBe(false);
     expect(store).toHaveBeenCalledTimes(4);
     expect(store.mock.calls.every(([body]: any) => body.events[0].type === 'transcript')).toBe(true);
+  });
+  it('notifies the call once after permanent failure and never skips the lost event', async () => {
+    const store = vi.fn(async () => { throw new Error('offline'); });
+    const unavailable = vi.fn();
+    const journal = new CrmJournal(request.sessionId, store, async () => {}, unavailable);
+    journal.append('started', { callSid: 'synthetic' });
+    journal.append('transcript', { speaker: 'remote', delta: 'must not silently continue' });
+    expect(await journal.flush()).toBe(false);
+    expect(await journal.finish('completed', true, true)).toBe(false);
+    expect(unavailable).toHaveBeenCalledTimes(1);
+    expect(store).toHaveBeenCalledTimes(4);
+    expect(store.mock.calls.every(([body]: any) => body.events[0].seq === 1)).toBe(true);
   });
   it('preserves incomplete outcomes explicitly', async () => {
     const events: any[] = []; const store: Store = async body => { events.push(body); return { accepted: true }; };

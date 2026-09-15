@@ -110,7 +110,8 @@ export class CrmJournal {
   private seq = 0;
   private failed = false;
   constructor(private readonly sessionId: string, private readonly store: Store,
-    private readonly delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) {}
+    private readonly delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+    private readonly onUnavailable: () => void = () => {}) {}
   append(type: JournalEvent['type'], data: Record<string, unknown>): void {
     const event: JournalEvent = { seq: ++this.seq, type, at: new Date().toISOString(), data };
     this.tail = this.tail.then(async () => {
@@ -125,6 +126,9 @@ export class CrmJournal {
         }
       }
       this.failed = true;
+      // Do not keep interviewing after feedback can no longer be saved.
+      // This callback must not await finalization of this same journal tail.
+      this.onUnavailable();
     });
   }
   async finish(status: string, complete: boolean, sessionClosed = false): Promise<boolean> {
@@ -204,7 +208,11 @@ class CrmCall {
   readonly journal: CrmJournal;
   constructor(readonly request: CrmStart, private readonly config: AppConfig, private readonly store: Store,
     private readonly dispose: () => void, private readonly review?: ReviewContext) {
-    this.journal = new CrmJournal(request.sessionId, store);
+    this.journal = new CrmJournal(request.sessionId, store, undefined, () => {
+      this.failed = true;
+      console.error(JSON.stringify({ event: 'crm_journal_unavailable', sessionId: request.sessionId }));
+      void this.end('journal_unavailable', false);
+    });
     this.timer = setTimeout(() => { void this.end('max_duration_reached', false); }, request.maxCallDurationSeconds * 1000);
     this.timer.unref();
   }
@@ -381,7 +389,10 @@ export class CrmVoiceController {
           reply(200, { ok: true }); return true;
         }
         const response = new twilio.twiml.VoiceResponse();
-        if (form.AnsweredBy !== 'human') {
+        if (!await session.journal.flush()) {
+          void session.end('journal_unavailable', false);
+          response.hangup();
+        } else if (form.AnsweredBy !== 'human') {
           void session.end(form.AnsweredBy?.startsWith('machine') ? 'voicemail' : 'answer_unknown', false);
           response.hangup();
         } else {

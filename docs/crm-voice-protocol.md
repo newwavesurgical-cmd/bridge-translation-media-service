@@ -125,7 +125,11 @@ hang up and never produce a completed report.
 
 Call claims and acknowledged transcript fragments are durable in the CRM.
 The worker retries each event with the same payload and sequence. If storage
-stays down, it never publishes a complete terminal event. A process crash can
+stays down after four attempts, it stops the call and never publishes a complete
+terminal event. The answered-call TwiML waits for the initial journal write
+before connecting audio. A failure emits only a `crm_journal_unavailable` log
+with the session ID; it never logs transcript or credentials. Unsaved fragments
+cannot be recovered by repairing the store afterward. A process crash can
 lose not-yet-acknowledged fragments and ends live audio; it leaves the report
 incomplete and cannot cause automatic redial. This is not seamless media or
 unsaved-transcript recovery. Paid always-on hosting is a separate deployment
