@@ -85,6 +85,10 @@ mission, without imposing the staff-report interview questions.
 Unknown properties, arbitrary callback URLs, and alternate engines are rejected.
 The claim hash is SHA256 of JSON.stringify of the object in the above key
 order, targetName omitted if absent, default language English and duration900.
+Empty targetName is also omitted. For management reviews, append reviewContext
+after maxCallDurationSeconds, with keys reviewId, documentId,
+participantTelegramId in that order. Both services use this explicit serializer;
+validation-schema property order must never change the claim hash.
 The CRM must store this expected hash with its original intent and reject a
 claim whose destination/context changed. Exactly one atomic claim may succeed;
 an ambiguous claim or dial is never reclaimed automatically.

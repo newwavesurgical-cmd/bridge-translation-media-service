@@ -23,6 +23,25 @@ export const crmStartSchema = z.object({
   maxCallDurationSeconds: z.number().int().min(60).max(1800).default(900)
 }).strict().refine(value => !value.reviewContext || value.reportPeriod === 'custom', 'Review calls require custom mission');
 export type CrmStart = z.infer<typeof crmStartSchema>;
+
+/** Protocol 1 byte order shared with CRM canonicalStartJson; schema order is not a wire contract. */
+export function canonicalCrmStartJson(p: CrmStart): string {
+  return JSON.stringify({
+    sessionId: p.sessionId,
+    idempotencyKey: p.idempotencyKey,
+    to: p.to,
+    ...(p.targetName ? { targetName: p.targetName } : {}),
+    missionPrompt: p.missionPrompt,
+    reportPeriod: p.reportPeriod,
+    language: p.language,
+    maxCallDurationSeconds: p.maxCallDurationSeconds,
+    ...(p.reviewContext ? { reviewContext: {
+      reviewId: p.reviewContext.reviewId,
+      documentId: p.reviewContext.documentId,
+      participantTelegramId: p.reviewContext.participantTelegramId,
+    } } : {}),
+  });
+}
 export interface JournalEvent {
   seq: number;
   type: 'started' | 'transcript' | 'terminal' | 'error';
@@ -308,7 +327,7 @@ export class CrmVoiceController {
         context.participantTelegramId !== request.reviewContext.participantTelegramId) throw new Error('review_context_mismatch');
       review = context;
     }
-    const requestHash = createHash('sha256').update(JSON.stringify(request)).digest('hex');
+    const requestHash = createHash('sha256').update(canonicalCrmStartJson(request)).digest('hex');
     const claim = await this.store({ action: 'claim', sessionId: request.sessionId, idempotencyKey: request.idempotencyKey, requestHash });
     if (claim.claimed !== true) {
       if (!claim.session) throw new Error('crm_claim_invalid');

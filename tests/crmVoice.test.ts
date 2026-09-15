@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import twilio from 'twilio';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import { getConfig } from '../src/config.js';
 import { buildGptLiveSessionStart } from '../src/openai/gptLiveVoiceSession.js';
-import { CrmJournal, CrmVoiceController, CRM_STORE_URL, crmStartSchema, crmInterviewInstructions, signature, signedRequestValid, validTwilioStreamSignature, type Store } from '../src/crmVoice.js';
+import { CrmJournal, CrmVoiceController, CRM_STORE_URL, crmStartSchema, canonicalCrmStartJson, crmInterviewInstructions, signature, signedRequestValid, validTwilioStreamSignature, type Store } from '../src/crmVoice.js';
 
 vi.mock('../src/twilio/client.js', () => ({ completeTwilioCall: vi.fn(async () => {}) }));
 const secret = 'synthetic-test-only-secret-0123456789';
@@ -66,6 +67,34 @@ describe('HTTP boundary', () => {
 });
 
 describe('durable claim before dial', () => {
+  it('accepts the CRM protocol-1 review hash after Zod has reordered the request', async () => {
+    // Fixture follows the deployed CRM canonicalStartJson, independently of bridge schema order.
+    const wire = '{"sessionId":"11111111-1111-4111-8111-111111111111","idempotencyKey":"test-call-intent","to":"+15555550123","targetName":"Alex","missionPrompt":"Review the brochure.","reportPeriod":"custom","language":"English","maxCallDurationSeconds":900,"reviewContext":{"reviewId":"22222222-2222-4222-8222-222222222222","documentId":"33333333-3333-4333-8333-333333333333","participantTelegramId":"1234"}}';
+    const parsed = crmStartSchema.parse(JSON.parse(wire));
+    expect(JSON.stringify(parsed)).not.toBe(wire); // Reproduces the production failure.
+    expect(canonicalCrmStartJson(parsed)).toBe(wire);
+    const expectedHash = createHash('sha256').update(wire).digest('hex');
+    const store: Store = vi.fn(async body => {
+      if (body.action === 'review_context') return { reviewContext: { ...parsed.reviewContext,
+        title: 'Brochure', questions: [], constraints: '', briefing: '', pages: [] } };
+      if (body.action === 'claim') {
+        if (body.requestHash !== expectedHash) throw new Error('request_hash_mismatch');
+        return { claimed: true };
+      }
+      return { accepted: true };
+    });
+    const dial = vi.fn(async () => 'CA' + 'a'.repeat(32));
+    const controller = new CrmVoiceController(config(), { store, dial });
+    expect((await controller.start(parsed)).startState).toBe('confirmed');
+    expect(dial).toHaveBeenCalledTimes(1);
+    await controller.close();
+    const changed = { ...parsed, reviewContext: { ...parsed.reviewContext!, participantTelegramId: '9999' } };
+    expect(createHash('sha256').update(canonicalCrmStartJson(changed)).digest('hex')).not.toBe(expectedHash);
+  });
+  it('keeps the non-review wire format and omits an empty target name like the CRM', () => {
+    expect(canonicalCrmStartJson(request)).toBe(JSON.stringify(request));
+    expect(canonicalCrmStartJson({ ...request, targetName: '' })).toBe(canonicalCrmStartJson(request));
+  });
   it('blocks a review call before claim/dial when canonical document context does not match', async () => {
     const reference = { reviewId: '22222222-2222-4222-8222-222222222222',
       documentId: '33333333-3333-4333-8333-333333333333', participantTelegramId: '1234' };
