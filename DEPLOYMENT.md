@@ -43,6 +43,22 @@ Set these in Lovable/Supabase, not in browser code:
 
 ## Notes
 
+### Callback CRM evidence repair (2026-09-16)
+
+- The first real callback found a gap missed by readiness checks: the CRM tool
+  searched whole spoken phrases literally and omitted procedure volume from its
+  contact projection. The CRM backend owns query normalization and card fields;
+  verify its real read-only diagnostic before accepting this bridge rollout.
+- Callback instructions now route CRM facts and product questions to CRM first,
+  distinguish lookup failures from blank fields, preserve corrected names, and
+  anchor relative dates to the current call. Date-specific travel answers require
+  exact evidence; nearby-date prices and invented schedules are not substitutes.
+- Voice, greeting, audio transport, review/check-in instructions, authority and
+  follow-up consent remain unchanged. Build and 324 tests pass, including current
+  date isolation and unchanged numeric/null CRM evidence through the executor.
+- No real call is placed by verification. Audible acceptance requires the next
+  user-requested call; local tests do not establish spoken answer quality.
+
 ### User-requested callback research (2026-09-15)
 
 - Before dialing a custom call, query the signed CRM store for

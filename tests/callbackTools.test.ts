@@ -7,6 +7,33 @@ const sessionId = '11111111-1111-4111-8111-111111111111';
 const request = crmStartSchema.parse({ sessionId, idempotencyKey: 'synthetic:callback:1', to: '+15555550123',
   missionPrompt: 'Continue the requested business discussion.', reportPeriod: 'custom' });
 describe('callback tools authority and lifecycle', () => {
+  it('anchors callback relative dates to the current call while other missions stay unchanged', () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-09-16T04:22:00Z'));
+      const callback = crmInterviewInstructions(request, undefined, true);
+      expect(callback).toContain('2026-09-16T04:22:00.000Z');
+      expect(crmInterviewInstructions(request)).not.toContain('2026-09-16T04:22:00.000Z');
+      vi.setSystemTime(new Date('2026-09-17T04:22:00Z'));
+      expect(crmInterviewInstructions(request, undefined, true)).toContain('2026-09-17T04:22:00.000Z');
+      expect(crmInterviewInstructions({...request, reportPeriod:'weekly'}, undefined, true))
+        .not.toContain('2026-09-17T04:22:00.000Z');
+    } finally { vi.useRealTimers(); }
+  });
+  it('preserves contact field evidence and does not turn an upstream error into an empty search', async () => {
+    const card = {ok:true, contacts:[{id:sessionId, full_name:'Synthetic Surgeon',
+      procedure_volume:67, notes_summary:null, mclose_status:'champion'}]};
+    const execute=callbackExecutor(sessionId,async()=>({toolResult:card}),()=>false,async()=>true);
+    expect(await execute('search_callback_crm',{query:'Synthetic Surgeon annual procedure volume'},'call_card')).toEqual(card);
+    for (const volume of [0,null]) {
+      card.contacts[0].procedure_volume=volume as any;
+      expect(await execute('search_callback_crm',{query:'Synthetic Surgeon'},'call_card_next')).toEqual(card);
+    }
+    const failed=callbackExecutor(sessionId,async()=>{throw new Error('database unavailable');},()=>false,async()=>true);
+    const result=await failed('search_callback_crm',{query:'Synthetic Surgeon'},'call_failed');
+    expect(result).toMatchObject({ok:false,error:'callback_tool_unavailable'});
+    expect(result).not.toHaveProperty('contacts');
+  });
   it('requires affirmative server capability and never probes review/check-in missions', async () => {
     const store = vi.fn(async () => ({ callbackCapabilities: { enabled: true, protocolVersion:2 } }));
     for (const excluded of [{...request, reportPeriod: 'weekly'}, {...request, reportPeriod: 'monthly'}, {...request, reviewContext: {}}])
