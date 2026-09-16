@@ -32,7 +32,7 @@ describe('callback tools authority and lifecycle', () => {
   });
   it('flushes caller transcript before saving and preserves durable receipt and request ID', async () => {
     const order: string[] = [];
-    const receipt = {ok:true, taskId:sessionId, status:'queued'};
+    const receipt = {ok:true, taskId:sessionId, status:'queued',consentVerified:true};
     const store = vi.fn(async () => {order.push('save'); return {toolResult:receipt};});
     const execute = callbackExecutor(sessionId, store, () => false, async () => {order.push('flush'); return true;});
     const args = {question:'Find public education history', delivery:'call', consentQuote:'Yes, call me with that.'};
@@ -59,6 +59,21 @@ describe('callback tools authority and lifecycle', () => {
       const execute = callbackExecutor(sessionId, store, () => false, async () => true);
       expect(await execute('search_callback_crm',{query:'clinic'},'call_error')).toMatchObject({ok:false});
     }
+  });
+  it('returns background research to the live call without launching another job', async () => {
+    const store=vi.fn().mockResolvedValueOnce({toolResult:{taskId:sessionId,status:'pending'}})
+      .mockResolvedValueOnce({toolResult:{taskId:sessionId,status:'running'}})
+      .mockResolvedValueOnce({toolResult:{taskId:sessionId,status:'ready',answer:'Cited public result'}});
+    const execute=callbackExecutor(sessionId,store,()=>false,async()=>true,async()=>{});
+    expect(await execute('research_callback_question',{question:'Public hospital address?'},'call_background'))
+      .toMatchObject({status:'ready',answer:'Cited public result'});
+    expect(store.mock.calls.map(([body])=>body.tool)).toEqual(['research_callback_question','get_callback_task','get_callback_task']);
+    expect(store.mock.calls[1][0].arguments).toEqual({taskId:sessionId});
+  });
+  it('requires a verified-consent receipt before confirming delivery', async () => {
+    const execute=callbackExecutor(sessionId,async()=>({toolResult:{status:'saved',taskId:sessionId,consentVerified:false}}),()=>false,async()=>true);
+    expect(await execute('save_callback_followup',{question:'Find the address',delivery:'call',consentQuote:'Call me with that.'},'call_consent'))
+      .toMatchObject({ok:false});
   });
   it('passes provider function call ID to executor and suppresses closed-call output', async () => {
     let resolve!: (value:unknown)=>void;

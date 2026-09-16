@@ -1,14 +1,15 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
 import type { LiveFunctionTool } from './openai/liveFunctionTools.js';
 
 type CallbackStore = (body: Record<string, unknown>) => Promise<{
   callbackCapabilities?: unknown; toolResult?: unknown;
 }>;
 const schemas = {
-  search_callback_crm: z.object({ query: z.string().trim().min(2).max(500) }).strict(),
-  research_callback_question: z.object({ question: z.string().trim().min(3).max(2000) }).strict(),
+  search_callback_crm: z.object({ query: z.string().trim().min(2).max(200) }).strict(),
+  research_callback_question: z.object({ question: z.string().trim().min(3).max(500) }).strict(),
   get_callback_task: z.object({ taskId: z.string().uuid() }).strict(),
-  save_callback_followup: z.object({ question: z.string().trim().min(3).max(2000),
+  save_callback_followup: z.object({ question: z.string().trim().min(3).max(500),
     delivery: z.enum(['telegram', 'call']), consentQuote: z.string().trim().min(3).max(1000) }).strict(),
 };
 const stringField = (description: string) => ({ type: 'string', description });
@@ -18,13 +19,13 @@ function tool(name: string, description: string, properties: Record<string, unkn
 }
 export const callbackTools: LiveFunctionTool[] = [
   tool('search_callback_crm', 'Search the verified caller’s authorized CRM records. Read-only; returns bounded facts and source IDs.',
-    { query: stringField('Specific person, institution or business question to look up; at most 500 characters.') }),
+    { query: stringField('Specific person, institution or business question to look up; at most 200 characters.') }),
   tool('research_callback_question', 'Ask a research specialist to search current public web sources. Returns a cited answer or durable pending task. Does not schedule delivery.',
-    { question: stringField('Self-contained public research question. Exclude private chat text, CRM notes, secrets and patient information.') }),
+    { question: stringField('Self-contained public research question, at most 500 characters. Exclude private chat text, CRM notes, secrets and patient information.') }),
   tool('get_callback_task', 'Retrieve a research task from THIS call. If pending, keep conversation natural and check later; never invent a completed answer.',
     { taskId: stringField('Exact task UUID returned by a previous tool.') }),
   tool('save_callback_followup', 'Save an explicitly requested follow-up to this verified caller. Use only after caller expressly asks for or accepts delivery by Telegram or phone. Never choose a new recipient. Confirm scheduling only after a saved receipt.',
-    { question: stringField('Precise research question/result to deliver.'), delivery: { type: 'string', enum: ['telegram', 'call'] },
+    { question: stringField('Precise public research question/result to deliver, at most 500 characters. Reuse the same question as the research task.'), delivery: { type: 'string', enum: ['telegram', 'call'] },
       consentQuote: stringField('Exact words from the caller requesting or accepting this delivery method, never invented.') }),
 ];
 
@@ -51,7 +52,8 @@ export async function callbackEnabled(request: { reportPeriod: string; reviewCon
  * the persisted session authority for every operation. Stable provider call IDs bind retries.
  */
 export function callbackExecutor(sessionId: string, store: CallbackStore, ended: () => boolean,
-  flushTranscript: () => Promise<boolean>) {
+  flushTranscript: () => Promise<boolean>,
+  pause = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))) {
   return async (name: string, args: unknown, callId?: string): Promise<unknown> => {
     const unavailable = { ok: false, error: 'callback_tool_unavailable',
       guidance: 'Do not invent an answer or promise a follow-up. Explain that this action could not be confirmed.' };
@@ -61,10 +63,35 @@ export function callbackExecutor(sessionId: string, store: CallbackStore, ended:
       // Make caller consent available to server-side verification before any saved commitment.
       if (name === 'save_callback_followup' && !await flushTranscript()) return unavailable;
       if (ended()) return unavailable;
-      const result = await store({ action: 'callback_tool', sessionId, requestId: callId, tool: name, arguments: parsed });
+      let result = await store({ action: 'callback_tool', sessionId, requestId: callId, tool: name, arguments: parsed });
+      // Keep this delegation open for a bounded interval so ordinary research
+      // returns to the same live conversation without relying on spoken polling.
+      // Only read the existing durable job; never launch a second research request.
+      const initial = result.toolResult as Record<string, unknown> | undefined;
+      if (name === 'research_callback_question' && z.string().uuid().safeParse(initial?.taskId).success) {
+        const deadline = Date.now() + 30_000;
+        for (let poll = 0; poll < 8; poll++) {
+          const current = result.toolResult as Record<string, unknown> | undefined;
+          if (!current || !['pending', 'running'].includes(String(current.status)) || ended() || Date.now() >= deadline) break;
+          await pause(2500);
+          if (ended()) return unavailable;
+          try {
+            const checked = await store({ action: 'callback_tool', sessionId,
+              requestId: createHash('sha256').update(`${callId}:poll:${poll}`).digest('hex'),
+              tool: 'get_callback_task', arguments: { taskId: initial!.taskId } });
+            const next = checked.toolResult as Record<string, unknown> | undefined;
+            if (next?.taskId !== initial!.taskId) break;
+            result = checked;
+          } catch { break; } // Preserve the saved pending receipt on a polling outage.
+        }
+      }
       if (ended()) return unavailable; // Durable work survives; late results never enter a closed/new call.
       if (!result.toolResult || typeof result.toolResult !== 'object' || Array.isArray(result.toolResult) ||
           JSON.stringify(result.toolResult).length > 24000) return unavailable;
+      if (name === 'save_callback_followup') {
+        const receipt = result.toolResult as Record<string, unknown>;
+        if (receipt.consentVerified !== true || !z.string().uuid().safeParse(receipt.taskId).success) return unavailable;
+      }
       return result.toolResult;
     } catch { return unavailable; }
   };

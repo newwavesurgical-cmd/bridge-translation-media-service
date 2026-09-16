@@ -60,7 +60,11 @@ Set these in Lovable/Supabase, not in browser code:
   within the existing ten-second deadline; slow research returns a durable task
   for polling and server-side continuation. Background delivery belongs to the
   CRM worker and requires a saved explicit delivery request.
-- Verification: TypeScript build and 320 synthetic tests pass, including audio
+- Pending research is automatically read back through the same delegation for
+  up to eight checks (30-second window, each bounded by the store timeout), without
+  starting another job. Follow-up receipts also require a valid task ID and
+  explicit server confirmation that caller consent was verified.
+- Verification: TypeScript build and 322 synthetic tests pass, including audio
   input while returning a CRM result, role/scope gating, bad arguments, transcript
   persistence, hangup races and provider call ID propagation. No real phone call
   or model-audio test is included in this suite.
