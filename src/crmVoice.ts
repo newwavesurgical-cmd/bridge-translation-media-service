@@ -9,6 +9,7 @@ import { OpenAiGptLiveVoiceSession } from './openai/gptLiveVoiceSession.js';
 import { completeTwilioCall } from './twilio/client.js';
 import { reviewReferenceSchema, reviewContextSchema, reviewDocumentTool, inspectReviewDocument } from './managementReview.js';
 import type { ReviewContext } from './managementReview.js';
+import { CallbackSupervisor, supervisorEnabled, supervisorInstructions, supervisorConfirmTool } from './callbackSupervisor.js';
 import { callbackEnabled, callbackExecutor, callbackInstructions, callbackTools } from './callbackTools.js';
 
 export const CRM_STORE_URL = 'https://lrrjcglcbudcmssilpfh.supabase.co/functions/v1/voice-bridge-store';
@@ -59,6 +60,7 @@ interface StoreResult {
   lastSeq?: number; transcriptFinal?: boolean; hasMore?: boolean;
   reviewContext?: unknown;
   callbackCapabilities?: unknown; toolResult?: unknown;
+  supervisorCapabilities?: unknown; supervisorResult?: unknown; supervisorResults?: unknown; supervisorMode?: unknown;
 }
 export type Store = (body: Record<string, unknown>) => Promise<StoreResult>;
 
@@ -140,6 +142,7 @@ export class CrmJournal {
     await this.tail;
     return !this.failed;
   }
+  get revision(): number { return this.seq; }
   async flush(): Promise<boolean> { await this.tail; return !this.failed; }
 }
 
@@ -214,6 +217,7 @@ class CrmCall {
   private ws?: WebSocket;
   private streamSid?: string;
   private live?: OpenAiGptLiveVoiceSession;
+  private supervisor?: CallbackSupervisor;
   private ending?: Promise<void>;
   private closedConfirmed = false;
   private hadRemote = false;
@@ -224,7 +228,7 @@ class CrmCall {
   private expectedStreamStop = false;
   readonly journal: CrmJournal;
   constructor(readonly request: CrmStart, private readonly config: AppConfig, private readonly store: Store,
-    private readonly dispose: () => void, private readonly review?: ReviewContext, private readonly callback = false) {
+    private readonly dispose: () => void, private readonly review?: ReviewContext, private readonly callback = false, private readonly supervised: false | 'shadow' | 'live' = false) {
     this.journal = new CrmJournal(request.sessionId, store, undefined, () => {
       this.failed = true;
       console.error(JSON.stringify({ event: 'crm_journal_unavailable', sessionId: request.sessionId }));
@@ -253,7 +257,10 @@ class CrmCall {
               message.start?.mediaFormat?.sampleRate !== 8000) { ws.close(); return; }
           clearTimeout(startTimer);
           this.streamSid = message.start.streamSid;
-          const instructions = crmInterviewInstructions(this.request, this.review, this.callback);
+          const instructions = crmInterviewInstructions(this.request, this.review, this.callback) + (this.supervised === 'live' ? '\n'+supervisorInstructions : '');
+          if (this.supervised) this.supervisor = new CallbackSupervisor(this.request.sessionId, this.store,
+            () => this.journal.flush(), () => this.journal.revision,
+            result => this.live?.appendSupervisorResult(result) ?? false);
           this.live = new OpenAiGptLiveVoiceSession({
             config: this.config, sessionId: this.request.sessionId, instructions, conversationInstructions: instructions,
             voice: 'cedar', disclosureEnabled: true,
@@ -274,12 +281,14 @@ class CrmCall {
                 });
               }
             } : this.callback ? {
-              backendTools: callbackTools,
-              executeBackendTool: callbackExecutor(this.request.sessionId, this.store, () => Boolean(this.ending), () => this.journal.flush())
+              backendTools: this.supervised === 'live' ? [...callbackTools, supervisorConfirmTool] : callbackTools,
+              executeBackendTool: (name, args, callId) => name === supervisorConfirmTool.name && this.supervisor
+                ? this.supervisor.confirm(args, callId ?? '')
+                : callbackExecutor(this.request.sessionId, this.store, () => Boolean(this.ending), () => this.journal.flush())(name,args,callId)
             } : {}),
-            onAudioDelta: audio => { this.hadAgent = true; this.send({ event: 'media', streamSid: this.streamSid, media: { payload: audio } }); },
-            onRemoteTranscriptDelta: delta => { this.hadRemote ||= Boolean(delta.trim()); this.journal.append('transcript', { speaker: 'remote', delta }); },
-            onAgentTranscriptDelta: delta => this.journal.append('transcript', { speaker: 'agent', delta }),
+            onAudioDelta: audio => { this.supervisor?.audio(audio); this.hadAgent = true; this.send({ event: 'media', streamSid: this.streamSid, media: { payload: audio } }); },
+            onRemoteTranscriptDelta: delta => { this.hadRemote ||= Boolean(delta.trim()); this.journal.append('transcript', { speaker: 'remote', delta }); this.supervisor?.remote(); },
+            onAgentTranscriptDelta: delta => { this.journal.append('transcript', { speaker: 'agent', delta }); this.supervisor?.agent(); },
             onUserSpeechStarted: () => { this.live?.notifyPlaybackCleared(); this.send({ event: 'clear', streamSid: this.streamSid }); },
             onPlaybackCheckpoint: name => this.send({ event: 'mark', streamSid: this.streamSid, mark: { name } }),
             onSessionCloseConfirmed: () => { this.closedConfirmed = true; this.resolveClose?.(); },
@@ -287,6 +296,7 @@ class CrmCall {
             onError: () => { this.failed = true; void this.end('voice_error', false); }
           });
           this.live.connect();
+          this.supervisor?.start();
         } else if (message.event === 'media' && this.live && !this.ending) {
           const payload = message.media?.payload;
           if (typeof payload !== 'string' || payload.length > 8192 || !/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) { ws.close(); return; }
@@ -313,6 +323,7 @@ class CrmCall {
     // Schedule after assignment so synchronous close callbacks cannot reenter finalization.
     this.ending = Promise.resolve().then(async () => {
       clearTimeout(this.timer);
+      this.supervisor?.close();
       if (this.live) {
         const closeAck = new Promise<void>(resolve => { this.resolveClose = resolve; });
         this.live.close();
@@ -355,7 +366,7 @@ export class CrmVoiceController {
       this.config.TWILIO_PHONE_NUMBER && this.config.PUBLIC_BASE_URL?.startsWith('https://'));
     return { provider: 'gpt-live', protocolVersion: 1, configured,
       ready: configured && this.config.CRM_VOICE_ENABLED === true && !this.config.DRY_RUN_CALLS,
-      enabled: this.config.CRM_VOICE_ENABLED === true, durableJournal: true, callbackToolsSupported: true, activeCalls: this.sessions.size };
+      enabled: this.config.CRM_VOICE_ENABLED === true, durableJournal: true, callbackToolsSupported: true, supervisorProtocolVersion: 1, activeCalls: this.sessions.size };
   }
   async start(request: CrmStart) {
     if (!this.readiness().ready) throw new Error('crm_voice_not_ready');
@@ -369,6 +380,7 @@ export class CrmVoiceController {
     }
     // Resolve before dialing, so capability lookup cannot delay the opening after answer.
     const callback = await callbackEnabled(request, this.store);
+    const supervised = await supervisorEnabled(callback, request.sessionId, this.store);
     const requestHash = createHash('sha256').update(canonicalCrmStartJson(request)).digest('hex');
     const claim = await this.store({ action: 'claim', sessionId: request.sessionId, idempotencyKey: request.idempotencyKey, requestHash });
     if (claim.claimed !== true) {
@@ -376,7 +388,7 @@ export class CrmVoiceController {
       return { sessionId: request.sessionId, provider: 'gpt-live', callSid: claim.session.callSid,
         startState: ['confirmed', 'failed', 'uncertain'].includes(claim.session.startState) ? claim.session.startState : 'uncertain', duplicate: true };
     }
-    const session = new CrmCall(request, this.config, this.store, () => this.sessions.delete(request.sessionId), review, callback);
+    const session = new CrmCall(request, this.config, this.store, () => this.sessions.delete(request.sessionId), review, callback, supervised);
     this.sessions.set(request.sessionId, session);
     const twimlUrl = new URL('/crm/voice/twiml', this.config.PUBLIC_BASE_URL);
     twimlUrl.searchParams.set('sessionId', request.sessionId);

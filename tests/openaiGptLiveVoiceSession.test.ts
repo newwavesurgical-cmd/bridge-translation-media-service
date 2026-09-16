@@ -810,3 +810,23 @@ describe('GPT-Live voice session', () => {
     expect(sent.some((payload) => String(payload.content ?? '').includes('Yes, that works.'))).toBe(true);
   });
 });
+
+
+describe('supervisor data injection',()=>{
+  it('keeps source facts out of system instructions and does not speak quiet context',()=>{
+    const f=makeSession();f.mutable.handleMessage(JSON.stringify({type:'session.started'}));f.sent.length=0;
+    expect(f.session.appendSupervisorResult({id:'1',kind:'context',text:'CRM procedure volume: 67'})).toBe(true);
+    expect(f.sent.map(e=>e.type)).toEqual(['session.thinking.append']);f.session.close();
+  });
+  it('keeps action reference private and submits the exact proposal text for read-back',()=>{
+    const f=makeSession();f.mutable.handleMessage(JSON.stringify({type:'session.started'}));f.sent.length=0;
+    f.session.appendSupervisorResult({id:'2',kind:'proposal',actionId:'private-id',text:'Send an email to test@example.com. Subject: Test. Content: Hello.'});
+    expect(f.sent.map(e=>e.type)).toEqual(['session.thinking.append','session.commentary.append']);
+    expect(f.sent[1].content).not.toContain('private-id');expect(f.sent[1].content).toContain('Content: Hello.');f.session.close();
+  });
+  it('does not truncate a long proposal into partial approval',()=>{
+    const f=makeSession();f.mutable.handleMessage(JSON.stringify({type:'session.started'}));f.sent.length=0;
+    f.session.appendSupervisorResult({id:'3',kind:'proposal',actionId:'id',text:'Long proposal '.repeat(500)});
+    expect(f.sent.every(e=>e.type==='session.thinking.append')).toBe(true);f.session.close();
+  });
+});

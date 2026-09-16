@@ -1,4 +1,6 @@
 import WebSocket from 'ws';
+import { getEncoding } from 'js-tiktoken';
+const liveContextEncoding = getEncoding('o200k_base');
 import { LiveSpeechBoundary } from './liveSpeechBoundary.js';
 import { LiveFunctionDispatcher, type LiveFunctionTool } from './liveFunctionTools.js';
 import type {
@@ -403,6 +405,26 @@ export class OpenAiGptLiveVoiceSession implements AgentVoiceSession {
     if (!this.sessionStarted || !this.startupEnvelopeQueued || this.startupEnvelopePlaybackConfirmed) return;
     this.startupEnvelopePlaybackConfirmed = true;
     this.publishStartupDiagnostics();
+  }
+
+  /** Data goes through thinking/commentary, never system instructions. No automatic retry:
+   * submitting or acknowledging this event is not proof of speech or user consent. */
+  appendSupervisorResult(result: {id:string;kind:string;text:string;actionId?:string}): boolean {
+    if (!this.sessionStarted || this.statusValue !== 'live' || this.ws?.readyState !== WebSocket.OPEN) return false;
+    const context = result.kind === 'context';
+    // Exact proposal content is never silently truncated. Other evidence is bounded at a token boundary.
+    const tokens = liveContextEncoding.encode(result.text);
+    if (result.kind === 'proposal' && tokens.length > 450) {
+      this.appendConversationContext('A proposed action is too long to read safely. Ask for a shorter message; no action was confirmed.');
+      return true;
+    }
+    const content = tokens.length > 450 ? liveContextEncoding.decode(tokens.slice(0, 430)) + ' [Result shortened; more detail unavailable here.]' : result.text;
+    if (result.kind === 'proposal') this.sendJson({type:'session.thinking.append',
+      event_id:`supervisor-${result.id}-reference`,delegation_id:null,
+      content:`Pending action reference (private, do not speak the ID): ${result.actionId}. The following proposal is unexecuted. Read the exact destination, subject and complete content; ask for confirmation. Only use this action ID after a new explicit caller confirmation.`});
+    this.sendJson({type: context ? 'session.thinking.append' : 'session.commentary.append',
+      event_id: `supervisor-${result.id}`, delegation_id:null, content});
+    return true;
   }
 
   appendConversationContext(text: string): void {
