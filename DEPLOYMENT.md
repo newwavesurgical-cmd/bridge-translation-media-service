@@ -48,6 +48,9 @@ Set these in Lovable/Supabase, not in browser code:
 - Before dialing a custom call, query the signed CRM store for
   `callback_capabilities`. Only affirmative server-derived callback authority
   enables CRM search, public research, task retrieval and explicit saved follow-up.
+  The capability response must explicitly report `protocolVersion: 2`; earlier
+  worker drafts remain disabled until consent-only delivery, lease ownership and
+  terminal call reconciliation are deployed and verified.
   Reviews/check-ins never query for or receive these tools. Protocol 1 start JSON,
   voice, media transport, opening and AMD behavior are unchanged.
 - `callback_tool` uses the current session and provider function `call_id` as

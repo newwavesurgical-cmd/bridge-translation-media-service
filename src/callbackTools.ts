@@ -44,7 +44,9 @@ export async function callbackEnabled(request: { reportPeriod: string; reviewCon
   if (request.reportPeriod !== 'custom' || request.reviewContext) return false;
   try {
     const result = await store({ action: 'callback_capabilities', sessionId: request.sessionId });
-    return z.object({ enabled: z.boolean() }).parse(result.callbackCapabilities).enabled;
+    // Version 2 attests to consent-only delivery, lease-safe research and
+    // terminal call reconciliation. Never opt into an older worker draft.
+    return z.object({ enabled: z.boolean(), protocolVersion: z.literal(2) }).parse(result.callbackCapabilities).enabled;
   } catch { return false; } // Existing calls still work when the additive backend is unavailable.
 }
 

@@ -8,13 +8,14 @@ const request = crmStartSchema.parse({ sessionId, idempotencyKey: 'synthetic:cal
   missionPrompt: 'Continue the requested business discussion.', reportPeriod: 'custom' });
 describe('callback tools authority and lifecycle', () => {
   it('requires affirmative server capability and never probes review/check-in missions', async () => {
-    const store = vi.fn(async () => ({ callbackCapabilities: { enabled: true } }));
+    const store = vi.fn(async () => ({ callbackCapabilities: { enabled: true, protocolVersion:2 } }));
     for (const excluded of [{...request, reportPeriod: 'weekly'}, {...request, reportPeriod: 'monthly'}, {...request, reviewContext: {}}])
       expect(await callbackEnabled(excluded, store)).toBe(false);
     expect(store).not.toHaveBeenCalled();
     expect(await callbackEnabled(request, store)).toBe(true);
     expect(store).toHaveBeenCalledWith({action:'callback_capabilities', sessionId});
     expect(await callbackEnabled(request, async () => ({}))).toBe(false);
+    expect(await callbackEnabled(request, async () => ({callbackCapabilities:{enabled:true}}))).toBe(false);
     expect(await callbackEnabled(request, async () => ({callbackCapabilities:{enabled:'true'}}))).toBe(false);
     expect(await callbackEnabled(request, async () => {throw new Error('unavailable');})).toBe(false);
   });

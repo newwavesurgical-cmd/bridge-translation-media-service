@@ -33,7 +33,7 @@ async function fixture(reviewName?: string, callback = false) {
     TWILIO_PHONE_NUMBER: '+15555550000', PUBLIC_BASE_URL: 'https://bridge.example', DRY_RUN_CALLS: false };
   const controller = new CrmVoiceController(config, {
     store: async body => {
-      if (body.action === 'callback_capabilities') return {callbackCapabilities:{enabled:callback}};
+      if (body.action === 'callback_capabilities') return {callbackCapabilities:{enabled:callback,protocolVersion:2}};
       if (body.action === 'callback_tool') return {toolResult:{ok:true,answer:'Authorized synthetic CRM answer',requestId:body.requestId}};
       if (body.action === 'review_context') return { reviewContext: { ...request.reviewContext,
         title: 'Sample brochure', questions: ['What wording should change?'], constraints: '', briefing: 'Two page brochure.', pages: [] } };
