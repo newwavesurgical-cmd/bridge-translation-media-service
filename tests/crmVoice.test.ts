@@ -244,6 +244,9 @@ describe('separate reporting mission', () => {
       expect(instructions).toContain('Keep the approved product wording.');
       expect(instructions).toContain('Page 2 compares two layouts.');
       expect(instructions).toContain('untrusted evidence');
+      expect(instructions).toContain('I’ll prepare the report for Alex');
+      expect(instructions).toContain('Do not read back the recommendations');
+      expect(instructions).not.toContain('End with prioritized recommendations and ask for corrections');
     }
   });
   it('uses GPT-Live full-duplex protocol with a reporting policy and shared backend context', () => {
