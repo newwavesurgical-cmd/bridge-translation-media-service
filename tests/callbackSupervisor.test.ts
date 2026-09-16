@@ -36,6 +36,15 @@ describe('callback supervisor isolation and lifecycle',()=>{
   let resolve!:(x:any)=>void;const deliver=vi.fn(()=>true);const s=new CallbackSupervisor('s',()=>new Promise(r=>{resolve=r;}),async()=>true,()=>1,deliver);
   const pending=s.poll();s.close();resolve({supervisorMode:'live',supervisorResults:[{id:'1',revision:1,kind:'answer',text:'fact'}]});await pending;expect(deliver).not.toHaveBeenCalled();
  });
+ it('retries proposal receipts with the original cutoff without speaking twice',async()=>{
+  const s=setup();s.setRevision(5);s.setRows([{id:'3',revision:5,kind:'proposal',text:'Send message Hello',actionId:'action'}]);
+  let failures=1;const original=s.store.getMockImplementation()!;
+  s.store.mockImplementation(async body=>{if(body.action==='supervisor_ack'&&failures-->0)throw new Error('network');return original(body);});
+  await s.supervisor.poll();s.setRevision(8);await s.supervisor.poll();
+  expect(s.deliver).toHaveBeenCalledOnce();
+  const acks=s.store.mock.calls.filter(([b])=>b.action==='supervisor_ack').map(([b])=>b);
+  expect(acks).toHaveLength(2);expect(acks[0]).toEqual(acks[1]);expect(acks[0].presentationRevision).toBe(5);s.supervisor.close();
+ });
  it('requires transcript persistence before confirming and never confirms after end',async()=>{
   const s=setup();s.flush.mockResolvedValue(false);
   const args={actionId:'11111111-1111-4111-8111-111111111111',consentQuote:'yes send it'};

@@ -36,6 +36,7 @@ export class CallbackSupervisor {
   private polling=false;
   private pending:SupervisorResult[]=[];
   private readonly delivered=new Set<string>();
+  private readonly pendingAcks=new Map<string,Record<string,unknown>>();
   constructor(private readonly sessionId:string,private readonly store:Store,
     private readonly flush:()=>Promise<boolean>,private readonly revision:()=>number,
     private readonly deliver:(result:SupervisorResult)=>boolean, private readonly now=Date.now) {}
@@ -61,6 +62,7 @@ export class CallbackSupervisor {
   async poll():Promise<void> {
     if(this.closed||this.polling)return;this.polling=true;
     try {
+      for(const [id,ack] of this.pendingAcks){ await this.store(ack); this.pendingAcks.delete(id); if(this.closed)return; }
       const response=await this.store({action:'supervisor_results',sessionId:this.sessionId,after:this.after});
       if(this.closed)return;
       if(Array.isArray(response.supervisorResults))for(const value of response.supervisorResults.slice(0,5)){
@@ -70,15 +72,21 @@ export class CallbackSupervisor {
       }
       for(const result of [...this.pending]){
         if(this.closed)break;
+        const presentationRevision=this.revision();
+        if(result.kind==='proposal' && !await this.flush())continue;
+        if(this.closed)break;
         const stale=result.kind!=='action_result'&&result.revision<this.latestRemote;
         const suppressed=stale||response.supervisorMode!=='live';
         if(!suppressed&&this.now()<this.quietUntil)continue;
         // Recheck current turn immediately before submission. Never retry speech after an uncertain send.
         if(!suppressed&&!this.deliver(result))continue;
         this.delivered.add(result.id);this.pending=this.pending.filter(r=>r.id!==result.id);
-        await this.store({action:'supervisor_ack',sessionId:this.sessionId,resultId:result.id,
+        const ack={action:'supervisor_ack',sessionId:this.sessionId,resultId:result.id,
           delivery:suppressed?'suppressed':result.kind==='context'?'context_applied':'speech_requested',
-          proposalPresented:!suppressed&&result.kind==='proposal'}); // This records presentation intent only. Server still requires the actual read-back and later caller consent.
+          proposalPresented:!suppressed&&result.kind==='proposal',
+          ...(result.kind==='proposal'?{presentationRevision}: {})};
+        this.pendingAcks.set(result.id,ack);
+        await this.store(ack);this.pendingAcks.delete(result.id); // This records presentation intent only. Server still requires the actual read-back and later caller consent.
       }
     }catch{/* capability fails closed; ordinary conversation remains available */}finally{this.polling=false;}
   }
