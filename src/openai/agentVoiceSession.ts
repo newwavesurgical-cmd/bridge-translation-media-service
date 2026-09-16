@@ -17,7 +17,7 @@ export interface AgentVoiceSessionOptions {
   /** Server-owned conversation policy for a separate application mission. */
   conversationInstructions?: string;
   backendTools?: LiveFunctionTool[];
-  executeBackendTool?: (name: string, args: unknown) => Promise<unknown>;
+  executeBackendTool?: (name: string, args: unknown, callId?: string) => Promise<unknown>;
   /** Only emitted for the protocol's session.closed acknowledgement. */
   onSessionCloseConfirmed?: () => void;
   /** Whether the operator enabled the guaranteed first-message disclosure. */

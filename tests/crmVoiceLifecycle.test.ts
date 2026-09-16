@@ -21,11 +21,11 @@ vi.mock('../src/openai/gptLiveVoiceSession.js', async importOriginal => ({
 }));
 vi.mock('../src/twilio/client.js', () => ({ completeTwilioCall: vi.fn(async () => {}) }));
 
-async function fixture(reviewName?: string) {
+async function fixture(reviewName?: string, callback = false) {
   const events: any[] = [];
   const callSid = 'CA' + 'a'.repeat(32);
   const request = crmStartSchema.parse({ sessionId: '22222222-2222-4222-8222-222222222222',
-    idempotencyKey: 'synthetic-lifecycle', to: '+15555550123', missionPrompt: 'Collect reporting facts.', reportPeriod: reviewName ? 'custom' : 'weekly',
+    idempotencyKey: 'synthetic-lifecycle', to: '+15555550123', missionPrompt: 'Collect reporting facts.', reportPeriod: reviewName || callback ? 'custom' : 'weekly',
     ...(reviewName ? { targetName: reviewName, reviewContext: { reviewId: '33333333-3333-4333-8333-333333333333',
       documentId: '44444444-4444-4444-8444-444444444444', participantTelegramId: '1234' } } : {}) });
   const config = { ...getConfig(), CRM_VOICE_WEBHOOK_SECRET: 'synthetic-credential-for-tests-only', CRM_VOICE_STORE_URL: CRM_STORE_URL,
@@ -33,6 +33,8 @@ async function fixture(reviewName?: string) {
     TWILIO_PHONE_NUMBER: '+15555550000', PUBLIC_BASE_URL: 'https://bridge.example', DRY_RUN_CALLS: false };
   const controller = new CrmVoiceController(config, {
     store: async body => {
+      if (body.action === 'callback_capabilities') return {callbackCapabilities:{enabled:callback}};
+      if (body.action === 'callback_tool') return {toolResult:{ok:true,answer:'Authorized synthetic CRM answer',requestId:body.requestId}};
       if (body.action === 'review_context') return { reviewContext: { ...request.reviewContext,
         title: 'Sample brochure', questions: ['What wording should change?'], constraints: '', briefing: 'Two page brochure.', pages: [] } };
       if (body.action === 'claim') return { claimed: true };
@@ -64,6 +66,23 @@ async function fixture(reviewName?: string) {
 
 beforeEach(() => { fake.sessions.length = 0; });
 describe('CRM media lifecycle with synthetic Twilio and GPT-Live', () => {
+  it('returns research through the same live session while accepting caller audio', async () => {
+    const f = await fixture(undefined, true);
+    try {
+      const {client,live} = await f.connect();
+      expect(live.options.voice).toBe('cedar');
+      expect(live.options.backendTools.map((t:any)=>t.name)).toEqual([
+        'search_callback_crm','research_callback_question','get_callback_task','save_callback_followup']);
+      expect(live.options.instructions).toContain('saved task can finish after hang-up');
+      expect(await live.options.executeBackendTool('search_callback_crm',{query:'clinic'},'call_syn'))
+        .toMatchObject({ok:true,answer:'Authorized synthetic CRM answer',requestId:'call_syn'});
+      client.send(JSON.stringify({event:'media',media:{payload:'AQID'}}));
+      await vi.waitFor(()=>expect(live.inputs).toEqual(['AQID']));
+      client.send(JSON.stringify({event:'stop'}));
+      await vi.waitFor(()=>expect(f.events.at(-1)?.type).toBe('terminal'));
+      expect(await live.options.executeBackendTool('search_callback_crm',{query:'clinic'},'call_late')).toMatchObject({ok:false});
+    } finally {await f.close();}
+  });
   it('connects a requested review without AMD and starts with the named, directed interview', async () => {
     const f = await fixture('Theo Example');
     try {

@@ -43,6 +43,28 @@ Set these in Lovable/Supabase, not in browser code:
 
 ## Notes
 
+### User-requested callback research (2026-09-15)
+
+- Before dialing a custom call, query the signed CRM store for
+  `callback_capabilities`. Only affirmative server-derived callback authority
+  enables CRM search, public research, task retrieval and explicit saved follow-up.
+  Reviews/check-ins never query for or receive these tools. Protocol 1 start JSON,
+  voice, media transport, opening and AMD behavior are unchanged.
+- `callback_tool` uses the current session and provider function `call_id` as
+  its stable request ID. No model-supplied identity, destination or SQL is accepted.
+  The server must revalidate authority and enforce idempotency on every action.
+  Caller transcript is flushed before saving consent. Tool failures cannot count
+  as saved commitments; late results cannot enter a closed call.
+- Backend contract is additive; unknown/unavailable capability actions disable
+  tools without changing existing call startup. Store responses must finish
+  within the existing ten-second deadline; slow research returns a durable task
+  for polling and server-side continuation. Background delivery belongs to the
+  CRM worker and requires a saved explicit delivery request.
+- Verification: TypeScript build and 320 synthetic tests pass, including audio
+  input while returning a CRM result, role/scope gating, bad arguments, transcript
+  persistence, hangup races and provider call ID propagation. No real phone call
+  or model-audio test is included in this suite.
+
 ### GPT-Live question handoff hardening (2026-09-13)
 
 - Caller transcript fragments now settle only after the existing 650 ms caller

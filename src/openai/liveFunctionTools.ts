@@ -13,7 +13,7 @@ export class LiveFunctionDispatcher {
   private responseByDelegation = new Map<string, string>();
   private closed = false;
   constructor(private readonly send: (event: Record<string, unknown>) => void,
-    private readonly execute: (name: string, args: unknown) => Promise<unknown>) {}
+    private readonly execute: (name: string, args: unknown, callId?: string) => Promise<unknown>) {}
 
   accept(envelope: Record<string, any>): void {
     if (this.closed || envelope.type !== 'response.event') return;
@@ -47,7 +47,7 @@ export class LiveFunctionDispatcher {
       let output: unknown;
       try {
         if (item.arguments.length > 16000) throw new Error('arguments_too_large');
-        output = await this.execute(item.name, JSON.parse(item.arguments));
+        output = await this.execute(item.name, JSON.parse(item.arguments), item.call_id);
       } catch {
         output = { ok: false, error: 'document_lookup_unavailable',
           guidance: 'Do not guess visual details or promise feasibility. Ask a clarification or capture the question for Alex.' };
