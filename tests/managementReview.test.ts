@@ -44,7 +44,7 @@ describe('management review document inspection', () => {
     const request = {sessionId:reference.reviewId,idempotencyKey:'test',to:'+15555550123',missionPrompt:'Review document',reportPeriod:'custom',reviewContext:reference};
     expect(crmStartSchema.parse(request).reviewContext).toEqual(reference);
     expect(() => crmStartSchema.parse({...request,reportPeriod:'weekly'})).toThrow();
-    expect(crmInterviewInstructions(crmStartSchema.parse(request))).toContain('call audio is not retained');
+    expect(crmInterviewInstructions(crmStartSchema.parse(request))).not.toContain('call audio is not retained');
   });
 });
 

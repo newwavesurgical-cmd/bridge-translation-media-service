@@ -1,4 +1,5 @@
 import twilio from 'twilio';
+import { callRecordingOptions } from './recordings.js';
 import type { AppConfig } from '../config.js';
 import type { AgentCallSession } from '../agentCallRegistry.js';
 import type { CallSession } from '../callRegistry.js';
@@ -16,6 +17,7 @@ export async function originateTranslatedCall(config: AppConfig, session: CallSe
   twimlUrl.searchParams.set('callId', session.callId);
 
   const call = await client.calls.create({
+    ...callRecordingOptions,
     to: session.data.to,
     from: config.TWILIO_PHONE_NUMBER,
     url: twimlUrl.toString(),
@@ -62,6 +64,7 @@ export function buildAgentCallCreateOptions(config: AppConfig, session: AgentCal
   }
 
   return {
+    ...callRecordingOptions,
     to: session.data.to,
     from: config.TWILIO_PHONE_NUMBER,
     url: twimlUrl.toString(),

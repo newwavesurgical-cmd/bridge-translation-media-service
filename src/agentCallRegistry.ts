@@ -1264,7 +1264,7 @@ export class AgentCallSession {
       questionEventTail: this.questionEvents.slice(-MAX_QUESTION_EVENT_TAIL),
       dtmfTail: this.record.dtmf.slice(-MAX_CONTROL_TAIL),
       transcriptDiagnosticNote:
-        'In-memory transcript/debug deltas only. Raw audio is not recorded. Cleared on service restart/deploy.',
+        'In-memory transcript/debug deltas only. This in-memory debug data is cleared on service restart/deploy. Outbound phone audio is recorded separately by Twilio.',
       transcriptDeltaRetainedCount: this.record.transcripts.length,
       transcriptTail: this.record.transcripts.slice(-MAX_TRANSCRIPT_TAIL),
       lastActivityAt: this.record.lastActivityAt ?? null,
