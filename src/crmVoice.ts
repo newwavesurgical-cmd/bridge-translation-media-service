@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import { OpenAiGptLiveVoiceSession } from './openai/gptLiveVoiceSession.js';
 import { completeTwilioCall } from './twilio/client.js';
-import { reviewReferenceSchema, reviewContextSchema, reviewDocumentTool, inspectReviewDocument } from './managementReview.js';
+import { reviewReferenceSchema, reviewContextSchema, reviewDocumentTool, inspectReviewDocument, sameReviewReference } from './managementReview.js';
 import type { ReviewContext } from './managementReview.js';
 import { CallbackSupervisor, supervisorEnabled, supervisorInstructions, supervisorConfirmTool } from './callbackSupervisor.js';
 import { callbackEnabled, callbackExecutor, callbackInstructions, callbackTools } from './callbackTools.js';
@@ -40,7 +40,8 @@ export function canonicalCrmStartJson(p: CrmStart): string {
     ...(p.reviewContext ? { reviewContext: {
       reviewId: p.reviewContext.reviewId,
       documentId: p.reviewContext.documentId,
-      participantTelegramId: p.reviewContext.participantTelegramId,
+      ...(p.reviewContext.participantTelegramId ? { participantTelegramId: p.reviewContext.participantTelegramId } :
+        { participantId: p.reviewContext.participantId }),
     } } : {}),
   });
 }
@@ -193,6 +194,14 @@ export function crmOpening(request: CrmStart): { firstUtterance: string; spokenP
   if (request.reviewContext) {
     const name = (request.targetName || '').trim().split(/\s+/)[0]
       .replace(/[^\p{L}\p{M}'’-]/gu, '').slice(0, 50);
+    if (request.reviewContext.participantId) {
+      if (spanish) return { firstUtterance: `Hola${name ? ` ${name}` : ''}. Soy el asistente de inteligencia artificial de New Wave.`,
+        spokenPurpose: 'Alex me pidió que hablara contigo sobre los cambios del folleto. ¿Te viene bien hablar unos minutos?' };
+      if (portuguese) return { firstUtterance: `Olá${name ? ` ${name}` : ''}. Sou o assistente de inteligência artificial da New Wave.`,
+        spokenPurpose: 'Alex pediu que eu conversasse com você sobre as alterações do documento. Podemos conversar agora?' };
+      return { firstUtterance: `Hi${name ? ` ${name}` : ''}. I am New Wave’s AI assistant.`,
+        spokenPurpose: 'Alex asked me to discuss the document changes with you. Is now a convenient time?' };
+    }
     if (spanish) return { firstUtterance: `¡Hola${name ? ` ${name}` : ''}! Soy el asistente de inteligencia artificial de NWE.`,
       spokenPurpose: 'Llamo para revisar el documento que Alex compartió contigo. ¿Tienes un momento para repasarlo?' };
     if (portuguese) return { firstUtterance: `Olá${name ? ` ${name}` : ''}! Sou o assistente de inteligência artificial da NWE.`,
@@ -273,9 +282,7 @@ class CrmCall {
                   const result = await this.store({ action: 'review_context', sessionId: this.request.sessionId,
                     ...this.request.reviewContext, pageNumbers });
                   const context = reviewContextSchema.parse(result.reviewContext);
-                  if (context.reviewId !== this.request.reviewContext!.reviewId ||
-                    context.documentId !== this.request.reviewContext!.documentId ||
-                    context.participantTelegramId !== this.request.reviewContext!.participantTelegramId)
+                  if (!sameReviewReference(context, this.request.reviewContext!))
                     throw new Error('review_context_mismatch');
                   return context;
                 });
@@ -366,7 +373,7 @@ export class CrmVoiceController {
       this.config.TWILIO_PHONE_NUMBER && this.config.PUBLIC_BASE_URL?.startsWith('https://'));
     return { provider: 'gpt-live', protocolVersion: 1, configured,
       ready: configured && this.config.CRM_VOICE_ENABLED === true && !this.config.DRY_RUN_CALLS,
-      enabled: this.config.CRM_VOICE_ENABLED === true, durableJournal: true, callbackToolsSupported: true, supervisorProtocolVersion: 1, activeCalls: this.sessions.size };
+      enabled: this.config.CRM_VOICE_ENABLED === true, durableJournal: true, phoneOnlyReviewSupported: true, callbackToolsSupported: true, supervisorProtocolVersion: 1, activeCalls: this.sessions.size };
   }
   async start(request: CrmStart) {
     if (!this.readiness().ready) throw new Error('crm_voice_not_ready');
@@ -374,8 +381,7 @@ export class CrmVoiceController {
     if (request.reviewContext) {
       const result = await this.store({ action: 'review_context', sessionId: request.sessionId, ...request.reviewContext, pageNumbers: [] });
       const context = reviewContextSchema.parse(result.reviewContext);
-      if (context.reviewId !== request.reviewContext.reviewId || context.documentId !== request.reviewContext.documentId ||
-        context.participantTelegramId !== request.reviewContext.participantTelegramId) throw new Error('review_context_mismatch');
+      if (!sameReviewReference(context, request.reviewContext)) throw new Error('review_context_mismatch');
       review = context;
     }
     // Resolve before dialing, so capability lookup cannot delay the opening after answer.

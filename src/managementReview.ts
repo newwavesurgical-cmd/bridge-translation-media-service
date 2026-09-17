@@ -2,15 +2,26 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import type { LiveFunctionTool } from './openai/liveFunctionTools.js';
 
-export const reviewReferenceSchema = z.object({
-  reviewId: z.string().uuid(), documentId: z.string().uuid(), participantTelegramId: z.string().regex(/^\d+$/)
-}).strict();
+const reviewIdentity = {
+  reviewId: z.string().uuid(), documentId: z.string().uuid(),
+  participantTelegramId: z.string().regex(/^\d+$/).optional(),
+  participantId: z.string().uuid().optional(),
+};
+const oneIdentity = (v: {participantTelegramId?: string; participantId?: string}) =>
+  Boolean(v.participantTelegramId) !== Boolean(v.participantId);
+export const reviewReferenceSchema = z.object(reviewIdentity).strict()
+  .refine(oneIdentity, 'Exactly one participant identity is required');
+export type ReviewReference = z.infer<typeof reviewReferenceSchema>;
+export function sameReviewReference(a: ReviewReference, b: ReviewReference): boolean {
+  return a.reviewId === b.reviewId && a.documentId === b.documentId &&
+    a.participantTelegramId === b.participantTelegramId && a.participantId === b.participantId;
+}
 export const reviewContextSchema = z.object({
-  reviewId: z.string().uuid(), documentId: z.string().uuid(), participantTelegramId: z.string().regex(/^\d+$/),
+  ...reviewIdentity,
   title: z.string(), questions: z.array(z.string()), constraints: z.string(), briefing: z.string(),
   pages: z.array(z.object({ number: z.number().int().positive(), text: z.string(),
     imageBase64: z.string().max(12_000_000).optional(), mimeType: z.enum(['image/png', 'image/jpeg']).optional() }))
-});
+}).refine(oneIdentity, 'Exactly one participant identity is required');
 export type ReviewContext = z.infer<typeof reviewContextSchema>;
 export const reviewDocumentTool: LiveFunctionTool = {
   type: 'function', name: 'inspect_review_document', strict: true,

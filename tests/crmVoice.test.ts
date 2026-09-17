@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { getConfig } from '../src/config.js';
 import { completeTwilioCall } from '../src/twilio/client.js';
 import { buildGptLiveSessionStart } from '../src/openai/gptLiveVoiceSession.js';
-import { CrmJournal, CrmVoiceController, CRM_STORE_URL, crmStartSchema, canonicalCrmStartJson, crmInterviewInstructions, signature, signedRequestValid, validTwilioStreamSignature, type Store } from '../src/crmVoice.js';
+import { CrmJournal, CrmVoiceController, CRM_STORE_URL, crmStartSchema, canonicalCrmStartJson, crmInterviewInstructions, crmOpening, signature, signedRequestValid, validTwilioStreamSignature, type Store } from '../src/crmVoice.js';
 
 vi.mock('../src/twilio/client.js', () => ({ completeTwilioCall: vi.fn(async () => {}) }));
 const secret = 'synthetic-test-only-secret-0123456789';
@@ -271,5 +271,42 @@ describe('separate reporting mission', () => {
     expect(policy).toContain('Confirm office hours.');
     expect(policy).not.toContain('Three check-ins');
     expect(policy).not.toContain('plans for the next period');
+  });
+});
+
+
+describe('phone-only review identity', () => {
+  const reference = {reviewId:'22222222-2222-4222-8222-222222222222', documentId:'33333333-3333-4333-8333-333333333333', participantId:'44444444-4444-4444-8444-444444444444'};
+  const phoneRequest = crmStartSchema.parse({...request,reportPeriod:'custom',language:'Spanish',targetName:'Raul Sanchez',reviewContext:reference});
+  const ctx = {...reference,title:'Brochure',questions:[],constraints:'',briefing:'',pages:[]};
+  it('rejects absent, mixed and invalid participant identities', () => {
+    for (const ref of [{...reference,participantId:undefined},{...reference,participantTelegramId:'1234'}, {...reference,participantId:'1234'}])
+      expect(() => crmStartSchema.parse({...phoneRequest,reviewContext:ref})).toThrow();
+  });
+  it('hashes the exact phone identity and greets by name in Spanish', async () => {
+    const wire=JSON.parse(canonicalCrmStartJson(phoneRequest));
+    expect(wire.reviewContext).toEqual(reference);
+    expect(Object.keys(wire.reviewContext)).toEqual(['reviewId','documentId','participantId']);
+    const store:Store=vi.fn(async body=>body.action==='review_context'?{reviewContext:ctx}:body.action==='claim'?{claimed:true}:{accepted:true});
+    const dial=vi.fn(async()=> 'CA'+'a'.repeat(32));
+    const controller=new CrmVoiceController(config(),{store,dial});
+    expect((await controller.start(phoneRequest)).startState).toBe('confirmed');
+    expect(dial).toHaveBeenCalledTimes(1);
+    expect(crmOpening(phoneRequest).firstUtterance).toBe('Hola Raul. Soy el asistente de inteligencia artificial de New Wave.');
+    expect(crmOpening(phoneRequest).spokenPurpose).not.toContain('compartió');
+    expect(controller.readiness().phoneOnlyReviewSupported).toBe(true);
+    await controller.close();
+  });
+  it.each([
+    {...ctx,participantId:'55555555-5555-4555-8555-555555555555'},
+    {...ctx,reviewId:'55555555-5555-4555-8555-555555555555'},
+    {...ctx,documentId:'55555555-5555-4555-8555-555555555555'},
+    {...ctx,participantId:undefined,participantTelegramId:'1234'},
+    {...ctx,participantTelegramId:'1234'}
+  ])('refuses context identity substitution before claim and dial',async wrong=>{
+    const store:Store=vi.fn(async()=>({reviewContext:wrong}));
+    const dial=vi.fn();const controller=new CrmVoiceController(config(),{store,dial});
+    await expect(controller.start(phoneRequest)).rejects.toThrow();
+    expect(store).toHaveBeenCalledTimes(1);expect(dial).not.toHaveBeenCalled();await controller.close();
   });
 });

@@ -160,3 +160,19 @@ single pair twice. No checkout, duration, quality or units-used gate applies.
 
 References: [Twilio signature validation](https://www.twilio.com/docs/usage/security)
 and [GPT-Live guide](https://developers.openai.com/api/docs/guides/live).
+
+
+## Owner-authorized phone-only reviews (2026-09-17)
+
+Review references accept exactly one identity: the existing numeric
+`participantTelegramId`, or the real review `participantId` UUID for a phone-only
+contact. Both/absent identities are rejected. Canonical JSON preserves the old
+Telegram wire format; phone-only order is `reviewId`, `documentId`, `participantId`.
+The signed CRM store must validate that identity against the canonical session,
+review, and pinned document. The bridge compares both identity kind and value at
+preflight and every document lookup. This grants no new caller-side authority.
+`crmVoice.phoneOnlyReviewSupported` advertises compatibility. Phone-only opening
+greets the contact by first name without asserting a document was already sent.
+Only CRM-owned durable review jobs may initiate this lane; contact registration
+alone is not a call request. Callback/check-in routes and Telegram-history policy
+remain unchanged.
