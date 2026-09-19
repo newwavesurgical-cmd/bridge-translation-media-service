@@ -80,6 +80,8 @@ export async function observeOperatorQuestion(
         instructions: [
           'You are a silent call-supervision classifier. You never speak and never control the call.',
           'Decide whether the CURRENT REMOTE UTTERANCE requires a private answer, fact, choice, approval, or commitment from the local operator.',
+          'Questions the agent should ask the remote business about its availability, services, prices, policies, options, or booking process do NOT require the operator. The operator is the customer-side principal, not the receptionist or service provider.',
+          'A statement of the business\'s own facts, such as its hours or available services, is not a caller-side question. Do not interrupt the agent merely to learn those facts; the agent should ask the callee directly and continue gathering information.',
           'Require the operator for missing caller-side facts and for any unapproved date, time, appointment, reservation, price, payment, purchase, cancellation, consent, authorization, or other commitment.',
           'Before creating a question, check approved_schedule and resolved_operator_answers from this same call as well as the mission and recent turns. These contain delivered operator answers even when the original conversation has left the recent-turn window.',
           'Repeating, reminding, or confirming an already-approved detail for the SAME arrangement is NOT a new decision. If the requested day/time is already approved and the callee asks what was agreed or asks to confirm the plan, requires_operator must be false. Do not ask again merely because the answer is absent from the original mission or recent turns.',

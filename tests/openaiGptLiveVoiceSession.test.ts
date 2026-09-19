@@ -17,6 +17,8 @@ describe('GPT-Live decision mode instructions', () => {
     );
     expect(instructions).toContain('BEST-JUDGMENT MODE');
     expect(instructions).toContain('select the earliest option');
+    expect(instructions).toContain('Ask the remote business directly for its availability');
+    expect(instructions).toContain('If the callee says you are talking over them');
   });
 });
 

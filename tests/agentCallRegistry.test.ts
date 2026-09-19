@@ -51,6 +51,21 @@ describe('agent decision mode safety boundary', () => {
     expect(suppressActiveOutput).not.toHaveBeenCalled();
   });
 
+  it('separates the operator mission from generic prompt-policy examples', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: [
+        '=== MISSION (operator brief) ===',
+        'Objective: Ask whether massage and facial are available Sunday at 10 am.',
+        '=== END MISSION ===',
+        'Policy example: Wednesday at noon is an appointment choice.'
+      ].join('\n')
+    });
+    const facts = (session as unknown as { operatorMissionFactsText: () => string }).operatorMissionFactsText();
+    expect(facts).toContain('massage and facial');
+    expect(facts).not.toContain('Wednesday');
+  });
+
   it('reclassifies a pending choice on mode switch but preserves a missing-fact hard stop', async () => {
     const registry = new AgentCallRegistry(config);
     const routine = registry.create({
@@ -588,6 +603,8 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('speak only in English');
     expect(instructions).toContain('Never ask the person who requested the call for private information out loud');
     expect(instructions).toContain('ABSOLUTE OPERATOR BOUNDARY');
+    expect(instructions).toContain('CALLEE-FIRST QUESTIONS');
+    expect(instructions).toContain('ask the spa whether both services are available');
     expect(instructions).toContain('Caller-side facts include patient or child names');
     expect(instructions).toContain('Treat the Mission section as your working call memory');
     expect(instructions).toContain('SINGLE ACTIVE MISSION BOUNDARY');
