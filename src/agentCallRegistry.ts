@@ -81,12 +81,16 @@ export type AgentDecisionMode = 'ask_operator' | 'best_judgment';
 export function decisionModeRequiresOperator(
   mode: AgentDecisionMode,
   text: string,
-  reason = ''
+  reason = '',
+  kind?: OperatorQuestionKind
 ): boolean {
   if (mode === 'ask_operator') return true;
-  return /(?:password|passcode|\bpin\b|credit card|payment card|card number|cvv|social security|\bssn\b|date of birth|\bdob\b|account number|routing number|payment authorization|charge|purchase|\bbuy\b|cancel(?:lation)?|legal consent|medical consent|authorize|caller-side fact|missing fact|identity verification)/i.test(
-    `${text} ${reason}`
-  );
+  // A classifier's "question" requiring operator input is a missing fact,
+  // not an ordinary scheduling choice. Its free-form reason is not a safe
+  // authorization signal (the deterministic commitment reason mentions
+  // "consent" even for a harmless appointment time).
+  if (kind === 'question' || /caller-side information|missing (?:caller )?fact|forbidden|prohibited|outside (?:the )?mission/i.test(reason)) return true;
+  return /(?:password|passcode|\bpin\b|credit card|payment card|card number|cvv|social security|\bssn\b|date of birth|\bdob\b|account number|routing number|payment|charge|purchase|\bbuy\b|cancel(?:lation)?|consent|authorize|authorization|identity verif|contrase(?:ñ|n)a|tarjeta|pago|comprar|cancelar|consentimiento|autorizar|verificaci(?:ó|o)n de identidad)/i.test(text);
 }
 
 export interface CreateAgentCallRequest {
@@ -774,9 +778,17 @@ export class AgentCallSession {
         return entry;
       }
       this.record.decisionMode = requestedMode;
-      if (requestedMode === 'best_judgment' && this.record.pendingOperatorQuestion?.blocking) {
-        this.record.pendingOperatorQuestion.blocking = false;
-        this.interruptOperatorDecisionHold();
+      const pending = this.record.pendingOperatorQuestion;
+      if (pending) {
+        const wasBlocking = pending.blocking;
+        pending.blocking = decisionModeRequiresOperator(
+          requestedMode, pending.sourceText ?? pending.text, pending.reason, pending.kind
+        );
+        if (wasBlocking && !pending.blocking) this.interruptOperatorDecisionHold();
+        if (!wasBlocking && pending.blocking) {
+          this.record.counters.operatorQuestionsBlocked += 1;
+          this.activateOperatorDecisionHold(pending);
+        }
       }
       if (this.agent && this.record.state === 'live') {
         const modeInstruction = requestedMode === 'best_judgment'
@@ -1755,7 +1767,8 @@ export class AgentCallSession {
       blocking: decisionModeRequiresOperator(
         this.record.decisionMode,
         classification.text,
-        classification.reason
+        classification.reason,
+        classification.kind
       ),
       reason: classification.reason,
       observedBy: current?.observedBy ?? 'deterministic',
@@ -1930,7 +1943,8 @@ export class AgentCallSession {
       blocking: decisionModeRequiresOperator(
         this.record.decisionMode,
         sourceText,
-        observation.reason
+        observation.reason,
+        observation.kind
       ),
       reason: observation.reason,
       observedBy: 'contextual_ai',
@@ -1940,7 +1954,7 @@ export class AgentCallSession {
       updatedAt: timestamp
     };
     const newlyDetected = !current || !sameQuestion;
-    const newlyBlocking = !current?.blocking || !sameQuestion;
+    const newlyBlocking = next.blocking && (!current?.blocking || !sameQuestion);
     if (sameQuestion && current) this.record.counters.operatorQuestionObserverEnrichments += 1;
     if (newlyDetected) {
       this.operatorQuestionObserverGeneration += 1;

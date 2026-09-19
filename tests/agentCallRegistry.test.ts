@@ -20,6 +20,60 @@ describe('agent decision mode safety boundary', () => {
     expect(decisionModeRequiresOperator('best_judgment', 'What is the card number?')).toBe(true);
     expect(decisionModeRequiresOperator('best_judgment', 'What is her date of birth?')).toBe(true);
     expect(decisionModeRequiresOperator('best_judgment', 'Should I cancel it?')).toBe(true);
+    expect(decisionModeRequiresOperator('best_judgment', 'What is her name?', 'Caller-side information is missing.', 'question')).toBe(true);
+    expect(decisionModeRequiresOperator('best_judgment', 'May we have your consent?', '', 'commitment')).toBe(true);
+    expect(decisionModeRequiresOperator('best_judgment', 'Would you like Tuesday?', 'This is forbidden by the mission.', 'choice')).toBe(true);
+  });
+
+  it('does not hold a routine contextual choice in best-judgment mode', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000', missionPrompt: 'Book the earliest available appointment.',
+      decisionMode: 'best_judgment', languageLock: 'English'
+    });
+    const suppressActiveOutput = vi.fn();
+    const mutable = session as unknown as {
+      agent: object;
+      applyContextualQuestionObservation: (
+        text: string, observation: object, sourceUtteranceId: number, generation: number, runId: number
+      ) => void;
+    };
+    mutable.agent = { suppressActiveOutput };
+    mutable.applyContextualQuestionObservation('Would Tuesday at 3 PM work?', {
+      requiresOperator: true, kind: 'commitment', questionEn: 'May I accept Tuesday at 3 PM?',
+      questionEs: '¿Puedo aceptar el martes a las 3?', confidence: 0.99,
+      reason: 'The callee requested a date, time, price, consent, or other commitment.'
+    }, 1, 0, 1);
+    expect(session.diagnostics()).toMatchObject({
+      pendingOperatorQuestion: { blocking: false },
+      counters: { operatorQuestionsBlocked: 0 }
+    });
+    expect(suppressActiveOutput).not.toHaveBeenCalled();
+  });
+
+  it('reclassifies a pending choice on mode switch but preserves a missing-fact hard stop', async () => {
+    const registry = new AgentCallRegistry(config);
+    const routine = registry.create({
+      to: '+15551230000', missionPrompt: 'Schedule an appointment.', languageLock: 'English'
+    });
+    const suppressActiveOutput = vi.fn();
+    const mutable = routine as unknown as { agent: object; considerOperatorQuestion: (text: string) => void };
+    mutable.agent = { suppressActiveOutput };
+    mutable.considerOperatorQuestion('Can we do Tuesday at 3 PM?');
+    expect(routine.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+    await routine.receiveControl({ kind: 'set_decision_mode', text: 'best_judgment' });
+    expect(routine.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: false });
+    await routine.receiveControl({ kind: 'set_decision_mode', text: 'ask_operator' });
+    expect(routine.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+    expect(suppressActiveOutput).toHaveBeenCalledTimes(2);
+
+    const missing = registry.create({
+      to: '+15551230001', missionPrompt: 'Schedule an appointment.', languageLock: 'English'
+    });
+    const missingMutable = missing as unknown as { considerOperatorQuestion: (text: string) => void };
+    missingMutable.considerOperatorQuestion('What is your account number?');
+    expect(missing.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
+    await missing.receiveControl({ kind: 'set_decision_mode', text: 'best_judgment' });
+    expect(missing.diagnostics().pendingOperatorQuestion).toMatchObject({ blocking: true });
   });
 });
 import type { AppConfig } from '../src/config.js';
