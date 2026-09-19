@@ -5,9 +5,23 @@ import { encodeMuLaw } from '../src/audio/mulaw.js';
 import {
   AgentCallRegistry,
   buildAgentInstructions,
+  decisionModeRequiresOperator,
   detectConversationalAnsweringService,
   detectIvrPrompt
 } from '../src/agentCallRegistry.js';
+
+describe('agent decision mode safety boundary', () => {
+  it('keeps routine scheduling autonomous only in best-judgment mode', () => {
+    expect(decisionModeRequiresOperator('ask_operator', 'Would 3 PM work?', 'schedule choice')).toBe(true);
+    expect(decisionModeRequiresOperator('best_judgment', 'Would 3 PM work?', 'schedule choice')).toBe(false);
+  });
+
+  it('still blocks missing facts and high-impact commitments', () => {
+    expect(decisionModeRequiresOperator('best_judgment', 'What is the card number?')).toBe(true);
+    expect(decisionModeRequiresOperator('best_judgment', 'What is her date of birth?')).toBe(true);
+    expect(decisionModeRequiresOperator('best_judgment', 'Should I cancel it?')).toBe(true);
+  });
+});
 import type { AppConfig } from '../src/config.js';
 import { createBridgeMediaServer } from '../src/http.js';
 import { buildAgentCallCreateOptions } from '../src/twilio/client.js';

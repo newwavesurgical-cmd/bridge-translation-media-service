@@ -4,10 +4,21 @@ import type { AgentOutputContext } from '../src/openai/agentVoiceSession.js';
 import { encodeMuLaw } from '../src/audio/mulaw.js';
 import {
   OpenAiGptLiveVoiceSession,
+  buildGptLiveConversationInstructions,
   buildGptLiveOpeningDirective,
   buildGptLiveSessionStart,
   resolveGptLiveVoice
 } from '../src/openai/gptLiveVoiceSession.js';
+
+describe('GPT-Live decision mode instructions', () => {
+  it('keeps routine choices moving in best-judgment mode', () => {
+    const instructions = buildGptLiveConversationInstructions(
+      'Language lock: en-US. DECISION PADDLE — USE BEST JUDGMENT. Mission: book the earliest Sunday appointment.'
+    );
+    expect(instructions).toContain('BEST-JUDGMENT MODE');
+    expect(instructions).toContain('select the earliest option');
+  });
+});
 
 const config: AppConfig = {
   PORT: 8787,

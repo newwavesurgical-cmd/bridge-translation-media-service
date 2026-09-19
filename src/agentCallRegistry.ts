@@ -76,6 +76,18 @@ export const contextualMicroInterventions = [
 
 export type ContextualMicroIntervention = (typeof contextualMicroInterventions)[number];
 export type AgentCallEngine = 'realtime' | 'gpt-live-1';
+export type AgentDecisionMode = 'ask_operator' | 'best_judgment';
+
+export function decisionModeRequiresOperator(
+  mode: AgentDecisionMode,
+  text: string,
+  reason = ''
+): boolean {
+  if (mode === 'ask_operator') return true;
+  return /(?:password|passcode|\bpin\b|credit card|payment card|card number|cvv|social security|\bssn\b|date of birth|\bdob\b|account number|routing number|payment authorization|charge|purchase|\bbuy\b|cancel(?:lation)?|legal consent|medical consent|authorize|caller-side fact|missing fact|identity verification)/i.test(
+    `${text} ${reason}`
+  );
+}
 
 export interface CreateAgentCallRequest {
   to: string;
@@ -86,6 +98,7 @@ export interface CreateAgentCallRequest {
   systemPrompt?: string;
   languageLock?: string;
   agentEngine?: AgentCallEngine;
+  decisionMode?: AgentDecisionMode;
   disclosureEnabled?: boolean;
   /** Prepared callee-facing purpose, already resolved in the language lock. */
   spokenPurpose?: string;
@@ -250,6 +263,7 @@ export interface AgentCallRecord {
   systemPrompt?: string;
   languageLock?: string;
   agentEngine: AgentCallEngine;
+  decisionMode: AgentDecisionMode;
   disclosureEnabled: boolean;
   spokenPurpose?: string;
   voice: string;
@@ -357,6 +371,7 @@ export class AgentCallRegistry {
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
       agentEngine: normalizeAgentEngine(request.agentEngine),
+      decisionMode: request.decisionMode === 'best_judgment' ? 'best_judgment' : 'ask_operator',
       disclosureEnabled: request.disclosureEnabled ?? true,
       spokenPurpose: normalizeOptional(request.spokenPurpose),
       voice: normalizeVoice(request.voice, request.languageLock),
@@ -748,6 +763,34 @@ export class AgentCallSession {
       return entry;
     }
     this.lastControlSignature = { value: controlSignature(request.control, text), at: Date.now() };
+
+    if (request.kind === 'set_decision_mode') {
+      const requestedMode = normalizeOptional(request.text);
+      if (requestedMode !== 'ask_operator' && requestedMode !== 'best_judgment') {
+        entry.text = 'Decision mode must be ask_operator or best_judgment.';
+        entry.error = entry.text;
+        this.record.counters.controlsFailed += 1;
+        this.touch();
+        return entry;
+      }
+      this.record.decisionMode = requestedMode;
+      if (requestedMode === 'best_judgment' && this.record.pendingOperatorQuestion?.blocking) {
+        this.record.pendingOperatorQuestion.blocking = false;
+        this.interruptOperatorDecisionHold();
+      }
+      if (this.agent && this.record.state === 'live') {
+        const modeInstruction = requestedMode === 'best_judgment'
+          ? 'Switch to BEST-JUDGMENT mode now. Keep routine scheduling, preference, and service choices moving from the mission priorities. Never invent facts. Payment credentials or authorization, purchase, cancellation, legal or medical consent, identity verification, and mission-forbidden choices still require operator direction.'
+          : 'Switch to ASK-ME mode now. For any choice not explicitly authorized by the mission, use one brief natural hold phrase and wait silently for private operator direction.';
+        await this.agent.injectInstruction(modeInstruction, 'set_decision_mode', false);
+      }
+      entry.text = `Decision mode changed to ${requestedMode}.`;
+      entry.delivered = true;
+      this.record.counters.controlsDelivered += 1;
+      this.touch();
+      this.sendAppStatus();
+      return entry;
+    }
 
     if (isFirstUtteranceContractEnforcement(request.text ?? request.note ?? text)) {
       entry.text = 'Ignored duplicate first-utterance contract enforcement; startup is enforced by the media bridge.';
@@ -1189,6 +1232,7 @@ export class AgentCallSession {
       callerName: this.record.callerName ?? null,
       languageLock: this.record.languageLock ?? null,
       agentEngine: this.record.agentEngine,
+      decisionMode: this.record.decisionMode,
       disclosureEnabled: this.record.disclosureEnabled,
       preparedSpokenPurpose: Boolean(this.record.spokenPurpose),
       machineDetection: this.record.machineDetection,
@@ -1708,7 +1752,11 @@ export class AgentCallSession {
       displayTextEn: contextualText,
       displayTextEs: sameQuestion ? current?.displayTextEs : undefined,
       kind: classification.kind,
-      blocking: classification.blocking,
+      blocking: decisionModeRequiresOperator(
+        this.record.decisionMode,
+        classification.text,
+        classification.reason
+      ),
       reason: classification.reason,
       observedBy: current?.observedBy ?? 'deterministic',
       observerConfidence: current?.observerConfidence,
@@ -1879,7 +1927,11 @@ export class AgentCallSession {
       displayTextEn: observation.questionEn,
       displayTextEs: observation.questionEs,
       kind: observation.kind,
-      blocking: true,
+      blocking: decisionModeRequiresOperator(
+        this.record.decisionMode,
+        sourceText,
+        observation.reason
+      ),
       reason: observation.reason,
       observedBy: 'contextual_ai',
       observerConfidence: observation.confidence,
@@ -2528,6 +2580,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
   const mission = record.systemPrompt ?? record.missionPrompt;
   const spokenStyle = languageStyleInstruction(record.languageLock);
   const holdPhrase = holdPhraseInstruction(record.languageLock);
+  const bestJudgment = record.decisionMode === 'best_judgment';
 
   const openingRule = record.agentEngine === 'gpt-live-1'
     ? buildGptLiveOpeningDirective({
@@ -2566,11 +2619,19 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'Do not treat a known relationship or caller category as missing information. If the mission says the appointment, call, pickup, reservation, or issue is for my son, daughter, child, spouse, mother, father, patient, or another known relationship, answer with that known relationship when asked who it is for. Example: if asked "Who is the appointment for?" and the mission says it is for my son, say "It is for my son." If they need the name, date of birth, or another specific identifier and it is not in the mission, then use one allowed hold phrase and wait for private operator control.',
     'Only use a hold phrase for caller-side facts that are truly absent from the mission and prior private controls. If a partial answer is known, give the known part first, then ask a narrow follow-up only if useful, such as "It is for my son. Do you need his name?"',
     'If the remote callee asks for a caller-side fact you do not have, say one allowed hold phrase and stop speaking until a private operator control supplies it. Never ask the remote callee to tell you the caller-side fact. While waiting, if the callee asks whether you are still there or can hear them, answer briefly that you are still there and need one more moment; do not resolve or guess the missing fact.',
-    'HARD COMMITMENT GATE: never choose, accept, confirm, or imply approval of a date, time, appointment, reservation, price, payment, purchase, cancellation, consent, or authorization unless that exact decision is explicitly approved in the Mission or a fresh private operator control.',
+    bestJudgment
+      ? 'BEST-JUDGMENT MODE: keep routine scheduling, preference, and service choices moving from the Mission priorities. Choose the closest compliant option, ask one narrow follow-up, or seek an alternative. Never invent facts. Payment credentials/authorization, purchase, cancellation, legal or medical consent, identity verification, and mission-forbidden choices remain hard stops requiring private operator direction.'
+      : 'HARD COMMITMENT GATE: never choose, accept, confirm, or imply approval of a date, time, appointment, reservation, price, payment, purchase, cancellation, consent, or authorization unless that exact decision is explicitly approved in the Mission or a fresh private operator control.',
     'Previously delivered operator answers remain known facts for this same call. A request to repeat or confirm the SAME agreed date/time is a recap, not a new commitment: answer from those approved facts without another hold. Never apply that approval to a changed date/time, a new appointment, or additional terms.',
-    'A Mission goal to schedule, book, meet, visit, buy, or complete the call authorizes you to ask and gather information only. It never authorizes you to choose or accept a specific day, time, price, or other commitment.',
-    'When the remote callee proposes options or asks for any commitment that is not explicitly approved, say one allowed hold phrase and stop. Do not pick the most convenient option, infer approval from urgency, or continue negotiating on the operator\'s behalf.',
-    'A request to schedule as soon as possible does not authorize a specific day or time. Ask privately through the application and wait for the operator before accepting an offered slot.',
+    bestJudgment
+      ? 'A Mission goal plus its preferences and constraints authorizes routine choices that advance that goal. Prefer the closest compliant option and confirm it naturally; do not exceed stated price, timing, or service constraints.'
+      : 'A Mission goal to schedule, book, meet, visit, buy, or complete the call authorizes you to ask and gather information only. It never authorizes you to choose or accept a specific day, time, price, or other commitment.',
+    bestJudgment
+      ? 'When the remote callee proposes routine options, compare them with Mission priorities and choose the best compliant option. If none comply, ask for another option or decline tentatively; do not freeze the call.'
+      : 'When the remote callee proposes options or asks for any commitment that is not explicitly approved, say one allowed hold phrase and stop. Do not pick the most convenient option, infer approval from urgency, or continue negotiating on the operator\'s behalf.',
+    bestJudgment
+      ? 'For requests such as as soon as possible, select the earliest option that satisfies explicit Mission constraints. A price cap or unavailable day remains binding.'
+      : 'A request to schedule as soon as possible does not authorize a specific day or time. Ask privately through the application and wait for the operator before accepting an offered slot.',
     'Never say or imply: "the user", "the operator", "I am getting details from the user", "I am retrieving information from the user", "while I get the details", or any equivalent phrase.',
     'Do not begin the call with a hold phrase. Your first spoken turn must use the mission: greet naturally, confirm the contact if useful, state the concrete reason for the call before any role explanation, and ask the first mission-specific question.',
     holdPhrase,
