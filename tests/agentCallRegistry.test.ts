@@ -606,6 +606,7 @@ describe('AgentCallRegistry', () => {
     expect(instructions).toContain('CALLEE-FIRST QUESTIONS');
     expect(instructions).toContain('ask the spa whether both services are available');
     expect(instructions).toContain('Caller-side facts include patient or child names');
+    expect(instructions).toContain("the caller's available times, prices the caller will accept");
     expect(instructions).toContain('Treat the Mission section as your working call memory');
     expect(instructions).toContain('SINGLE ACTIVE MISSION BOUNDARY');
     expect(instructions).toContain('Never import or continue a subject, identity, business, warranty, offer, or storyline');

@@ -137,6 +137,9 @@ describe('OpenAI agent voice session startup gate', () => {
     expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
       'Never ask the remote callee to provide those caller-side facts'
     );
+    expect(String((sent[2].response as { instructions?: string }).instructions)).toContain(
+      'Ask the callee for these directly; never ask the operator merely because a business fact is unknown'
+    );
   });
 
   it('keeps the session alive when a stale cancel reports no active response', () => {

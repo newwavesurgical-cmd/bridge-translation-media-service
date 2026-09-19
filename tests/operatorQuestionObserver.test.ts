@@ -22,6 +22,7 @@ describe('operator question observer', () => {
         { question: 'What time can you come?', reply: 'relay_value: 4 PM' }
       ]);
       expect(body.instructions).toContain('Repeating, reminding, or confirming an already-approved detail');
+      expect(body.instructions).toContain('Asking the business for its own prices or openings is not a caller commitment');
       expect(body.instructions).toContain('A changed day/time, new appointment, added condition');
       return new Response(JSON.stringify({ output_text: JSON.stringify({
         requires_operator: false, kind: 'question', operator_question_en: '', operator_question_es: '',
