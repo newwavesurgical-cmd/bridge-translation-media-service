@@ -353,12 +353,18 @@ export interface AgentCallRecord {
 
 export class AgentCallRegistry {
   private readonly sessions = new Map<string, AgentCallSession>();
+  // A repeated start must never replace the session that owns a live carrier
+  // leg. Keep issued ids after disposal too: a late retry is still a retry.
+  private readonly issuedSessionIds = new Set<string>();
   private readonly recentDiagnostics: Array<Record<string, unknown>> = [];
 
   constructor(private readonly config: AppConfig) {}
 
   create(request: CreateAgentCallRequest): AgentCallSession {
     const sessionId = request.clientSessionId ?? makeId('agentcall');
+    if (this.issuedSessionIds.has(sessionId)) {
+      throw new DuplicateAgentCallSessionError(sessionId);
+    }
     if (!this.config.BRIDGE_MEDIA_SHARED_SECRET) {
       throw new Error('BRIDGE_MEDIA_SHARED_SECRET is required');
     }
@@ -453,6 +459,7 @@ export class AgentCallRegistry {
     };
 
     const session = new AgentCallSession(this.config, record, (diagnostics) => this.delete(sessionId, diagnostics));
+    this.issuedSessionIds.add(sessionId);
     this.sessions.set(sessionId, session);
     logAgentCallAudit('created', record, this.config);
     return session;
@@ -482,6 +489,13 @@ export class AgentCallRegistry {
 
   listRecentDiagnostics(): Array<Record<string, unknown>> {
     return this.recentDiagnostics;
+  }
+}
+
+export class DuplicateAgentCallSessionError extends Error {
+  constructor(sessionId: string) {
+    super(`agent call session ${sessionId} has already been started; inspect that session instead of redialing`);
+    this.name = 'DuplicateAgentCallSessionError';
   }
 }
 

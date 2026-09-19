@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { AppConfig } from './config.js';
 import { mediaRouterConfigured, openAiConfigured, twilioConfigured } from './config.js';
 import { CallRegistry } from './callRegistry.js';
-import { AgentCallRegistry, contextualMicroInterventions } from './agentCallRegistry.js';
+import { AgentCallRegistry, DuplicateAgentCallSessionError, contextualMicroInterventions } from './agentCallRegistry.js';
 import { InPersonRegistry, type InPersonDisplayView } from './inPersonRegistry.js';
 import { AppToAppRegistry, type AppToAppParticipant } from './appToAppRegistry.js';
 import { originateAgentCall, originateTranslatedCall } from './twilio/client.js';
@@ -566,6 +566,9 @@ export function createBridgeMediaServer(config: AppConfig) {
 
       return sendJson(res, 404, { error: 'not found' });
     } catch (error) {
+      if (error instanceof DuplicateAgentCallSessionError) {
+        return sendJson(res, 409, { error: 'agent call session already started; inspect the existing call, do not redial' });
+      }
       const message = error instanceof Error ? error.message : 'unknown error';
       return sendJson(res, 500, { error: message });
     }

@@ -4,6 +4,7 @@ import { bytesToBase64 } from '../src/audio/codec.js';
 import { encodeMuLaw } from '../src/audio/mulaw.js';
 import {
   AgentCallRegistry,
+  DuplicateAgentCallSessionError,
   buildAgentInstructions,
   decisionModeRequiresOperator,
   detectConversationalAnsweringService,
@@ -1855,6 +1856,16 @@ describe('AgentCallRegistry', () => {
 });
 
 describe('agent-call HTTP endpoint wiring', () => {
+  it('never replaces an issued session id, including after its active record is disposed', () => {
+    const registry = new AgentCallRegistry(config);
+    const request = { to: '+15551230000', clientSessionId: 'agent_duplicate_start_test' };
+    const first = registry.create(request);
+    expect(() => registry.create(request)).toThrow(DuplicateAgentCallSessionError);
+    expect(registry.get(request.clientSessionId)).toBe(first);
+    registry.delete(request.clientSessionId);
+    expect(() => registry.create(request)).toThrow(DuplicateAgentCallSessionError);
+  });
+
   it('wires the agent-call registry into the media server factory', () => {
     const { agentCallRegistry } = createBridgeMediaServer(config);
     const session = agentCallRegistry.create({
