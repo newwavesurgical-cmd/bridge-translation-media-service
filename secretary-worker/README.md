@@ -8,7 +8,7 @@ The endpoint accepts Ed25519-signed exact payloads with a 30-second clock window
 
 ## Scope
 
-The background execution scope is read, research, and proposal. CFO, Sales/CRM, CEO, Admin, CTO, Quality, Production, Research, Design and Order routes reuse existing source/approval rules. No automatic email sends or business-system writes are enabled. Those still need the established reviewed execution path; `verifiedMail` is false. A returned proposal must never be announced as completed.
+The background execution scope is read, research, and proposal. CFO, Sales/CRM, CEO, Admin, CTO, Quality, Production, Research, Design and Order routes reuse existing source/approval rules. Explicit email requests are delegated to the Admin Codex worker through send_assistant_email.py with fixed NWE Assistant sender Newwaveagental@gmail.com. Personal senders and sender/account overrides are rejected. The immutable per-request journal prevents automatic retries after unknown sends. Sent Mail must be verified before reporting sent. Earlier session results support requests such as email that; only the current user request authorizes sending. Other business-system writes remain disabled. `verifiedMail` remains false for the separate direct-mail UI tool: the secretary delegates through the background worker, not that tool. A returned proposal must never be announced as completed.
 
 ## Run
 
