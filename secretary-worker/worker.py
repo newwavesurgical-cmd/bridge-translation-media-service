@@ -30,6 +30,8 @@ def route_for(text):
     # Ordinary social exchanges never consume specialist work or emit progress.
     if not re.search(r'\b(can|could|would|please|find|show|give|what|how|who|when|where|look|send|email|check|create|make|need|want|tell|calculate|compare|review|search)\b', text, re.I):
         return None
+    if re.search(r'\b(sales|revenue|cases|moving average|quickbooks|financial|profit|invoice)\b', text, re.I):
+        return EXECUTIVE_ROUTES['cfo']
     if re.search(r'\b(email|e-mail|mail)\b', text, re.I):
         return EXECUTIVE_ROUTES['admin']
     if re.search(r'\b(dr\.?|doctor)\s+\w+',text,re.I):

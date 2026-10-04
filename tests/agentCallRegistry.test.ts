@@ -1914,7 +1914,7 @@ describe('NWE Secretary host profile', () => {
     });
     expect(session.data.decisionMode).toBe('best_judgment');
     const instructions = buildAgentInstructions(session.data);
-    expect(instructions).toContain('You are Missy, the NWE Secretary');
+    expect(instructions).toContain('You are NWE Assistant, the NWE Secretary');
     expect(instructions).toContain('Until an accepted event arrives');
     expect(instructions).not.toContain('ABSOLUTE OPERATOR BOUNDARY');
   });
