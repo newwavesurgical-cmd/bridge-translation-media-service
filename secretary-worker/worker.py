@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import sqlite3
 import sys
 import urllib.request
@@ -115,6 +116,14 @@ async def main():
     with (state/'worker.lock').open('w') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         worker=Worker(config,state)
-        await worker.run()
+        current=asyncio.current_task()
+        for sig in (signal.SIGTERM,signal.SIGINT):
+            asyncio.get_running_loop().add_signal_handler(sig,current.cancel)
+        try:
+            await worker.run()
+        finally:
+            for task in worker.tasks: task.cancel()
+            await asyncio.gather(*worker.tasks,return_exceptions=True)
+            worker.db.close()
 
 if __name__=='__main__': asyncio.run(main())
