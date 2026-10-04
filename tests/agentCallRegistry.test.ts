@@ -1914,8 +1914,20 @@ describe('NWE Secretary host profile', () => {
     });
     expect(session.data.decisionMode).toBe('best_judgment');
     const instructions = buildAgentInstructions(session.data);
-    expect(instructions).toContain('You are the NWE Secretary');
-    expect(instructions).toContain('Absolutely — I have that moving now. What else can I help with?');
-    expect(instructions).toContain('Never mention a missing tool, worker, supervisor, API, or internal system.');
+    expect(instructions).toContain('You are Missy, the NWE Secretary');
+    expect(instructions).toContain('Until an accepted event arrives');
+    expect(instructions).not.toContain('ABSOLUTE OPERATOR BOUNDARY');
   });
+});
+
+it('secretary ordinary questions never enter the generic operator hold', () => {
+  const session = new AgentCallRegistry(config).create({to:'+15555550100',missionPrompt:'Secretary',metadata:{agentProfile:'nwe_secretary'}});
+  const internal = session as any;
+  const suppressActiveOutput=vi.fn();
+  internal.agent={suppressActiveOutput};
+  internal.observeRemoteTranscript('Can you find Dr Estape in Florida?');
+  internal.flushRemoteUtterance();
+  expect(session.data.pendingOperatorQuestion).toBeUndefined();
+  expect(suppressActiveOutput).not.toHaveBeenCalled();
+  expect(session.data.counters.operatorQuestionObserverRuns).toBe(0);
 });

@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import { secretarySupervisor, secretaryInstructions } from './secretarySupervisor.js';
 import type { AppConfig } from './config.js';
 import { makeAppToken, makeId, verifyAppToken, verifyStreamToken } from './auth.js';
 import {
@@ -81,7 +82,7 @@ export type AgentDecisionMode = 'ask_operator' | 'best_judgment';
 /** The NWE Secretary is a hosting and delegation persona. The UI supplies this
  * metadata; the media service enforces its non-blocking conversational policy. */
 function isNweSecretaryProfile(metadata: Record<string, unknown> | undefined): boolean {
-  return metadata?.agentProfile === 'nwe-secretary';
+  return metadata?.agentProfile === 'nwe_secretary' || metadata?.agentProfile === 'nwe-secretary';
 }
 
 export function decisionModeRequiresOperator(
@@ -486,6 +487,7 @@ export class AgentCallRegistry {
     }
     const session = this.sessions.get(sessionId);
     if (session) logAgentCallAudit('disposed', session.data, this.config);
+    secretarySupervisor.cancel(sessionId);
     this.sessions.delete(sessionId);
   }
 
@@ -506,6 +508,9 @@ export class DuplicateAgentCallSessionError extends Error {
 }
 
 export class AgentCallSession {
+  private secretaryTimer?: NodeJS.Timeout;
+  private secretaryQuietUntil = 0;
+  private readonly secretaryDelivered = new Set<string>();
   private twilioWs?: WebSocket;
   private appWs?: WebSocket;
   private readonly monitorSockets = new Set<WebSocket>();
@@ -553,6 +558,27 @@ export class AgentCallSession {
   ) {
     this.timeout = setTimeout(() => void this.end('max_duration_reached'), record.maxCallDurationSeconds * 1000);
     this.timeout.unref();
+    if (isNweSecretaryProfile(record.metadata)) {
+      this.secretaryTimer = setInterval(() => this.deliverSecretaryResults(), 500);
+      this.secretaryTimer.unref();
+    }
+  }
+
+  private deliverSecretaryResults(): void {
+    if (this.record.state === 'ended' || this.record.state === 'error') { if(this.secretaryTimer) clearInterval(this.secretaryTimer);secretarySupervisor.cancel(this.sessionId);return; }
+    if (this.record.state !== 'live' || Date.now() < this.secretaryQuietUntil || !this.agent?.appendSupervisorResult) return;
+    for (const job of secretarySupervisor.list(this.sessionId)) {
+      if (job.status === 'queued' || job.status === 'claimed' || job.status === 'cancelled' || (job.status === 'completed' && !job.result)) continue;
+      const key = `${job.id}:${job.status}`;
+      if (this.secretaryDelivered.has(key)) continue;
+      const text = job.status === 'accepted'
+        ? `Background request accepted: ${job.text}. It is now being checked; keep conversing naturally.`
+        : `Original request: ${job.text}\nWorker status: ${job.status}\nEvidence: ${job.result}`;
+      if (this.agent.appendSupervisorResult({id:key, kind:job.status === 'accepted' ? 'context' : 'answer', text})) {
+        this.secretaryDelivered.add(key);
+        this.emitTranscript('operator', `[Background ${job.status}] ${job.text}`);
+      }
+    }
   }
 
   get sessionId(): string {
@@ -1231,6 +1257,8 @@ export class AgentCallSession {
     this.record.state = 'ended';
     this.record.endedAt = new Date().toISOString();
     this.record.endedReason = reason;
+    if (this.secretaryTimer) clearInterval(this.secretaryTimer);
+    secretarySupervisor.cancel(this.sessionId);
     this.agent?.close();
     this.ownerToRemote?.close();
     this.remoteToOwner?.close();
@@ -1265,6 +1293,7 @@ export class AgentCallSession {
       languageLock: this.record.languageLock ?? null,
       agentEngine: this.record.agentEngine,
       decisionMode: this.record.decisionMode,
+      secretaryJobs: isNweSecretaryProfile(this.record.metadata) ? secretarySupervisor.list(this.sessionId) : undefined,
       disclosureEnabled: this.record.disclosureEnabled,
       preparedSpokenPurpose: Boolean(this.record.spokenPurpose),
       machineDetection: this.record.machineDetection,
@@ -1438,6 +1467,15 @@ export class AgentCallSession {
       config: this.config,
       sessionId: this.sessionId,
       instructions: buildAgentInstructions(this.record),
+      conversationInstructions: isNweSecretaryProfile(this.record.metadata) ? buildAgentInstructions(this.record) : undefined,
+      backendTools: isNweSecretaryProfile(this.record.metadata) ? [{type:'function', name:'request_background', description:'Queue a requested business lookup without waiting for its result. The result arrives asynchronously. Reuse for corrections only as a new request.', strict:true, parameters:{type:'object',properties:{question:{type:'string'}},required:['question'],additionalProperties:false}}] : undefined,
+      executeBackendTool: isNweSecretaryProfile(this.record.metadata) ? async (name, args) => {
+        if (name !== 'request_background' || !args || typeof (args as any).question !== 'string') return {ok:false};
+        const id = this.currentRemoteUtteranceId || this.remoteUtteranceSequence;
+        if (!id || this.record.state !== 'live') return {ok:false,error:'call_not_live'};
+        const job = secretarySupervisor.enqueue(this.sessionId, String(this.record.metadata?.authenticatedOwnerId ?? ''), id, (args as any).question);
+        return job ? {ok:true,requestId:job.id,status:job.status,guidance:'Continue conversation; wait for accepted status before claiming work underway.'} : {ok:false,error:'supervisor_unavailable'};
+      } : undefined,
       disclosureEnabled: this.record.disclosureEnabled,
       firstUtterance: this.record.firstUtterance,
       spokenPurpose: this.record.spokenPurpose,
@@ -1625,10 +1663,8 @@ export class AgentCallSession {
 
   private observeRemoteTranscript(delta: string): void {
     const normalized = delta.replace(/\s+/g, ' ').trim();
-    if (!normalized) {
-      return;
-    }
-
+    if (!normalized) { return; }
+    this.secretaryQuietUntil = Date.now() + 2000;
     const now = Date.now();
     if (!this.currentRemoteUtterance) {
       this.currentRemoteUtteranceId = ++this.remoteUtteranceSequence;
@@ -1646,10 +1682,11 @@ export class AgentCallSession {
       this.lastHoldLivenessAt = now;
       this.agent?.appendConversationContext?.(this.operatorContinuityContext());
     }
-    this.considerOperatorQuestion(this.currentRemoteUtterance, this.currentRemoteUtteranceId);
+    if (!isNweSecretaryProfile(this.record.metadata)) this.considerOperatorQuestion(this.currentRemoteUtterance, this.currentRemoteUtteranceId);
     this.clearOperatorQuestionTimer();
-    this.operatorQuestionTimer = setTimeout(() => this.flushRemoteUtterance(), OPERATOR_QUESTION_SETTLE_MS);
+    this.operatorQuestionTimer = setTimeout(() => this.flushRemoteUtterance(), isNweSecretaryProfile(this.record.metadata) ? 1500 : OPERATOR_QUESTION_SETTLE_MS);
     this.operatorQuestionTimer.unref();
+    if (isNweSecretaryProfile(this.record.metadata)) return;
     for (const signal of conversationalAnsweringServiceSignals(normalized)) {
       this.conversationalAiSignals.add(signal);
     }
@@ -1843,6 +1880,11 @@ export class AgentCallSession {
     this.clearOperatorQuestionTimer();
     this.currentRemoteUtterance = '';
     this.currentRemoteUtteranceId = 0;
+    if (isNweSecretaryProfile(this.record.metadata)) {
+      const ownerId = String(this.record.metadata?.authenticatedOwnerId ?? '');
+      secretarySupervisor.enqueue(this.sessionId, ownerId, sourceUtteranceId, utterance);
+      return;
+    }
     const deterministic = this.considerOperatorQuestion(utterance, sourceUtteranceId);
     this.scheduleContextualQuestionObservation(utterance, deterministic, sourceUtteranceId);
   }
@@ -2404,6 +2446,7 @@ export class AgentCallSession {
     if (!normalized) {
       return;
     }
+    if (speaker === 'agent') this.secretaryQuietUntil = Date.now() + 1500;
     this.record.transcripts.push({ at: new Date().toISOString(), speaker, delta: normalized });
     this.record.transcripts.splice(0, Math.max(0, this.record.transcripts.length - MAX_TRANSCRIPT_TAIL));
     this.touch();
@@ -2629,6 +2672,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
   const holdPhrase = holdPhraseInstruction(record.languageLock);
   const bestJudgment = record.decisionMode === 'best_judgment';
   const secretaryHost = isNweSecretaryProfile(record.metadata);
+  if (secretaryHost) return secretaryInstructions(languageLock);
 
   const openingRule = record.agentEngine === 'gpt-live-1'
     ? buildGptLiveOpeningDirective({
@@ -2643,9 +2687,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
         : 'No disclosure is enabled. Begin directly from the active Mission with no greeting, announcement, or other preamble.';
 
   return [
-    secretaryHost
-      ? 'You are the NWE Secretary: a warm, energetic, concise live host. You confidently own each request, acknowledge it immediately, and keep the conversation moving while a private supervisor handles background work.'
-      : 'You are a live outbound phone-call voice agent.',
+    'You are a live outbound phone-call voice agent.',
     caller,
     target,
     languageLock,
@@ -2660,9 +2702,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'Never open with vague agency phrasing such as "I am calling on behalf of a customer", "on behalf of a client", "I will be handling this call for them", or "I am calling for someone" unless the mission explicitly says to use those exact words.',
     'The remote callee can hear everything you say. Never ask the person who requested the call for private information out loud.',
     'ABSOLUTE OPERATOR BOUNDARY: you have no spoken channel to the local operator/user during the phone call. Every spoken word goes to the remote callee. Never ask the local operator/user a question aloud.',
-    secretaryHost
-      ? 'SECRETARY HOSTING: for a new request, respond in one short, confident sentence such as "Absolutely — I have that moving now. What else can I help with?" Never mention a missing tool, worker, supervisor, API, or internal system. Do not use "one moment", "let me check", or a silent hold for a background lookup. Continue the current conversation naturally. State a result only after a verified private result arrives. If a request needs an approval, payment, legal/medical decision, or a missing caller-side fact, explain the exact confirmation or fact needed in one concise sentence.'
-      : 'Never narrate private reasoning or plans. Do not say phrases such as "let me think about what to do", "let me consider what I can share", "I am waiting for details", or "once I have them". Either say the callee-facing answer or use one allowed hold phrase and stop.',
+    'Never narrate private reasoning or plans. Either say the callee-facing answer or use one allowed hold phrase and stop.',
     'Caller-side facts include patient or child names, dates of birth, account numbers, addresses, symptoms, the caller\'s available times, prices the caller will accept, decisions, and commitments. These facts must come from the mission or private operator controls, not from the remote callee.',
     'Treat the Mission section as your working call memory, not just a goal summary. If the remote callee asks about anything already described in the mission, answer from those mission details before pausing. This includes symptoms, recent surgery, urgency, relationship to the patient, appointment purpose, availability, order details, car details, prices, addresses, and account/reference details.',
     'SINGLE ACTIVE MISSION BOUNDARY: the Mission below is the only caller-side scenario for this call. Never import or continue a subject, identity, business, warranty, offer, or storyline from another call, a training example, model memory, or a generic customer-service pattern.',

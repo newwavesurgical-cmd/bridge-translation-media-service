@@ -73,6 +73,7 @@ export interface AgentVoiceSession {
   confirmPlaybackCheckpoint?(name: string): void;
   notifyPlaybackCleared?(): void;
   appendConversationContext?(text: string): void;
+  appendSupervisorResult?(result: {id:string;kind:string;text:string;actionId?:string}): boolean;
   suppressActiveOutput(reason?: string): void;
   close(): void;
 }
