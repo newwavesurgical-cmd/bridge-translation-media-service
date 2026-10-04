@@ -78,6 +78,12 @@ export type ContextualMicroIntervention = (typeof contextualMicroInterventions)[
 export type AgentCallEngine = 'realtime' | 'gpt-live-1';
 export type AgentDecisionMode = 'ask_operator' | 'best_judgment';
 
+/** The NWE Secretary is a hosting and delegation persona. The UI supplies this
+ * metadata; the media service enforces its non-blocking conversational policy. */
+function isNweSecretaryProfile(metadata: Record<string, unknown> | undefined): boolean {
+  return metadata?.agentProfile === 'nwe-secretary';
+}
+
 export function decisionModeRequiresOperator(
   mode: AgentDecisionMode,
   text: string,
@@ -381,7 +387,7 @@ export class AgentCallRegistry {
       systemPrompt: normalizeOptional(request.systemPrompt),
       languageLock: normalizeOptional(request.languageLock),
       agentEngine: normalizeAgentEngine(request.agentEngine),
-      decisionMode: request.decisionMode === 'best_judgment' ? 'best_judgment' : 'ask_operator',
+      decisionMode: isNweSecretaryProfile(request.metadata) || request.decisionMode === 'best_judgment' ? 'best_judgment' : 'ask_operator',
       disclosureEnabled: request.disclosureEnabled ?? true,
       spokenPurpose: normalizeOptional(request.spokenPurpose),
       voice: normalizeVoice(request.voice, request.languageLock),
@@ -2622,6 +2628,7 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
   const spokenStyle = languageStyleInstruction(record.languageLock);
   const holdPhrase = holdPhraseInstruction(record.languageLock);
   const bestJudgment = record.decisionMode === 'best_judgment';
+  const secretaryHost = isNweSecretaryProfile(record.metadata);
 
   const openingRule = record.agentEngine === 'gpt-live-1'
     ? buildGptLiveOpeningDirective({
@@ -2636,7 +2643,9 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
         : 'No disclosure is enabled. Begin directly from the active Mission with no greeting, announcement, or other preamble.';
 
   return [
-    'You are a live outbound phone-call voice agent.',
+    secretaryHost
+      ? 'You are the NWE Secretary: a warm, energetic, concise live host. You confidently own each request, acknowledge it immediately, and keep the conversation moving while a private supervisor handles background work.'
+      : 'You are a live outbound phone-call voice agent.',
     caller,
     target,
     languageLock,
@@ -2651,7 +2660,9 @@ export function buildAgentInstructions(record: AgentCallRecord): string {
     'Never open with vague agency phrasing such as "I am calling on behalf of a customer", "on behalf of a client", "I will be handling this call for them", or "I am calling for someone" unless the mission explicitly says to use those exact words.',
     'The remote callee can hear everything you say. Never ask the person who requested the call for private information out loud.',
     'ABSOLUTE OPERATOR BOUNDARY: you have no spoken channel to the local operator/user during the phone call. Every spoken word goes to the remote callee. Never ask the local operator/user a question aloud.',
-    'Never narrate private reasoning or plans. Do not say phrases such as "let me think about what to do", "let me consider what I can share", "I am waiting for details", or "once I have them". Either say the callee-facing answer or use one allowed hold phrase and stop.',
+    secretaryHost
+      ? 'SECRETARY HOSTING: for a new request, respond in one short, confident sentence such as "Absolutely — I have that moving now. What else can I help with?" Never mention a missing tool, worker, supervisor, API, or internal system. Do not use "one moment", "let me check", or a silent hold for a background lookup. Continue the current conversation naturally. State a result only after a verified private result arrives. If a request needs an approval, payment, legal/medical decision, or a missing caller-side fact, explain the exact confirmation or fact needed in one concise sentence.'
+      : 'Never narrate private reasoning or plans. Do not say phrases such as "let me think about what to do", "let me consider what I can share", "I am waiting for details", or "once I have them". Either say the callee-facing answer or use one allowed hold phrase and stop.',
     'Caller-side facts include patient or child names, dates of birth, account numbers, addresses, symptoms, the caller\'s available times, prices the caller will accept, decisions, and commitments. These facts must come from the mission or private operator controls, not from the remote callee.',
     'Treat the Mission section as your working call memory, not just a goal summary. If the remote callee asks about anything already described in the mission, answer from those mission details before pausing. This includes symptoms, recent surgery, urgency, relationship to the patient, appointment purpose, availability, order details, car details, prices, addresses, and account/reference details.',
     'SINGLE ACTIVE MISSION BOUNDARY: the Mission below is the only caller-side scenario for this call. Never import or continue a subject, identity, business, warranty, offer, or storyline from another call, a training example, model memory, or a generic customer-service pattern.',

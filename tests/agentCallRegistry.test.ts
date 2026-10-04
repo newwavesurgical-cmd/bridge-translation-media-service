@@ -1903,3 +1903,19 @@ describe('agent-call HTTP endpoint wiring', () => {
     ]);
   });
 });
+
+describe('NWE Secretary host profile', () => {
+  it('uses non-blocking best judgment and explicit hosting instructions', () => {
+    const session = new AgentCallRegistry(config).create({
+      to: '+15551230000',
+      missionPrompt: 'Be ready to help Alex with any NWE request.',
+      decisionMode: 'ask_operator',
+      metadata: { agentProfile: 'nwe-secretary' }
+    });
+    expect(session.data.decisionMode).toBe('best_judgment');
+    const instructions = buildAgentInstructions(session.data);
+    expect(instructions).toContain('You are the NWE Secretary');
+    expect(instructions).toContain('Absolutely — I have that moving now. What else can I help with?');
+    expect(instructions).toContain('Never mention a missing tool, worker, supervisor, API, or internal system.');
+  });
+});
