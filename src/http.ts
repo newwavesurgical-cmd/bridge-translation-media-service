@@ -1,3 +1,4 @@
+import { secretaryWeb, secretaryWebOwner, webSchema } from './secretaryWeb.js';
 import http from 'node:http';
 import {verifySecretaryWorker} from './secretaryWorkerAuth.js';
 import { secretarySupervisor } from './secretarySupervisor.js';
@@ -245,10 +246,15 @@ export function createBridgeMediaServer(config: AppConfig) {
         });
       }
 
+      if (req.method === 'POST' && url.pathname === '/secretary-web') {
+        try { const owner=await secretaryWebOwner(req); return sendJson(res,200,secretaryWeb.handle(owner,webSchema.parse(await readJson(req)))); }
+        catch(error) { return sendJson(res,403,{error:error instanceof Error ? error.message : 'web_request_failed'}); }
+      }
+
       if (req.method === 'POST' && url.pathname === '/secretary-worker/poll') {
         const envelope = await readJson(req);
         if (!verifySecretaryWorker(envelope)) return sendJson(res, 401, {error:'unauthorized'});
-        const body = z.object({ ownerIds: z.array(z.string().min(1).max(200)).min(1).max(10), rehearsal: z.object({id:z.string().uuid(),ownerId:z.string().min(1).max(200),text:z.string().min(1).max(6000)}).optional(), inspectId:z.string().uuid().optional(), acceptedId: z.string().uuid().optional(), claim: z.boolean().default(false), result: z.object({id: z.string().uuid(), status: z.enum(['completed','failed']), text: z.string().max(12000)}).optional() }).parse(JSON.parse(envelope.payload));
+        const body = z.object({ ownerIds: z.array(z.string().min(1).max(200)).min(1).max(10), rehearsal: z.object({id:z.string().uuid(),ownerId:z.string().min(1).max(200),text:z.string().min(1).max(6000)}).optional(), webInspectId:z.string().uuid().optional(), webList:z.boolean().optional(), webControl:z.object({sessionId:z.string().uuid(),text:z.string().min(1).max(2000)}).optional(), inspectId:z.string().uuid().optional(), acceptedId: z.string().uuid().optional(), claim: z.boolean().default(false), result: z.object({id: z.string().uuid(), status: z.enum(['completed','failed']), text: z.string().max(12000)}).optional() }).parse(JSON.parse(envelope.payload));
         secretarySupervisor.heartbeat(body.ownerIds);
         if (body.acceptedId) secretarySupervisor.accept(body.acceptedId);
         let acceptedResult = false;
@@ -258,7 +264,7 @@ export function createBridgeMediaServer(config: AppConfig) {
         }
         const rehearsal = body.rehearsal && body.ownerIds.includes(body.rehearsal.ownerId)
           ? secretarySupervisor.enqueue(`rehearsal_${body.rehearsal.id}`,body.rehearsal.ownerId,1,body.rehearsal.text) : null;
-        return sendJson(res, 200, {ok: true, acceptedResult, rehearsal, inspected:body.inspectId ? secretarySupervisor.inspect(body.inspectId) : null, job: body.claim ? secretarySupervisor.claim(body.ownerIds) : null});
+        return sendJson(res, 200, {ok: true, webSessions: body.webList || body.webInspectId ? secretaryWeb.inspect(body.webInspectId) : undefined, webControl: body.webControl ? secretaryWeb.control(body.webControl.sessionId,body.webControl.text) : undefined, acceptedResult, rehearsal, inspected:body.inspectId ? secretarySupervisor.inspect(body.inspectId) : null, job: body.claim ? secretarySupervisor.claim(body.ownerIds) : null});
       }
       if (req.method === 'GET' && url.pathname === '/secretary-worker/status') {
         if (!authorized(config, req)) return sendJson(res, 401, {error:'unauthorized'});
