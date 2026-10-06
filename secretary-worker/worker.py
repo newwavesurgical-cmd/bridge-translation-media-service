@@ -24,6 +24,7 @@ sys.path.insert(0, str(GATEWAY))
 from nwe_codex_telegram import CodexAppServer, EXECUTIVE_ROUTES, executive_route_for_text, build_executive_developer_instructions
 
 from post_call import PostCallProcessor
+from report_publish import ReportPublisher
 
 STATE = Path.home()/'.codex/nwe-secretary-worker'
 
@@ -62,6 +63,7 @@ class Worker:
         self.codex=CodexAppServer()
         self.tasks=set()
         self.post_calls=PostCallProcessor(self)
+        self.report_publisher=ReportPublisher(self)
 
     def api_sync(self, **body):
         payload=json.dumps({'ownerIds':self.config['ownerIds'],**body,'timestamp':int(time.time()*1000),'nonce':secrets.token_hex(20)},separators=(',',':'))
@@ -120,6 +122,7 @@ EMAIL EXECUTION: Read /Users/nweassistant/.codex/skills/nwe-email-send/SKILL.md.
                     if not self.codex.running: raise RuntimeError("specialist_runtime_unavailable")
                     response=await self.api(claim=len(self.tasks)<3,webList=True,postCallList=True)
                     self.post_calls.ingest(response.get('postCalls',[]) or [])
+                    self.report_publisher.tick()
                     for session in response.get('webSessions',[]) or []:
                         for fragment in session.get('transcript',[]):
                             self.db.execute('INSERT OR IGNORE INTO web_transcripts VALUES(?,?,?,?,?,?)',(session['id'],fragment['id'],fragment['role'],fragment['text'],fragment['start'],fragment['end']))
@@ -131,6 +134,9 @@ EMAIL EXECUTION: Read /Users/nweassistant/.codex/skills/nwe-email-send/SKILL.md.
                     print(json.dumps({'event':'poll_error','errorType':type(exc).__name__}),flush=True)
                 await asyncio.sleep(2)
         finally:
+            if self.report_publisher.task:
+                self.report_publisher.task.cancel()
+                await asyncio.gather(self.report_publisher.task,return_exceptions=True)
             if self.post_calls.task:
                 self.post_calls.task.cancel()
                 await asyncio.gather(self.post_calls.task,return_exceptions=True)
