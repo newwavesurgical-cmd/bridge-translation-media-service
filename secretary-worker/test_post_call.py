@@ -1,7 +1,7 @@
 import unittest
 import tempfile
 from pathlib import Path
-from post_call import speaker_stats, save_json, PostCallProcessor
+from post_call import speaker_stats, save_json, PostCallProcessor, render_summary
 from types import SimpleNamespace
 
 class PostCallTests(unittest.TestCase):
@@ -21,4 +21,18 @@ class PostCallTests(unittest.TestCase):
    processor.ingest([{'sessionId':'test','state':'live','transcripts':[]}])
    self.assertIsNone(processor.task)
    self.assertTrue((Path(d)/'test/live-transcript.json').exists())
+ def test_report_rendering_preserves_tables_without_active_markup(self):
+  rendered=render_summary('| Item | Owner |\n|---|---|\n| Review | Unassigned |\n\n<script>alert(1)</script> [bad](javascript:alert(1))')
+  self.assertIn('<table>',rendered)
+  self.assertNotIn('<script>',rendered)
+  self.assertNotIn('href=',rendered)
+ def test_terminal_snapshot_cannot_regress(self):
+  with tempfile.TemporaryDirectory() as d:
+   p=Path(d)/'test';p.mkdir()
+   save_json(p/'live-transcript.json',{'sessionId':'test','state':'ended','transcripts':[{'delta':'final'}]})
+   save_json(p/'processing.json',{'terminal':True})
+   processor=PostCallProcessor(SimpleNamespace(config={'postCallDirectory':d}))
+   processor.ingest([{'sessionId':'test','state':'live','transcripts':[]}])
+   import json
+   self.assertEqual(json.loads((p/'live-transcript.json').read_text())['state'],'ended')
 if __name__=='__main__':unittest.main()
