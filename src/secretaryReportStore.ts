@@ -10,7 +10,7 @@ import {createRecordingAccess} from './twilio/recordings.js';
 
 const id=z.string().regex(/^[a-zA-Z0-9_-]{1,160}$/);
 const recording=z.object({sid:z.string().regex(/^RE[a-fA-F0-9]{32}$/),durationSeconds:z.number().nullable().optional(),channels:z.number().nullable().optional()});
-export const reportSchema=z.object({sessionId:id,ownerId:z.string().min(1).max(200),updatedAt:z.number().finite(),createdAt:z.string(),endedAt:z.string().optional(),state:z.string().max(80),title:z.string().max(300),summary:z.string().max(1000000),liveTranscript:z.string().max(3000000),audioTranscript:z.string().max(3000000),limitations:z.array(z.string().max(2000)).max(100),callSid:z.string().regex(/^CA[a-fA-F0-9]{32}$/).nullable().optional(),recordings:z.array(recording).max(100)});
+export const reportSchema=z.object({sessionId:id,ownerId:z.string().min(1).max(200),updatedAt:z.number().finite(),createdAt:z.string(),endedAt:z.string().optional(),state:z.string().max(80),title:z.string().max(300),summary:z.string().max(1000000),summaryHtml:z.string().max(2000000).optional(),liveTranscript:z.string().max(3000000),audioTranscript:z.string().max(3000000),limitations:z.array(z.string().max(2000)).max(100),callSid:z.string().regex(/^CA[a-fA-F0-9]{32}$/).nullable().optional(),recordings:z.array(recording).max(100)});
 type Report=z.infer<typeof reportSchema>;
 const chunkSchema=z.object({ownerId:z.string().min(1).max(200),sessionId:id,hash:z.string().regex(/^[a-f0-9]{64}$/),index:z.number().int().min(0).max(999),total:z.number().int().min(1).max(1000),content:z.string().max(8000)});
 const sha=(s:string)=>createHash('sha256').update(s).digest('hex');

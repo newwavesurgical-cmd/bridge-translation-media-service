@@ -7,6 +7,7 @@ from pathlib import Path
 import secrets
 import time
 import urllib.request
+from post_call import render_summary
 
 
 def build_report(folder):
@@ -24,7 +25,7 @@ def build_report(folder):
     # mtime of source files changes only for actual content changes; hashes de-duplicate publication.
     content={'sessionId':source['sessionId'],'ownerId':source['ownerId'],'createdAt':source.get('createdAt') or '',
              'endedAt':source.get('endedAt') or '', 'state':journal.get('state','pending'),
-             'title':source.get('targetName') or 'NWE Secretary call','summary':summary,'liveTranscript':live,
+             'title':source.get('targetName') or 'NWE Secretary call','summary':summary,'summaryHtml':render_summary(summary),'liveTranscript':live,
              'audioTranscript':audio,'limitations':limitations,'callSid':source.get('callSid'),
              'recordings':[{k:r[k] for k in ('sid','durationSeconds','channels') if k in r} for r in recordings]}
     # Do not use mirrored snapshot mtime (rewritten by each poll) as a version.
