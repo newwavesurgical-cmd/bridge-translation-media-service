@@ -19,6 +19,17 @@ describe('secretary asynchronous jobs', () => {
     expect(q.complete(a.id,'completed','verified report')?.id).toBe(a.id);
     expect(q.complete(a.id,'completed','different')).toBeNull();
   });
+  it('keeps complete caller context with an email fragment and isolates snapshots', () => {
+    const q=new SecretarySupervisor(()=>100); q.heartbeat(['alex']);
+    const context=[{speaker:'remote',text:'Lifetime sales for Gundersen Lutheran Hospital'}, {speaker:'remote',text:'Monthly cases with three and six month moving averages'}];
+    const job=q.enqueue('s','alex',7,'And email it to me',context)!;
+    context[0].text='changed';
+    const claimed=q.claim(['alex'])!;
+    expect(claimed.id).toBe(job.id);
+    expect(claimed.context?.[0].text).toContain('Gundersen');
+    expect(claimed.context?.[1].text).toContain('moving averages');
+    expect(q.enqueue('other','alex',7,'email it')?.context).toEqual([]);
+  });
   it('never reclaims or publishes cancelled work and isolates sessions', () => {
     const q=new SecretarySupervisor(()=>100);q.heartbeat(['alex']);
     const a=q.enqueue('s','alex',1,'sales')!;q.claim(['alex']);q.accept(a.id);

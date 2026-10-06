@@ -22,3 +22,11 @@ Use the management gateway Python environment, which already has Codex and crypt
 - Real local CRM rehearsal returned Dr. Ricardo Estape, Miami, with a live CRM record citation despite an intervening weather comment.
 - Real local CFO rehearsal returned New Wave Endo-Surgical Corp and realm 9341455977130176 from live QBO connection/company reads.
 - These are no-dial worker tests; they do not prove phone audio quality.
+
+## Owner-editable behavior (October 6)
+
+`../secretary-policy.json` is the versioned behavior policy. `conversationRules` adds short rules to the shared phone/web secretary prompt; `workerRules` supplies CFO/source/chart/email details to Codex. Change these instead of adding a long call-specific test mission. Voice-server changes require deployment and a new session; the local worker reads policy for each new job. Personality remains in `src/secretarySupervisor.ts`.
+
+Hospital sales default to NWE documented lifetime M-Close cases, SKU 27-101, monthly cases and trailing 3/6-month averages. CFO resolves hospital aliases and historical coverage. Caller transcript context accompanies phone and web jobs so an email fragment refers to the current deliverable, not a stale completed task. The exact requested SKU is preserved for verification when speech transcription differs.
+
+October 6 regression checks cover context snapshots/session isolation, plain lifetime-sales wording, SAGES research fallback, surgeon routing, chart-email followups, social suppression and fixed-sender email idempotency. The five-minute report timeout and voice breakups observed in the live call are not claimed repaired by these prompt/context changes.

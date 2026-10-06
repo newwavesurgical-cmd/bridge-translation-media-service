@@ -1473,7 +1473,7 @@ export class AgentCallSession {
         if (name !== 'request_background' || !args || typeof (args as any).question !== 'string') return {ok:false};
         const id = this.currentRemoteUtteranceId || this.remoteUtteranceSequence;
         if (!id || this.record.state !== 'live') return {ok:false,error:'call_not_live'};
-        const job = secretarySupervisor.enqueue(this.sessionId, String(this.record.metadata?.authenticatedOwnerId ?? ''), id, (args as any).question);
+        const job = secretarySupervisor.enqueue(this.sessionId, String(this.record.metadata?.authenticatedOwnerId ?? ''), id, (args as any).question, this.secretaryContext());
         return job ? {ok:true,requestId:job.id,status:job.status,guidance:'Continue conversation; wait for accepted status before claiming work underway.'} : {ok:false,error:'supervisor_unavailable'};
       } : undefined,
       disclosureEnabled: this.record.disclosureEnabled,
@@ -1873,6 +1873,10 @@ export class AgentCallSession {
     this.emitTranscript('agent', delta);
   }
 
+  private secretaryContext(): {speaker:string;text:string}[] {
+    return this.record.transcripts.filter(t=>t.speaker !== 'operator').slice(-80).map(t=>({speaker:t.speaker,text:t.delta}));
+  }
+
   private flushRemoteUtterance(): void {
     const utterance = this.currentRemoteUtterance.trim();
     if (!utterance) return;
@@ -1882,7 +1886,7 @@ export class AgentCallSession {
     this.currentRemoteUtteranceId = 0;
     if (isNweSecretaryProfile(this.record.metadata)) {
       const ownerId = String(this.record.metadata?.authenticatedOwnerId ?? '');
-      secretarySupervisor.enqueue(this.sessionId, ownerId, sourceUtteranceId, utterance);
+      secretarySupervisor.enqueue(this.sessionId, ownerId, sourceUtteranceId, utterance, this.secretaryContext());
       return;
     }
     const deterministic = this.considerOperatorQuestion(utterance, sourceUtteranceId);

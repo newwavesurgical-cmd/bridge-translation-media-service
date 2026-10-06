@@ -48,7 +48,7 @@ export class SecretaryWebRegistry {
    let n=s.requests.get(body.requestId);
    if(n===undefined) {n=s.requests.size+1;s.requests.set(body.requestId,n);}
    const text=(body.guest ? 'GUEST REQUEST: Read-only research only. Never send emails or modify external systems from a guest request; return an owner-approval proposal.\n' : '') + body.text;
-   secretarySupervisor.enqueue('web_'+s.id,owner,n,text);
+   secretarySupervisor.enqueue('web_'+s.id,owner,n,text,s.transcript.slice(-80).map(f=>({speaker:f.role,text:f.text}))); 
   }
   if(body.action==='close') s.closed=true;
   return {ok:true,closed:s.closed, capability:secretarySupervisor.signal(owner),jobs:secretarySupervisor.list('web_'+s.id),controls:s.controls,instructions:secretaryInstructions('Speak English unless Alex requests another language.')};
