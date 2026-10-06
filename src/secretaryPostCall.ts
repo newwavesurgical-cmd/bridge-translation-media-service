@@ -13,7 +13,7 @@ export function postCallSnapshot(r: AgentCallRecord) {
   if (!['nwe_secretary','nwe-secretary'].includes(String(r.metadata?.agentProfile))) return null;
   const ownerId = String(r.metadata?.authenticatedOwnerId ?? '');
   if (!ownerId) return null;
-  return { sessionId:r.sessionId, ownerId, callSid:r.callSid, targetName:r.targetName,
+  return { sessionId:r.sessionId, ownerId, callSid:r.callSid, to:r.to, targetName:r.targetName,
     createdAt:r.createdAt, endedAt:r.endedAt, endedReason:r.endedReason, state:r.state,
     transcripts:r.transcripts, provenance:'bridge_live_transcript', transcriptComplete:true };
 }
@@ -51,7 +51,7 @@ export class SecretaryPostCalls {
     if(call.accountSid!==config.TWILIO_ACCOUNT_SID || call.to!==input.to || !['completed','failed','busy','no-answer','canceled'].includes(call.status)) throw new Error('recovery_call_mismatch');
     const existing=this.list(owners).find(r=>r.sessionId===input.sessionId);
     if(existing) return existing;
-    const record={sessionId:input.sessionId,ownerId:input.ownerId,callSid:input.callSid,targetName:undefined,createdAt:call.startTime?.toISOString()||call.dateCreated.toISOString(),endedAt:call.endTime?.toISOString(),endedReason:'recovered_'+call.status,state:'ended' as const,transcripts:[],provenance:'provider_verified_recovery_audio; live transcript unavailable',transcriptComplete:false};
+    const record={sessionId:input.sessionId,ownerId:input.ownerId,callSid:input.callSid,to:input.to,targetName:undefined,createdAt:call.startTime?.toISOString()||call.dateCreated.toISOString(),endedAt:call.endTime?.toISOString(),endedReason:'recovered_'+call.status,state:'ended' as const,transcripts:[],provenance:'provider_verified_recovery_audio; live transcript unavailable',transcriptComplete:false};
     this.save(record);return record;
   }
   private pending=new Map<string,Promise<unknown>>();
