@@ -1,3 +1,4 @@
+import { handleSecretaryReports } from './secretaryReportStore.js';
 import { secretaryPostCalls } from './secretaryPostCall.js';
 import { secretaryWeb, secretaryWebOwner, webSchema } from './secretaryWeb.js';
 import http from 'node:http';
@@ -194,6 +195,7 @@ export function createBridgeMediaServer(config: AppConfig) {
     try {
       const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
       if (await crmVoice.handle(req, res, url)) return;
+      if (await handleSecretaryReports(req, res, url, config)) return;
       if (req.method === 'OPTIONS') {
         return sendJson(res, 200, { ok: true });
       }
