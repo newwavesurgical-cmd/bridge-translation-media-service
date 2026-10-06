@@ -449,7 +449,7 @@ on a shared conference channel are analyzed acoustically, with uncertain names
 left anonymous. Silence is measured; its cause is not assumed. Missing recordings
 are retried ten times, then produce an explicitly limited caption-only report.
 Diarization failure yields an explicit limitation instead of fabricated labels.
-Uploads exceeding 25 MiB require chunking and are labeled unavailable for now.
+Large recordings are split into ten-minute WAV chunks under the upload limit; completed chunk transcriptions are cached for retry. Speaker labels across separate chunks remain explicitly unverified.
 Phone/Zoom dial-in calls using this Bridge are covered; browser-only live-avatar
 sessions do not yet upload a meeting recording through this path.
 

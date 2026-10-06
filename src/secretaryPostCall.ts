@@ -1,3 +1,6 @@
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+const runFile=promisify(execFile);
 import twilio from 'twilio';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -63,12 +66,37 @@ export class SecretaryPostCalls {
       const results=[];
       for(const row of rows) {
         const audio=await api.media(r.callSid!,row.sid,'mp3');
-        if(audio.length>25*1024*1024) throw new Error('recording_requires_chunking');
-        const form=new FormData(); form.append('file',new Blob([new Uint8Array(audio)],{type:'audio/mpeg'}),row.sid+'.mp3');
-        form.append('model','gpt-4o-transcribe-diarize'); form.append('response_format','diarized_json'); form.append('chunking_strategy','auto');
-        const response=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${config.OPENAI_API_KEY}`},body:form,signal:AbortSignal.timeout(600000)});
-        if(!response.ok) throw new Error(`diarization_http_${response.status}`);
-        results.push({recordingSid:row.sid,durationSeconds:row.durationSeconds,channels:row.channels,transcript:await response.json()});
+        const parts:Array<{audio:Buffer;offset:number;index:number}>=[];
+        if(audio.length<=24_000_000) parts.push({audio,offset:0,index:0});
+        else {
+          const chunkDir=this.file(id)+'.'+row.sid+'.chunks'; fs.mkdirSync(chunkDir,{recursive:true,mode:0o700});
+          const source=path.join(chunkDir,'source.mp3');fs.writeFileSync(source,audio,{mode:0o600});
+          await runFile('ffmpeg',['-v','error','-y','-i',source,'-ac','1','-ar','16000','-c:a','pcm_s16le','-f','segment','-segment_time','600','-reset_timestamps','1',path.join(chunkDir,'part-%05d.wav')],{timeout:600000});
+          let offset=0;
+          for(const file of fs.readdirSync(chunkDir).filter(x=>/^part-[0-9]+\.wav$/.test(x)).sort()) {
+            const full=path.join(chunkDir,file);fs.chmodSync(full,0o600);
+            const probe=await runFile('ffprobe',['-v','error','-show_entries','format=duration','-of','default=noprint_wrappers=1:nokey=1',full]);
+            parts.push({audio:fs.readFileSync(full),offset,index:parts.length+1});offset+=Number(probe.stdout.trim());
+          }
+          if(!parts.length) throw new Error('audio_chunking_failed');
+        }
+        const segments:unknown[]=[];
+        for(const part of parts) {
+          if(part.audio.length>25_000_000) throw new Error('audio_chunk_exceeds_limit');
+          const partCache=this.file(id)+'.'+row.sid+'.'+part.index+'.transcript';
+          let raw:any;
+          if(fs.existsSync(partCache)) raw=JSON.parse(fs.readFileSync(partCache,'utf8'));
+          else {
+            const form=new FormData(); form.append('file',new Blob([new Uint8Array(part.audio)],{type:part.index?'audio/wav':'audio/mpeg'}),part.index?'part.wav':'call.mp3');
+            form.append('model','gpt-4o-transcribe-diarize'); form.append('response_format','diarized_json'); form.append('chunking_strategy','auto');
+            const response=await fetch('https://api.openai.com/v1/audio/transcriptions',{method:'POST',headers:{Authorization:`Bearer ${config.OPENAI_API_KEY}`},body:form,signal:AbortSignal.timeout(600000)});
+            if(!response.ok) throw new Error(`diarization_http_${response.status}`);
+            raw=await response.json(); if(!Array.isArray(raw.segments)) throw new Error('diarized_segments_missing');
+            fs.writeFileSync(partCache,JSON.stringify(raw),{mode:0o600});
+          }
+          segments.push(...raw.segments.map((x:any)=>({...x,start:x.start+part.offset,end:x.end+part.offset,speaker:part.index?`chunk${part.index}:${x.speaker}`:x.speaker})));
+        }
+        results.push({recordingSid:row.sid,durationSeconds:row.durationSeconds,channels:row.channels,chunks:parts.length,speakerContinuity:parts.length>1?'chunk-local; do not infer cross-chunk identity':'whole-recording clusters',transcript:{segments}});
       }
       const result={model:'gpt-4o-transcribe-diarize',speakerIdentity:'anonymous; labels are not verified names',recordings:results};
       fs.writeFileSync(cache,JSON.stringify(result),{mode:0o600}); return result;

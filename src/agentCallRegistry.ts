@@ -488,7 +488,8 @@ export class AgentCallRegistry {
     }
     const session = this.sessions.get(sessionId);
     if (session) {
-      const snapshot=postCallSnapshot(session.data); if(snapshot) secretaryPostCalls.save(snapshot);
+      try { const snapshot=postCallSnapshot(session.data); if(snapshot) secretaryPostCalls.save(snapshot); }
+      catch { console.error('secretary_post_call_archive_failed'); }
       logAgentCallAudit('disposed', session.data, this.config);
     }
     secretarySupervisor.cancel(sessionId);
