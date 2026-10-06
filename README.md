@@ -459,3 +459,21 @@ before mirroring can lose a caption snapshot; recording recovery remains possibl
 with signed worker recovery after provider account, destination and ended-state
 verification. `transcriptComplete=false` identifies recovered sessions without live
 captions. This is not a claim of cloud-durable storage across Render replacements.
+
+### Private report history
+
+The signed Mac worker mirrors report status, source transcripts and the sanitized
+executive document into the Bridge account's authenticated `/call-history` view.
+The browser never supplies an owner email: server functions derive it from verified
+Supabase claims. Backend reads require the service credential; worker publication
+uses Ed25519-signed chunks with a full-content hash and owner scope. A report is
+visible only after every chunk is verified. Older versions cannot replace newer
+ones, and the worker republishes local reports after a backend host replacement.
+
+The history page offers the formatted report, original live transcript with
+operator notes, audio-derived speaker transcript and original MP3 download.
+HTML renders inside a script-disabled, network-disabled iframe. Signing out clears
+report content and ignores late responses from the previous account. The old
+browser-local caption archive remains separately labeled. No report is emailed
+automatically. Durable originals remain in the private Mac archive; browser-only
+avatar/meeting recording ingestion remains outside this phone/dial-in flow.
