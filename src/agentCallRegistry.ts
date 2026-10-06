@@ -1,3 +1,4 @@
+import { secretaryPostCalls, postCallSnapshot } from './secretaryPostCall.js';
 import WebSocket from 'ws';
 import { secretarySupervisor, secretaryInstructions } from './secretarySupervisor.js';
 import type { AppConfig } from './config.js';
@@ -486,9 +487,16 @@ export class AgentCallRegistry {
       this.recentDiagnostics.splice(8);
     }
     const session = this.sessions.get(sessionId);
-    if (session) logAgentCallAudit('disposed', session.data, this.config);
+    if (session) {
+      const snapshot=postCallSnapshot(session.data); if(snapshot) secretaryPostCalls.save(snapshot);
+      logAgentCallAudit('disposed', session.data, this.config);
+    }
     secretarySupervisor.cancel(sessionId);
     this.sessions.delete(sessionId);
+  }
+
+  archiveSecretaryCalls(): void {
+    for (const session of this.sessions.values()) { const snapshot=postCallSnapshot(session.data); if(snapshot) secretaryPostCalls.save(snapshot); }
   }
 
   listDiagnostics(): Array<Record<string, unknown>> {
@@ -2452,7 +2460,7 @@ export class AgentCallSession {
     }
     if (speaker === 'agent') this.secretaryQuietUntil = Date.now() + 1500;
     this.record.transcripts.push({ at: new Date().toISOString(), speaker, delta: normalized });
-    this.record.transcripts.splice(0, Math.max(0, this.record.transcripts.length - MAX_TRANSCRIPT_TAIL));
+    if (!isNweSecretaryProfile(this.record.metadata)) this.record.transcripts.splice(0, Math.max(0, this.record.transcripts.length - MAX_TRANSCRIPT_TAIL));
     this.touch();
   }
 

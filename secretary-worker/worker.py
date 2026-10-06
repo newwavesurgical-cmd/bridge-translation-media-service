@@ -23,6 +23,8 @@ GATEWAY = Path('/Users/nweassistant/Documents/ChatGPT/Management Telegram Codex'
 sys.path.insert(0, str(GATEWAY))
 from nwe_codex_telegram import CodexAppServer, EXECUTIVE_ROUTES, executive_route_for_text, build_executive_developer_instructions
 
+from post_call import PostCallProcessor
+
 STATE = Path.home()/'.codex/nwe-secretary-worker'
 
 
@@ -59,13 +61,14 @@ class Worker:
         self.signing_key=serialization.load_pem_private_key(Path(config['signingKey']).read_bytes(),None)
         self.codex=CodexAppServer()
         self.tasks=set()
+        self.post_calls=PostCallProcessor(self)
 
     def api_sync(self, **body):
         payload=json.dumps({'ownerIds':self.config['ownerIds'],**body,'timestamp':int(time.time()*1000),'nonce':secrets.token_hex(20)},separators=(',',':'))
         envelope={'payload':payload,'signature':base64.b64encode(self.signing_key.sign(payload.encode())).decode()}
         request=urllib.request.Request(self.config['url'].rstrip('/')+'/secretary-worker/poll',
             data=json.dumps(envelope).encode(),headers={'content-type':'application/json'},method='POST')
-        with urllib.request.urlopen(request,timeout=15) as response:
+        with urllib.request.urlopen(request,timeout=660 if body.get('postCallTranscribe') else 90 if body.get('postCallMedia') else 15) as response:
             return json.load(response)
 
     async def api(self, **body):
@@ -115,7 +118,8 @@ EMAIL EXECUTION: Read /Users/nweassistant/.codex/skills/nwe-email-send/SKILL.md.
             while True:
                 try:
                     if not self.codex.running: raise RuntimeError("specialist_runtime_unavailable")
-                    response=await self.api(claim=len(self.tasks)<3,webList=True)
+                    response=await self.api(claim=len(self.tasks)<3,webList=True,postCallList=True)
+                    self.post_calls.ingest(response.get('postCalls',[]) or [])
                     for session in response.get('webSessions',[]) or []:
                         for fragment in session.get('transcript',[]):
                             self.db.execute('INSERT OR IGNORE INTO web_transcripts VALUES(?,?,?,?,?,?)',(session['id'],fragment['id'],fragment['role'],fragment['text'],fragment['start'],fragment['end']))
@@ -127,6 +131,9 @@ EMAIL EXECUTION: Read /Users/nweassistant/.codex/skills/nwe-email-send/SKILL.md.
                     print(json.dumps({'event':'poll_error','errorType':type(exc).__name__}),flush=True)
                 await asyncio.sleep(2)
         finally:
+            if self.post_calls.task:
+                self.post_calls.task.cancel()
+                await asyncio.gather(self.post_calls.task,return_exceptions=True)
             await self.codex.close()
 
 

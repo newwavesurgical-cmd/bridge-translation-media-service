@@ -427,3 +427,35 @@ Bridge receives transcript deltas:
 - The browser app still needs to stream microphone PCM16/24k to `appStreamUrl` and play returned PCM16 audio.
 - Hangup currently closes local router sockets; production should also complete the Twilio call through REST.
 - DTMF is generated as in-band audio for IVR testing.
+
+### Secretary post-call executive reports
+
+NWE Secretary phone sessions retain the complete live transcript separately from
+ordinary capped caption tails. The signed worker mirrors private snapshots every
+poll and, after terminal status, downloads all completed Twilio recordings.
+It measures low-energy intervals (-40 dB, at least 2 seconds), requests original-
+language speaker-labeled transcription with `gpt-4o-transcribe-diarize`, and uses
+an isolated read-only Codex task to produce a detailed executive report. Private
+operator notes are separately labeled and never treated as spoken audio.
+
+Reports, raw audio, hashes, speaker segments, full live audit, and processing state
+are saved in `~/Documents/live agent/Secretary Call Reports/<session>/` with private
+permissions. `report.html` opens locally and links recordings. The editable report
+instructions live in `secretary-worker/post_call.py`. Install `imageio-ffmpeg` in
+the worker venv. Reports do not send emails or execute action items automatically.
+
+Speaker labels identify voice clusters, not verified identities. Multiple people
+on a shared conference channel are analyzed acoustically, with uncertain names
+left anonymous. Silence is measured; its cause is not assumed. Missing recordings
+are retried ten times, then produce an explicitly limited caption-only report.
+Diarization failure yields an explicit limitation instead of fabricated labels.
+Uploads exceeding 25 MiB require chunking and are labeled unavailable for now.
+Phone/Zoom dial-in calls using this Bridge are covered; browser-only live-avatar
+sessions do not yet upload a meeting recording through this path.
+
+The server spool is host-local (`SECRETARY_POST_CALL_DIR`, default temp directory),
+so the Mac worker must remain online for durable mirroring. A host replacement
+before mirroring can lose a caption snapshot; recording recovery remains possible
+with signed worker recovery after provider account, destination and ended-state
+verification. `transcriptComplete=false` identifies recovered sessions without live
+captions. This is not a claim of cloud-durable storage across Render replacements.
